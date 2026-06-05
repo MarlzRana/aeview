@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Offline stub of the `claude` CLI for Tier-1 tests.
+
+Emits the same single-JSON-object shape the real CLI produces in --print mode, with a
+schema-valid object in `structured_output`. Behavior is switched by AEVIEW_STUB_MODE:
+  ok        -> needs-attention with one finding (default)
+  approve   -> approve, no findings
+  malformed -> structured_output missing a required field (drives schema-validation fail)
+  error     -> is_error true
+  notjson   -> non-JSON on stdout
+"""
+
+import json
+import os
+import sys
+
+mode = os.environ.get("AEVIEW_STUB_MODE", "ok")
+
+if mode == "notjson":
+    sys.stdout.write("not json at all")
+    sys.exit(0)
+
+base = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "api_error_status": None,
+    "result": "",
+    "total_cost_usd": 0.0123,
+    "usage": {"input_tokens": 100, "output_tokens": 50},
+}
+
+if mode == "error":
+    base["is_error"] = True
+    base["api_error_status"] = "overloaded"
+    base["structured_output"] = None
+elif mode == "approve":
+    base["structured_output"] = {
+        "verdict": "approve",
+        "summary": "Looks correct.",
+        "findings": [],
+        "next_steps": [],
+    }
+elif mode == "malformed":
+    base["structured_output"] = {"summary": "missing verdict"}
+else:  # ok
+    base["structured_output"] = {
+        "verdict": "needs-attention",
+        "summary": "One issue found.",
+        "findings": [
+            {
+                "title": "Unhandled None input",
+                "body": "add() will raise on None.",
+                "severity": "high",
+                "category": "bug",
+                "confidence": 0.8,
+                "location": {"file": "app.py", "line_start": 2, "line_end": 2},
+                "recommendation": "Guard against None before adding.",
+            }
+        ],
+        "next_steps": ["Add a None guard."],
+    }
+
+sys.stdout.write(json.dumps(base))
+sys.exit(0)

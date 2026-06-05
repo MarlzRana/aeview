@@ -1,0 +1,49 @@
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "aeview"
+version = "0.0.1"
+description = "Fan code reviewers across multiple agent harnesses and merge one verdict."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "MarlzRana" }]
+keywords = ["code-review", "ai", "agents", "cli"]
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+aeview = "aeview.cli:app"
+
+[project.urls]
+Repository = "https://github.com/MarlzRana/aeview"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["smoke: live tests that hit real harness CLIs (local-only, never CI)"]
+testpaths = ["tests"]

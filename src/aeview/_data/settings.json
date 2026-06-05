@@ -1,0 +1,7 @@
+{
+  "defaultHarnesses": [
+    { "harness": "claude-code", "model": "sonnet" }
+  ],
+  "deduplicationHarness": { "harness": "claude-code", "model": "sonnet" },
+  "retention": { "keepLast": 20, "ttlDays": 14 }
+}
