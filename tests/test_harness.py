@@ -58,6 +58,21 @@ async def test_adapter_pins_read_only_argv(capture_run_async, tmp_path):
     assert "--json-schema" in args
 
 
+async def test_run_structured_delivers_the_given_schema(capture_run_async, tmp_path):
+    # The generic path must hand through whatever schema it's given (e.g. dedup), not the
+    # review schema. Assert the --json-schema arg carries the caller's schema verbatim.
+    from aeview.schema import duplicate_groups_json_schema
+
+    adapter = claude_code.ClaudeCodeAdapter()
+    schema = duplicate_groups_json_schema()
+    out = await adapter.run_structured("P", schema, "opus", tmp_path, tmp_path / "log", timeout=5.0)
+    assert out.payload == {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
+
+    delivered = json.loads(_flag_value(capture_run_async["args"], "--json-schema"))
+    assert "duplicate_groups" in delivered["properties"]
+    assert "verdict" not in delivered.get("properties", {})  # not the review schema
+
+
 async def test_adapter_maps_thinking_to_effort(capture_run_async, tmp_path):
     adapter = claude_code.ClaudeCodeAdapter()
     await adapter.run("p", "opus", tmp_path, tmp_path / "log", "xhigh")

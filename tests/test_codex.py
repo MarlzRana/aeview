@@ -37,6 +37,8 @@ def capture_codex(monkeypatch):
         captured["args"] = args
         captured["input_text"] = input_text
         captured["timeout"] = timeout
+        # The schema file lives in a tempdir cleaned up after the call; capture it while it exists.
+        captured["schema"] = json.loads(Path(_find(args, "--output-schema")).read_text())
         out_path = Path(_find(args, "--output-last-message"))
         out_path.write_text(_VALID_FINAL, encoding="utf-8")
         return ProcResult(0, _USAGE_JSONL, "")
@@ -60,6 +62,21 @@ async def test_codex_runs_read_only_constrained(capture_codex, tmp_path):
     assert "--output-schema" in args and "--output-last-message" in args
     assert "--ephemeral" in args and "--json" in args
     assert capture_codex["input_text"] == "PROMPT"  # prompt on stdin
+
+
+async def test_run_structured_delivers_strict_form_of_given_schema(capture_codex, tmp_path):
+    # The generic path must strictify and deliver whatever schema it's handed (e.g. dedup),
+    # not the review schema — codex's constrained decoding needs every property required.
+    from aeview.schema import duplicate_groups_json_schema
+
+    await codex.CodexAdapter().run_structured(
+        "P", duplicate_groups_json_schema(), "gpt-5.5", tmp_path, tmp_path / "log", timeout=5.0
+    )
+    schema = capture_codex["schema"]
+    assert "duplicate_groups" in schema["properties"]
+    assert schema["additionalProperties"] is False  # strictified
+    assert "duplicate_groups" in schema["required"]
+    assert capture_codex["timeout"] == 5.0  # timeout propagates to run_async
 
 
 async def test_codex_maps_thinking_to_reasoning_effort(capture_codex, tmp_path):

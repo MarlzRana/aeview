@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aeview.config import ensure_seeded, load_settings
+from aeview.config import HarnessInstance, ensure_seeded, load_dedup_prompt, load_settings
 
 
 def test_ensure_seeded_writes_defaults(aeview_home):
@@ -24,3 +24,26 @@ def test_load_settings_parses_camel_case(aeview_home):
     settings = load_settings()
     assert settings.fallback_reviewer_harnesses[0].harness == "claude-code"
     assert settings.fallback_reviewer_harnesses[0].instance_id == "claude-code-claude-opus-4-8"
+
+
+def test_load_dedup_prompt_strips_frontmatter(aeview_home):
+    # The seeded DEDUPLICATION.md has YAML frontmatter; only the body should reach the harness.
+    body = load_dedup_prompt()
+    assert not body.startswith("---")
+    assert "name: deduplication" not in body
+    assert "same underlying" in body  # body content present
+
+
+def test_load_dedup_prompt_returns_plain_text_unchanged(aeview_home):
+    ensure_seeded()
+    (aeview_home / "DEDUPLICATION.md").write_text("no frontmatter here\njust body\n")
+    assert load_dedup_prompt() == "no frontmatter here\njust body\n"
+
+
+def test_descriptor_id_includes_thinking_only_when_set():
+    def descriptor(**kw) -> str:
+        return HarnessInstance(harness="claude-code", model="opus", **kw).descriptor_id
+
+    assert descriptor() == "claude-code-opus"
+    assert descriptor(thinking="default") == "claude-code-opus"  # "default" means unset
+    assert descriptor(thinking="high") == "claude-code-opus-high"

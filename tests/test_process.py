@@ -38,3 +38,18 @@ def test_run_sync_timeout():
     res = run_sync(["sleep", "5"], timeout=0.1)
     assert res.returncode == 124
     assert "timed out" in res.stderr
+
+
+async def test_run_async_timeout_kills_and_logs(tmp_path):
+    # The dedup fail-loud path rests on this: a wedged harness is killed and reported as 124.
+    log = tmp_path / "out.log"
+    res = await run_async(["sleep", "5"], cwd=tmp_path, log_path=log, timeout=0.1)
+    assert res.returncode == 124
+    assert "timed out" in res.stderr
+    assert "timed out" in log.read_text()  # the timeout is persisted to the log
+
+
+async def test_run_async_no_timeout_completes(tmp_path):
+    res = await run_async(["printf", "hi"], cwd=tmp_path)
+    assert res.returncode == 0
+    assert res.stdout == "hi"

@@ -178,3 +178,62 @@ async def test_invalid_survivor_falls_back_to_strongest(aeview_home, monkeypatch
     assert len(report.findings) == 1
     assert report.findings[0].id == "f2"  # critical beats high
     assert report.findings[0].agreement == 2
+
+
+def _three_reviews() -> list[ReviewResult]:
+    # pool: f1=dup-x(a,high), f2=unique-y(a,medium), f3=dup-x again(b,critical)
+    a_findings = [_finding("dup-x", "high"), _finding("unique-y", "medium")]
+    return [
+        _done("a__h", a_findings, "needs-attention", "a"),
+        _done("b__h", [_finding("dup-x again", "critical")], "needs-attention", "b"),
+    ]
+
+
+async def test_ungrouped_findings_survive_as_singletons(aeview_home, monkeypatch):
+    # A group covers only f1+f3; f2 is never mentioned and must survive on its own (no loss).
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+        return DedupOutcome("ok", [DuplicateGroup(survivor="f3", duplicates=["f1"])], Usage(), "dx")
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    report = await _merge(_three_reviews(), aeview_home)
+
+    by_id = {f.id: f for f in report.findings}
+    assert set(by_id) == {"f3", "f2"}  # f1 absorbed into f3; f2 kept as a singleton
+    assert by_id["f3"].agreement == 2
+    assert by_id["f2"].agreement == 1
+
+
+async def test_hostile_groups_no_loss_no_double_count(aeview_home, monkeypatch):
+    # Overlapping groups, a repeated id, and an unknown id — every real finding appears once.
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+        return DedupOutcome(
+            "ok",
+            [
+                DuplicateGroup(survivor="f1", duplicates=["f3", "f3", "f404"]),  # repeat + unknown
+                DuplicateGroup(survivor="f3", duplicates=["f1"]),  # already consumed -> dropped
+            ],
+            Usage(),
+            "dx",
+        )
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    report = await _merge(_three_reviews(), aeview_home)
+
+    ids = [f.id for f in report.findings]
+    assert sorted(ids) == ["f1", "f2"]  # f1 (absorbing f3), f2 singleton; each exactly once
+    survivor = next(f for f in report.findings if f.id == "f1")
+    assert survivor.agreement == 2  # f1 + f3, the unknown/repeat ignored
+
+
+async def test_next_steps_ordered_by_strongest_severity(aeview_home, monkeypatch):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+        return DedupOutcome("ok", [], Usage(), "dx")  # no grouping, keep all findings
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    weak = _done("a__h", [_finding("m", "medium")], "needs-attention", "a")
+    strong = _done("b__h", [_finding("c", "critical")], "needs-attention", "b")
+    nofind = _done("c__h", [], "approve", "c")
+    nofind.next_steps = []  # no steps -> omitted entirely
+
+    report = await _merge([weak, strong, nofind], aeview_home)
+    assert [b.source for b in report.next_steps] == ["b__h", "a__h"]  # critical before medium
