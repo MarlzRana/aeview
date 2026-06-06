@@ -91,3 +91,34 @@ async def test_run_dedup_invalid_output_is_failed(aeview_home, monkeypatch, tmp_
     store = RunStore.create(new_run_id())
     outcome = await run_dedup(_pool(), _instance(), store, tmp_path, timeout=5.0)
     assert outcome.status == "failed"
+
+
+class _RecordingAdapter:
+    """Records exactly how run_dedup invokes the adapter."""
+
+    def __init__(self):
+        self.call: dict = {}
+
+    async def run_structured(
+        self, prompt, schema, model, cwd, log_path, thinking=None, timeout=None
+    ):
+        self.call = dict(
+            prompt=prompt, schema=schema, model=model, thinking=thinking, timeout=timeout
+        )
+        log_path.write_text("log", encoding="utf-8")
+        return StructuredOutput(payload={"duplicate_groups": []}, usage=Usage(), raw="{}")
+
+
+async def test_run_dedup_invokes_adapter_with_dedup_schema_and_instance(
+    aeview_home, monkeypatch, tmp_path
+):
+    rec = _RecordingAdapter()
+    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: rec)
+    await run_dedup(_pool(), _instance(), RunStore.create(new_run_id()), tmp_path, timeout=42.0)
+
+    assert "duplicate_groups" in rec.call["schema"]["properties"]  # dedup schema, not review
+    assert rec.call["model"] == "opus"
+    assert rec.call["thinking"] == "high"  # the instance's thinking propagates
+    assert rec.call["timeout"] == 42.0  # the dedup timeout propagates
+    assert "null deref" in rec.call["prompt"]  # the pool is embedded
+    assert "untrusted DATA" in rec.call["prompt"]  # data-only framing present

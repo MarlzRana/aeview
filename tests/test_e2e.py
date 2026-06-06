@@ -11,6 +11,7 @@ from aeview.report import EXIT_APPROVE, EXIT_ERROR, EXIT_NEEDS_ATTENTION, exit_c
 from aeview.resolve import ResolveError
 from aeview.schema import Report
 from aeview.scope import ScopeError
+from conftest import make_reviewer
 
 
 def _run(repo):
@@ -81,3 +82,26 @@ def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     with pytest.raises(ResolveError):
         asyncio.run(_orchestrate(["nope"], "working-tree", None, git_repo, False, False, None))
+
+
+def test_e2e_dedup_runs_through_orchestrate(aeview_home, git_repo, stub_claude):
+    # Two reviewers -> roster>1 -> the real orchestrate->merge->run_dedup->adapter seam runs
+    # unmocked, and run.json pins the dedup plan. The stub returns empty groups for the dedup
+    # call (recognized by its schema), so dedup completes "ok" without guessing finding ids.
+    hp = [{"harness": "claude-code", "model": "opus"}]
+    make_reviewer(git_repo, "r1", harnesses=hp)
+    make_reviewer(git_repo, "r2", harnesses=hp)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+
+    report = asyncio.run(
+        _orchestrate(["r1", "r2"], "working-tree", None, git_repo, False, False, None)
+    )
+
+    assert report.coverage.contributed == 2
+    assert report.dedup.status == "ok"
+    assert report.dedup.harness == "claude-code-claude-opus-4-8"  # the seeded dedup harness
+
+    run = next(iter(runs_dir().iterdir()))
+    manifest = json.loads((run / "run.json").read_text())
+    assert manifest["dedup"]["id"] == "claude-code-claude-opus-4-8"  # pinned in run.json
+    assert (run / "dedup" / "claude-code-claude-opus-4-8" / "result.json").exists()

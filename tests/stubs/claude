@@ -30,6 +30,14 @@ base = {
     "usage": {"input_tokens": 100, "output_tokens": 50},
 }
 
+# A dedup invocation is recognized by its schema (--json-schema contains duplicate_groups).
+# Return an empty grouping (valid -> dedup "ok"): findings pass through, exercising the real
+# orchestrate->merge->run_dedup->adapter seam without guessing the run-local finding ids.
+if "duplicate_groups" in " ".join(sys.argv):
+    base["structured_output"] = {"duplicate_groups": []}
+    sys.stdout.write(json.dumps(base))
+    sys.exit(0)
+
 if mode == "error":
     base["is_error"] = True
     base["api_error_status"] = "overloaded"

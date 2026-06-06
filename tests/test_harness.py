@@ -65,9 +65,10 @@ async def test_run_structured_delivers_the_given_schema(capture_run_async, tmp_p
 
     adapter = claude_code.ClaudeCodeAdapter()
     schema = duplicate_groups_json_schema()
-    out = await adapter.run_structured("P", schema, "opus", tmp_path, tmp_path / "log", timeout=5.0)
-    assert out.payload == {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
+    await adapter.run_structured("P", schema, "opus", tmp_path, tmp_path / "log", timeout=5.0)
 
+    # The genuine assertion: the *given* schema is delivered on --json-schema (the stub's
+    # canned return payload would only document the stub, so we don't assert on it).
     delivered = json.loads(_flag_value(capture_run_async["args"], "--json-schema"))
     assert "duplicate_groups" in delivered["properties"]
     assert "verdict" not in delivered.get("properties", {})  # not the review schema
@@ -150,6 +151,22 @@ def test_interpret_nonzero_exit_without_error_payload():
     adapter = claude_code.ClaudeCodeAdapter()
     with pytest.raises(AdapterError, match="without an error payload"):
         adapter._interpret(json.dumps({"result": "out"}), "", 1)
+
+
+async def test_run_rejects_schema_invalid_structured_output(monkeypatch, tmp_path):
+    # run() validates the structured_output into ReviewOutput; codex has this guard and claude
+    # must too (the validation moved into run() when run_structured was split out).
+    bad = json.dumps(
+        {"is_error": False, "structured_output": {"summary": "no verdict"},
+         "usage": {"input_tokens": 1, "output_tokens": 1}, "total_cost_usd": 0.0}
+    )
+
+    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
+        return ProcResult(0, bad, "")
+
+    monkeypatch.setattr(claude_code, "run_async", fake)
+    with pytest.raises(AdapterError, match="schema validation"):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
 
 
 def _flag_value(args: list[str], flag: str) -> str:

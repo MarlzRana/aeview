@@ -158,6 +158,27 @@ async def test_dedup_failure_emits_raw_union_with_notice(aeview_home, monkeypatc
     assert all(f.agreement == 1 for f in report.findings)
 
 
+async def test_dedup_skipped_when_fewer_than_two_findings(aeview_home, monkeypatch):
+    # Two reviews but only one finding total -> nothing could be a duplicate -> skip the
+    # billed harness call entirely (run_dedup must not be invoked).
+    called = False
+
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+        nonlocal called
+        called = True
+        return DedupOutcome("ok", [], Usage(), "dx")
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    reviews = [
+        _done("a__h", [_finding("only", "high")], "needs-attention", "a"),
+        _done("b__h", [], "approve", "b"),
+    ]
+    report = await _merge(reviews, aeview_home)
+    assert report.dedup.status == "skipped"
+    assert called is False  # gate skipped the harness call
+    assert len(report.findings) == 1
+
+
 async def test_dedup_unconfigured_with_multiple_reviews_fails_loud(aeview_home):
     settings = Settings(deduplication_harness=None)
     report = await _merge(_two_reviews(), aeview_home, settings)
