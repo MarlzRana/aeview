@@ -231,23 +231,48 @@ async def test_truncated_object_reprompts_and_recovers(fake_copilot, tmp_path):
     assert len(fake_copilot.calls) == 2
 
 
-async def test_skips_non_matching_object_before_real_answer(fake_copilot, tmp_path):
-    # A decoy/echoed object that doesn't match the schema must be skipped past (its nested
-    # braces not rescanned) and the real review after it still found — in one attempt.
-    decoy = {"example": {"nested": {"deep": [1, 2, 3]}}, "note": "ignore me"}
+async def test_skips_non_matching_object_whose_interior_would_exhaust_the_start_cap(
+    fake_copilot, tmp_path, monkeypatch
+):
+    # Guards the `i = end` advance via its observable effect: with a tiny start cap, a decoy
+    # object with many interior braces would burn the cap if its interior were rescanned
+    # (i = start + 1), missing the answer. Advancing past it (i = end) reaches the answer.
+    monkeypatch.setattr(copilot, "_MAX_JSON_STARTS", 3)
+    decoy = {"a": {"b": {"c": {"d": 1}}}, "note": "many interior braces"}
     fake_copilot.queue(_stream(f"{json.dumps(decoy)} then: {json.dumps(_VALID)}"))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
-    assert len(fake_copilot.calls) == 1
+    assert len(fake_copilot.calls) == 1  # decoy = 1 start, answer = 2nd — within the cap of 3
 
 
-async def test_finds_answer_after_brace_heavy_preamble(fake_copilot, tmp_path):
-    # Many unmatched braces before the answer must not prevent reaching it (the pre-rewrite
-    # per-brace start cap would have aborted first). Found in one attempt, no re-prompt.
-    fake_copilot.queue(_stream(("{" * 1000) + " " + json.dumps(_VALID)))
+async def test_finds_answer_after_moderate_brace_preamble(fake_copilot, tmp_path):
+    # Unmatched braces before the answer (under the start cap) must not prevent reaching it.
+    fake_copilot.queue(_stream(("{" * 100) + " " + json.dumps(_VALID)))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
     assert len(fake_copilot.calls) == 1
+
+
+async def test_start_cap_bounds_scan_then_reprompts(fake_copilot, tmp_path, monkeypatch):
+    # The scan is bounded: a brace-heavy preamble exceeding the start cap makes the first
+    # attempt yield no match (rather than scanning unboundedly), and the adapter re-prompts.
+    monkeypatch.setattr(copilot, "_MAX_JSON_STARTS", 8)
+    fake_copilot.queue(_stream(("{ " * 50) + json.dumps(_VALID)))  # >8 junk starts before answer
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: clean
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2  # cap hit on attempt 1 -> re-prompt recovered
+
+
+async def test_wrapped_answer_is_not_extracted_then_recovers_on_reprompt(fake_copilot, tmp_path):
+    # The model is told to emit the bare object; a wrapped answer ({"output": {...}}) is NOT
+    # dug out of the wrapper (we don't descend) — it re-prompts and the bare answer recovers.
+    wrapped = {"output": dict(_VALID)}
+    fake_copilot.queue(_stream(json.dumps(wrapped)))  # attempt 1: wrapped -> no top-level match
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: bare
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2
 
 
 def test_matches_zero_required_accepts_partial_not_just_full():
