@@ -18,6 +18,7 @@ import typer
 from . import __version__
 from .bundle import build_bundle
 from .config import Settings, ensure_seeded, load_settings
+from .doctor import run_doctor
 from .fanout import fan_out
 from .merge import merge_reviews
 from .prompt import compose_prompt
@@ -52,6 +53,18 @@ def _main() -> None:
 def version() -> None:
     """Print the aeview version."""
     typer.echo(__version__)
+
+
+_DOCTOR_MARK = {"ok": "OK", "warn": "--", "fail": "XX"}
+
+
+@app.command()
+def doctor() -> None:
+    """Preflight: reviewer config, harness binaries + auth, and gh. Exits 1 if anything fails."""
+    report = run_doctor(Path.cwd(), load_settings())
+    for check in report.checks:
+        typer.echo(f"[{_DOCTOR_MARK[check.status]}] {check.name}: {check.detail}")
+    raise typer.Exit(0 if report.ok else 1)
 
 
 @app.command()
