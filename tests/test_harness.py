@@ -130,5 +130,12 @@ def test_interpret_transient_via_result_text_without_status():
     assert ei.value.transient is True
 
 
+def test_interpret_nonzero_exit_without_error_payload():
+    # Valid JSON, not flagged is_error, but a non-zero exit -> treated as a failure.
+    adapter = claude_code.ClaudeCodeAdapter()
+    with pytest.raises(AdapterError, match="without an error payload"):
+        adapter._interpret(json.dumps({"result": "out"}), "", 1)
+
+
 def _flag_value(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]

@@ -84,6 +84,17 @@ async def test_non_transient_fails_fast(aeview_home, monkeypatch):
     assert adapter.calls == 1  # no retry on non-transient
 
 
+async def test_unknown_harness_marks_failed(aeview_home, monkeypatch):
+    def boom(harness):
+        raise AdapterError(f"harness '{harness}' is not supported")
+
+    monkeypatch.setattr(fanout, "get_adapter", boom)
+    store = RunStore.create(new_run_id())
+    [result] = await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
+    assert result.status == "failed"
+    assert "not supported" in (result.error or "")
+
+
 async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
     monkeypatch.setattr(fanout, "get_adapter", lambda h: _AuthFailAdapter())
     store = RunStore.create(new_run_id())
