@@ -235,10 +235,12 @@ async def test_skips_non_matching_object_whose_interior_would_exhaust_the_start_
     fake_copilot, tmp_path, monkeypatch
 ):
     # Guards the `i = end` advance via its observable effect: with a tiny start cap, a decoy
-    # object with many interior braces would burn the cap if its interior were rescanned
+    # whose interior braces DON'T collapse under one decode would burn the cap if rescanned
     # (i = start + 1), missing the answer. Advancing past it (i = end) reaches the answer.
+    # Uses in-string braces (raw_decode parses them as one object, but a per-char rescan would
+    # hit each `{` as a failing start) — nested braces collapse in one decode and wouldn't test.
     monkeypatch.setattr(copilot, "_MAX_JSON_STARTS", 3)
-    decoy = {"a": {"b": {"c": {"d": 1}}}, "note": "many interior braces"}
+    decoy = {"note": "{" * 10}  # 10 in-string braces, > the cap of 3
     fake_copilot.queue(_stream(f"{json.dumps(decoy)} then: {json.dumps(_VALID)}"))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
@@ -292,26 +294,26 @@ def test_json_objects_does_not_raise_on_deep_nesting():
     assert list(copilot._json_objects('{"a":' * 6000)) == []
 
 
-async def test_fallback_window_bounds_object_after_junk(fake_copilot, tmp_path, monkeypatch):
-    # The per-attempt window applies to the fallback scan (objects after a non-matching first
-    # object). A matching object larger than the window is truncated -> not found -> re-prompt.
-    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 20)  # smaller than a real review object
-    decoy = {"note": "not a review"}
-    fake_copilot.queue(_stream(f"{json.dumps(decoy)} {json.dumps(_VALID)}"))  # windowed away
-    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: bare -> fast path, unbounded
+async def test_object_larger_than_window_is_truncated_then_reprompts(
+    fake_copilot, tmp_path, monkeypatch
+):
+    # The window bounds EVERY decode (incl. the first): an object larger than the window is
+    # sliced mid-object, fails to parse, and re-prompts rather than scanning the whole output.
+    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 200)  # > bare _VALID, < the big object
+    fake_copilot.queue(_stream(json.dumps(dict(_VALID, summary="x" * 500))))  # > window
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: small enough to parse
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
-    assert len(fake_copilot.calls) == 2  # window truncated the post-decoy answer -> re-prompt
+    assert len(fake_copilot.calls) == 2  # over-window object truncated -> re-prompt
 
 
-async def test_fast_path_parses_large_object_beyond_window(fake_copilot, tmp_path, monkeypatch):
-    # The clean first object is parsed unbounded, so a complete answer larger than the window is
-    # still extracted (the window only caps the fallback, not the fast path).
-    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 20)
-    big = dict(_VALID, summary="x" * 500)  # well over the 20-char window
+async def test_complete_large_object_within_window_is_parsed(fake_copilot, tmp_path):
+    # The window is far larger than any real review, so a verbose-but-complete answer parses in
+    # one attempt (the bound only trips on pathological output, not large legitimate reviews).
+    big = dict(_VALID, summary="x" * 50_000)  # large, but well under the default window
     fake_copilot.queue(_stream(json.dumps(big)))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert out.review.summary == "x" * 500
+    assert out.review.summary == "x" * 50_000
     assert len(fake_copilot.calls) == 1
 
 
