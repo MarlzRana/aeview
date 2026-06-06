@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, review_output_json_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport
+from .base import AdapterError, HarnessOutput, SchemaSupport, looks_transient
 
 _SANDBOX_SETTINGS = json.dumps(
     {
@@ -38,19 +38,15 @@ _SANDBOX_SETTINGS = json.dumps(
 
 _DISALLOWED_TOOLS = "Edit Write NotebookEdit"
 
-# HTTP statuses worth retrying, and text fragments that signal a transient failure.
+# HTTP statuses worth retrying (text-based transients use the shared looks_transient).
 _TRANSIENT_STATUS = {429, 500, 502, 503, 529}
-_TRANSIENT_TEXT = ("rate limit", "overloaded", "capacity", "timeout", "timed out", "try again")
-
-
-def _looks_transient(text: str) -> bool:
-    low = text.lower()
-    return any(frag in low for frag in _TRANSIENT_TEXT)
 
 
 class ClaudeCodeAdapter:
     name: str = "claude-code"
     schema_support: SchemaSupport = "validated"
+    binary: str = "claude"
+    auth_status_args: list[str] = ["claude", "auth", "status"]  # noqa: RUF012
 
     async def run(
         self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
@@ -86,13 +82,13 @@ class ClaudeCodeAdapter:
             # No parseable result: a non-zero exit is the failure (e.g. missing binary, crash).
             detail = stderr.strip() or stdout.strip() or "no output"
             raise AdapterError(
-                f"claude exited {returncode}: {detail}", transient=_looks_transient(detail)
+                f"claude exited {returncode}: {detail}", transient=looks_transient(detail)
             ) from None
 
         if payload.get("is_error"):
             status = payload.get("api_error_status")
             text = str(payload.get("result") or "")
-            transient = status in _TRANSIENT_STATUS or _looks_transient(text)
+            transient = status in _TRANSIENT_STATUS or looks_transient(text)
             raise AdapterError(f"claude reported an error: {status or text}", transient=transient)
 
         if returncode != 0:

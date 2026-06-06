@@ -177,3 +177,27 @@ class RunManifest(BaseModel):
 def review_output_json_schema() -> dict:
     """JSON Schema handed to harnesses that support structured output."""
     return ReviewOutput.model_json_schema()
+
+
+def strict_review_output_schema() -> dict:
+    """OpenAI strict-mode schema for codex's constrained decoding.
+
+    Strict mode requires every object to list *all* its properties in `required` and to set
+    `additionalProperties: false`. pydantic omits fields with defaults (findings/next_steps)
+    from `required`, which codex rejects — so mark every property required, recursively.
+    """
+    schema = ReviewOutput.model_json_schema()
+    _make_strict(schema)
+    return schema
+
+
+def _make_strict(node: object) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "object" and isinstance(node.get("properties"), dict):
+            node["required"] = list(node["properties"].keys())
+            node["additionalProperties"] = False
+        for value in node.values():
+            _make_strict(value)
+    elif isinstance(node, list):
+        for item in node:
+            _make_strict(item)

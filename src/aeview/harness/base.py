@@ -18,6 +18,14 @@ from ..schema import ReviewOutput, Usage
 
 SchemaSupport = Literal["constrained", "validated", "prompt"]
 
+# Text fragments that signal a transient (retry-worthy) failure, shared across adapters.
+_TRANSIENT_TEXT = ("rate limit", "overloaded", "capacity", "timeout", "timed out", "try again")
+
+
+def looks_transient(text: str) -> bool:
+    low = text.lower()
+    return any(frag in low for frag in _TRANSIENT_TEXT)
+
 
 class AdapterError(Exception):
     """A harness invocation failed.
@@ -43,19 +51,31 @@ class HarnessOutput:
 class Adapter(Protocol):
     name: str
     schema_support: SchemaSupport
+    binary: str  # the CLI executable, for doctor's PATH check
+    auth_status_args: list[str]  # a no-cost auth/status command; rc==0 means authenticated
 
     async def run(
         self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
     ) -> HarnessOutput: ...
 
 
-def get_adapter(harness: str) -> Adapter:
+def _registry() -> dict[str, Adapter]:
     # Lazy import keeps the adapter registry flat and avoids import cycles.
     from .claude_code import ClaudeCodeAdapter
+    from .codex import CodexAdapter
 
-    adapters: dict[str, Adapter] = {
+    return {
         "claude-code": ClaudeCodeAdapter(),
+        "codex": CodexAdapter(),
     }
+
+
+def available_harnesses() -> list[str]:
+    return sorted(_registry())
+
+
+def get_adapter(harness: str) -> Adapter:
+    adapters = _registry()
     if harness not in adapters:
         raise AdapterError(
             f"harness '{harness}' is not supported in this build; available: "
