@@ -119,7 +119,7 @@ def _split_reviewers(values: list[str] | None) -> list[str]:
 def _resolve_all_lenient(names: list[str], cwd: Path, settings: Settings) -> list[Reviewer]:
     """Resolve discovered reviewers for `--reviewers all`, skipping (with a warning) any that
     have invalid config, so one broken reviewer doesn't abort the whole bulk run."""
-    resolved = []
+    resolved: list[Reviewer] = []
     for name in names:
         try:
             resolved.append(resolve_reviewer(name, cwd, settings))
