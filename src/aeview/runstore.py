@@ -100,14 +100,18 @@ class RunStore:
         _atomic_write(review_dir / "review.json", result.model_dump_json(indent=2))
 
     def log_path(self, reviewer: str, review_id: str) -> Path:
-        review_dir = self._review_dir(reviewer, review_id)
-        review_dir.mkdir(parents=True, exist_ok=True)
-        return review_dir / "review.log"
+        # A pure path accessor: the review dir already exists because the worker writes the
+        # `running` ReviewResult (write_review) before the harness logs anything.
+        return self._review_dir(reviewer, review_id) / "review.log"
 
     def read_reviews(self) -> list[ReviewResult]:
-        results: list[ReviewResult] = []
-        for path in sorted(self.reviewers_dir.glob("*/*/review.json")):
-            results.append(ReviewResult.model_validate_json(path.read_text("utf-8")))
+        results = [
+            ReviewResult.model_validate_json(path.read_text("utf-8"))
+            for path in self.reviewers_dir.glob("*/*/review.json")
+        ]
+        # Sort by the canonical review id, not the glob path: "<reviewer>/<instance>" orders on
+        # "/" while the id orders on "__", so a path sort can reorder prefix-named reviewers.
+        results.sort(key=lambda r: r.id)
         return results
 
     # --- report.json (written last) ---
