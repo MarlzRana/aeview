@@ -202,6 +202,24 @@ async def test_extracts_prose_wrapped_json_with_escaped_quotes_and_stray_prose_q
     assert out.review.findings[0].body == 'it printed "}" then stopped'
 
 
+async def test_extracts_object_after_unbalanced_prose_quote(fake_copilot, tmp_path):
+    # An ODD number of quotes in the preamble (`He said "look here: `) must not consume the
+    # object's opening brace. Fails on a depth-0 string-tracking scanner; passes on the
+    # start-from-every-brace scan. (The cycle-1 fix regressed this; this locks it in.)
+    content = f'He said "look here: {json.dumps(_VALID)}'
+    fake_copilot.queue(_stream(content))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+
+
+async def test_extracts_object_after_quoted_brace_in_prose(fake_copilot, tmp_path):
+    # A quoted brace in the preamble (`a "{" b ...`) must not be taken as the object start.
+    content = f'a "{{" b {json.dumps(_VALID)}'
+    fake_copilot.queue(_stream(content))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+
+
 # --- retry-then-fail (the schema_support="prompt" reaction) ----------------------------
 
 
@@ -257,11 +275,12 @@ async def test_schema_invalid_enum_reprompts_then_fails(fake_copilot, tmp_path):
 
 
 async def test_schema_invalid_enum_recovers_on_reprompt(fake_copilot, tmp_path):
-    fake_copilot.queue(_stream(_bad_enum()))  # attempt 1: invalid enum
-    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: valid
+    fake_copilot.queue(_stream(_bad_enum(), output_tokens=8))  # attempt 1: invalid enum
+    fake_copilot.queue(_stream(json.dumps(_VALID), output_tokens=12))  # attempt 2: valid
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
     assert len(fake_copilot.calls) == 2
+    assert out.usage.output_tokens == 20  # both attempts counted on the validate-fail re-prompt
 
 
 # --- registry + capability -------------------------------------------------------------
@@ -286,3 +305,16 @@ async def test_run_structured_delivers_given_schema(fake_copilot, tmp_path):
     assert out.payload == {"duplicate_groups": []}
     assert "duplicate_groups" in fake_copilot.calls[0]["input_text"]  # schema embedded
     assert fake_copilot.calls[0]["timeout"] == 5.0
+
+
+async def test_zero_required_schema_ignores_stray_empty_object(fake_copilot, tmp_path):
+    # DuplicateGroups has no required keys; a stray {} before the real answer must NOT be
+    # accepted as an empty "no duplicates" (which would silently drop dedup decisions).
+    from aeview.schema import duplicate_groups_json_schema
+
+    groups = {"duplicate_groups": [{"survivor": "f1", "duplicates": ["f2"]}]}
+    fake_copilot.queue(_stream(f"{{}} {json.dumps(groups)}"))
+    out = await copilot.CopilotAdapter().run_structured(
+        "P", duplicate_groups_json_schema(), "gpt-5.4", tmp_path, tmp_path / "log"
+    )
+    assert out.payload == groups  # the real object, not the stray {}
