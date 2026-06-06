@@ -1,0 +1,5 @@
+{
+  "harnesses": [
+    { "harness": "claude-code", "model": "claude-sonnet-4-6[1m]" }
+  ]
+}
