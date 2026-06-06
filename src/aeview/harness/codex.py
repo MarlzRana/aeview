@@ -90,6 +90,27 @@ class CodexAdapter:
         return HarnessOutput(review=review, usage=_usage_from_jsonl(stdout), raw=final)
 
 
+def _event_type(event: dict) -> str | None:
+    """The event type, whether codex puts it at top level or under a `msg` wrapper."""
+    direct = event.get("type")
+    if direct:
+        return direct
+    msg = event.get("msg")
+    return msg.get("type") if isinstance(msg, dict) else None
+
+
+def _event_message(event: dict) -> str | None:
+    """An error message from an event, checking both the top level and a `msg` wrapper."""
+    msg = event.get("msg")
+    for source in (event, msg if isinstance(msg, dict) else {}):
+        if source.get("message"):
+            return str(source["message"])
+        err = source.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+    return None
+
+
 def _error_detail(stdout: str, stderr: str) -> str:
     """Prefer a codex error/turn.failed message from the JSONL stream over noisy stderr."""
     message: str | None = None
@@ -98,12 +119,8 @@ def _error_detail(stdout: str, stderr: str) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("type") in ("error", "turn.failed"):
-            err = event.get("error")
-            nested = err.get("message") if isinstance(err, dict) else None
-            candidate = event.get("message") or nested
-            if candidate:
-                message = str(candidate)
+        if isinstance(event, dict) and _event_type(event) in ("error", "turn.failed"):
+            message = _event_message(event) or message
     return (message or stderr.strip() or "codex failed").strip()
 
 
@@ -127,13 +144,9 @@ def _usage_from_jsonl(stdout: str) -> Usage:
 
 
 def _event_usage(event: dict) -> dict | None:
-    if not isinstance(event, dict):
+    if not isinstance(event, dict) or _event_type(event) != "turn.completed":
         return None
-    # `msg` may be absent or explicitly null; coerce to {} before indexing.
     msg = event.get("msg")
     msg = msg if isinstance(msg, dict) else {}
-    if "turn.completed" in (event.get("type"), msg.get("type")):
-        usage = event.get("usage") or msg.get("usage")
-        if isinstance(usage, dict):
-            return usage
-    return None
+    usage = event.get("usage") or msg.get("usage")
+    return usage if isinstance(usage, dict) else None

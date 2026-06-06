@@ -119,6 +119,14 @@ def test_usage_parsing_handles_msg_wrapped_event():
     assert usage.input_tokens == 5 and usage.output_tokens == 2
 
 
+def test_error_detail_handles_msg_wrapped_event():
+    # _error_detail resolves the event shape the same way _event_usage does (consistency).
+    jsonl = json.dumps({"msg": {"type": "turn.failed", "error": {"message": "boom upstream"}}})
+    with pytest.raises(AdapterError) as ei:
+        codex.CodexAdapter()._interpret("", jsonl, "", 1)
+    assert "boom upstream" in str(ei.value)
+
+
 def test_interpret_classifies_transient_text():
     with pytest.raises(AdapterError) as ei:
         codex.CodexAdapter()._interpret("", "", "rate limit exceeded", 1)
