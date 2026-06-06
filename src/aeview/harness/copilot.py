@@ -133,10 +133,10 @@ def _embed_schema(prompt: str, schema: dict) -> str:
     )
 
 
-# A response shouldn't carry more than this many `{` before the answer; bound the scan so a
-# pathological brace-heavy output (e.g. echoed minified code) can't make the O(n^2) worst case
-# block the event loop. raw_decode itself is the real JSON parser, so each start fails fast.
-_MAX_JSON_STARTS = 500
+# Bound the total characters raw_decode may scan across one source: a real review/dedup object
+# is far smaller, so this only trips on pathological brace-heavy output, keeping the inline
+# (synchronous) extraction from blocking the shared event loop during a fan-out.
+_MAX_SCAN_CHARS = 2_000_000
 
 _DECODER = json.JSONDecoder()
 
@@ -161,18 +161,26 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
 
 
 def _json_objects(text: str) -> Iterator[dict]:
-    """Yield each parseable JSON object embedded in `text`, in order, via json.raw_decode."""
-    starts = 0
-    for i, ch in enumerate(text):
-        if ch != "{":
-            continue
-        starts += 1
-        if starts > _MAX_JSON_STARTS:
+    """Yield each parseable JSON object embedded in `text`, in document order, via raw_decode.
+
+    Advance past each parsed object (`i = end`) so its interior braces aren't rescanned, and
+    stop once the cumulative scan budget is spent — together these keep a brace-heavy response
+    from burning time re-decoding nested braces or scanning unboundedly.
+    """
+    i = 0
+    budget = _MAX_SCAN_CHARS
+    while budget > 0:
+        start = text.find("{", i)
+        if start == -1:
             return
         try:
-            obj, _ = _DECODER.raw_decode(text, i)
-        except json.JSONDecodeError:
-            continue  # not a valid object start (e.g. a brace in prose) — try the next `{`
+            obj, end = _DECODER.raw_decode(text, start)
+        except json.JSONDecodeError as exc:
+            budget -= max(1, exc.pos - start)  # account for the work spent failing this start
+            i = start + 1  # not a valid object start (e.g. a brace in prose) — try the next `{`
+            continue
+        budget -= end - start
+        i = end
         if isinstance(obj, dict):
             yield obj
 
