@@ -70,10 +70,6 @@ def _registry() -> dict[str, Adapter]:
     }
 
 
-def available_harnesses() -> list[str]:
-    return sorted(_registry())
-
-
 def get_adapter(harness: str) -> Adapter:
     adapters = _registry()
     if harness not in adapters:
