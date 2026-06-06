@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from aeview.cli import _resolve_all_lenient, _split_reviewers
 from aeview.config import HarnessInstance, Settings
+from aeview.resolve import ResolveError
 from conftest import make_reviewer
 
 
@@ -25,9 +28,12 @@ def test_all_passthrough():
     assert _split_reviewers(["all"]) == ["all"]
 
 
-def test_blank_value_falls_back_to_default():
-    assert _split_reviewers([""]) == ["default"]
-    assert _split_reviewers([" , "]) == ["default"]
+def test_blank_value_errors():
+    # --reviewers given but empty (e.g. an empty shell var) is a mistake, not a default.
+    with pytest.raises(ResolveError):
+        _split_reviewers([""])
+    with pytest.raises(ResolveError):
+        _split_reviewers([" , "])
 
 
 def _settings():

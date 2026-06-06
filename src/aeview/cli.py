@@ -88,9 +88,9 @@ def run(
     ] = False,
 ) -> None:
     """Run reviewers over a scope and emit a merged report."""
-    names = _split_reviewers(reviewers)
     cwd = Path.cwd()
     try:
+        names = _split_reviewers(reviewers)
         stype, value = parse_scope(scope)
         patch_text = _read_patch(value) if stype == "patch" else None
         report = asyncio.run(
@@ -110,10 +110,15 @@ def run(
 def _split_reviewers(values: list[str] | None) -> list[str]:
     """Flatten --reviewers: comma-separated (a,b) and/or repeated (--reviewers a --reviewers b).
 
-    An absent or all-blank value (e.g. `--reviewers ""`) falls back to the default reviewer.
+    Omitting --reviewers uses the default reviewer; passing it *blank* (e.g. `--reviewers ""`,
+    usually an empty shell variable) is a mistake and errors rather than silently defaulting.
     """
-    names = [n.strip() for item in (values or []) for n in item.split(",") if n.strip()]
-    return names or ["default"]
+    if values is None:
+        return ["default"]
+    names = [n.strip() for item in values for n in item.split(",") if n.strip()]
+    if not names:
+        raise ResolveError("--reviewers was given but empty; omit it to use the default reviewer")
+    return names
 
 
 def _resolve_all_lenient(names: list[str], cwd: Path, settings: Settings) -> list[Reviewer]:
