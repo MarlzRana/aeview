@@ -44,6 +44,14 @@ def test_parse_scope_allows_stdin_patch_sentinel():
     assert parse_scope("patch:-") == ("patch", "-")
 
 
+def test_parse_scope_range_requires_a_range():
+    # A bare ref would make `git diff <ref>` read the working tree behind the conflict gate.
+    with pytest.raises(ScopeError, match="range"):
+        parse_scope("range:HEAD")
+    assert parse_scope("range:A..B") == ("range", "A..B")
+    assert parse_scope("range:A...B") == ("range", "A...B")
+
+
 # --- working-tree / staged ------------------------------------------------------------
 
 

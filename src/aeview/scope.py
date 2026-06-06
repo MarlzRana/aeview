@@ -71,6 +71,11 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
         raise ScopeError(f"unknown scope '{stype}'; valid: {', '.join(sorted(_KNOWN_TYPES))}")
     if stype in _VALUE_REQUIRED and not value:
         raise ScopeError(f"scope '{stype}' requires a value, e.g. --scope {stype}:<value>")
+    # `range` must be an actual range (A..B / A...B). A bare ref makes `git diff <ref>`
+    # compare against the WORKING TREE, which would read uncommitted/conflicted content while
+    # the conflict gate (which excludes range) is skipped. Use commit:/branch: for a single ref.
+    if stype == "range" and (value is None or ".." not in value):
+        raise ScopeError("range scope needs a commit range like A..B or A...B (not a single ref)")
     # A value starting with '-' would be read by git as an option (e.g.
     # `range:--output=x` -> `git diff --output=x` writes a file), so reject it. The bare
     # '-' is allowed: it is the patch-from-stdin sentinel, never passed to git.
