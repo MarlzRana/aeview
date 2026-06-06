@@ -89,6 +89,25 @@ def test_non_mapping_frontmatter_raises_resolve_error(tmp_path):
         resolve_reviewer("python", tmp_path, _settings())
 
 
+def test_no_frontmatter_raises_resolve_error(tmp_path):
+    # parse_reviewer now routes through split_frontmatter and raises on front-is-None; a file
+    # with no opening `---` must be rejected (not silently treated as an empty-meta body).
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("just a body, no frontmatter at all\n")
+    with pytest.raises(ResolveError, match="missing or has malformed"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_unterminated_frontmatter_raises_resolve_error(tmp_path):
+    # Opens `---` but never closes it -> split_frontmatter returns front=None -> rejected.
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\nname: python\nno closing fence\n")
+    with pytest.raises(ResolveError, match="missing or has malformed"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
 # --- harness resolution ----------------------------------------------------------------
 
 

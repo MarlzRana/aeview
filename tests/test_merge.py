@@ -246,6 +246,26 @@ async def test_hostile_groups_no_loss_no_double_count(aeview_home, monkeypatch):
     assert survivor.agreement == 2  # f1 + f3, the unknown/repeat ignored
 
 
+async def test_same_review_grouping_is_not_corroboration(aeview_home, monkeypatch):
+    # Reviewer `a` emits two findings the harness groups together; `b` only satisfies the
+    # >1-review gate. The survivor has agreement 2 (raw group size) but ONE distinct review,
+    # so it must NOT count as corroborated. This fails under the old `f.agreement > 1` formula.
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+        return DedupOutcome("ok", [DuplicateGroup(survivor="f1", duplicates=["f2"])], Usage(), "dx")
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    reviews = [
+        _done("a__h", [_finding("dup1", "high"), _finding("dup2", "high")], "needs-attention", "a"),
+        _done("b__h", [_finding("other", "low")], "needs-attention", "b"),
+    ]
+    report = await _merge(reviews, aeview_home)
+
+    survivor = next(f for f in report.findings if f.id == "f1")
+    assert survivor.agreement == 2  # raw group size unchanged
+    assert {s.review for s in survivor.sources} == {"a__h"}  # but only one distinct review
+    assert "corroborated" not in report.summary
+
+
 async def test_next_steps_ordered_by_strongest_severity(aeview_home, monkeypatch):
     async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
         return DedupOutcome("ok", [], Usage(), "dx")  # no grouping, keep all findings
