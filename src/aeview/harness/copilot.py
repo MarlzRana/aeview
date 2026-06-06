@@ -69,9 +69,10 @@ class CopilotAdapter:
         timeout: float | None = None,
         validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
-        """`validate` (optional) is the deep schema check (e.g. ReviewOutput.model_validate); it
-        raises on a structurally-present-but-invalid payload (wrong enum/type) so that case also
-        re-prompts, instead of slipping past the cheap key check to fail later in the caller."""
+        """`validate` (optional) is a deep schema check (e.g. ReviewOutput.model_validate) used
+        by the review path (`run`): it raises on a structurally-present-but-invalid payload
+        (wrong enum/type) so that case re-prompts too. The generic dedup caller intentionally
+        omits it and one-shots — a deep-invalid dedup payload degrades to the raw-union path."""
         base_prompt = _embed_schema(prompt, schema)
         args = ["copilot", *_READ_ONLY_ARGS]
         if model:
@@ -139,10 +140,8 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
     The answer is the final `assistant.message`'s `data.content`; we try that first (raw, then
     fenced, then a brace-matched span), falling back to scanning the whole stream.
     """
-    # The cheap structural check: an object must carry the schema's required keys. When a schema
-    # has NO required keys (e.g. DuplicateGroups, all-defaulted), that test is vacuous and would
-    # accept a stray `{}` before the real answer — so then require the property keys instead.
-    required = set(schema.get("required", [])) or set(schema.get("properties", {}))
+    required = set(schema.get("required", []))
+    properties = set(schema.get("properties", {}))
     content = _final_assistant_content(stdout)
     sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
     for text in sources:
@@ -151,9 +150,20 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
                 obj = json.loads(candidate)
             except json.JSONDecodeError:
                 continue
-            if isinstance(obj, dict) and required <= obj.keys():
+            if _matches(obj, required, properties):
                 return obj
     return None
+
+
+def _matches(obj: object, required: set[str], properties: set[str]) -> bool:
+    if not isinstance(obj, dict) or not required <= obj.keys():
+        return False
+    # An all-defaulted schema (no required keys, e.g. DuplicateGroups) would otherwise accept a
+    # stray `{}` before the real answer. Demand at least one of the schema's own properties —
+    # not all of them, so a payload that legitimately omits optional fields still matches.
+    if not required and properties:
+        return bool(obj.keys() & properties)
+    return True
 
 
 def _final_assistant_content(stdout: str) -> str | None:
@@ -175,23 +185,26 @@ def _json_candidates(text: str) -> Iterator[str]:
 
 
 def _brace_spans(text: str) -> Iterator[str]:
-    """Top-level {...} spans — a last-resort way to find an object embedded in prose.
+    """Balanced {...} spans — a last-resort way to find an object embedded in prose.
 
-    String/escape aware: braces inside JSON string values (e.g. a finding body containing code)
-    must not move the depth counter, or the span would close early and the object misparse.
+    Try a string/escape-aware balanced scan starting from EVERY `{`, and let the caller's
+    json.loads filter false starts. This is robust to junk in the preamble (a quoted brace, an
+    unbalanced quote) that no single fixed start point handles: a bad start yields a
+    non-parseable candidate that is skipped, and the real object is still found.
     """
+    for i, ch in enumerate(text):
+        if ch == "{":
+            span = _balanced_span(text, i)
+            if span is not None:
+                yield span
+
+
+def _balanced_span(text: str, start: int) -> str | None:
     depth = 0
-    start = -1
     in_string = False
     escaped = False
-    for i, ch in enumerate(text):
-        # Only track string state *inside* an object: a stray quote in the prose before the
-        # object (e.g. `the "fix":`) must not flip in_string and swallow the opening brace.
-        if depth == 0:
-            if ch == "{":
-                start = i
-                depth = 1
-            continue
+    for i in range(start, len(text)):
+        ch = text[i]
         if in_string:
             if escaped:
                 escaped = False
@@ -206,7 +219,8 @@ def _brace_spans(text: str) -> Iterator[str]:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                yield text[start : i + 1]
+                return text[start : i + 1]
+    return None
 
 
 def _output_tokens(stdout: str) -> int:
