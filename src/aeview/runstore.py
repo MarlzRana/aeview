@@ -24,6 +24,14 @@ def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def pool_to_json(pool: list[PooledFinding]) -> str:
+    """The pool as a pretty JSON array (one finding per line) — the exact bytes the dedup
+    harness sees, reused for both the composed prompt and the persisted input.json."""
+    if not pool:
+        return "[]"
+    return "[\n" + ",\n".join(f.model_dump_json() for f in pool) + "\n]"
+
+
 def new_run_id() -> str:
     return str(uuid.uuid4())
 
@@ -124,9 +132,7 @@ class RunStore:
         _atomic_write(self._dedup_dir(instance_id) / "prompt.md", prompt)
 
     def write_dedup_input(self, instance_id: str, pool: list[PooledFinding]) -> None:
-        body = ",\n".join(f.model_dump_json() for f in pool)
-        payload = f"[\n{body}\n]\n" if pool else "[]\n"
-        _atomic_write(self._dedup_dir(instance_id) / "input.json", payload)
+        _atomic_write(self._dedup_dir(instance_id) / "input.json", pool_to_json(pool) + "\n")
 
     def write_dedup_result(self, instance_id: str, result: DedupResult) -> None:
         path = self._dedup_dir(instance_id) / "result.json"

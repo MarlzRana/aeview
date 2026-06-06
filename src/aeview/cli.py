@@ -31,7 +31,7 @@ from .resolve import (
     resolve_reviewer,
 )
 from .runstore import RunStore, new_run_id, now_iso
-from .schema import DedupPlan, Invocation, Report, RunManifest
+from .schema import DedupPlan, Invocation, Report, RosterEntry, RunManifest
 from .scope import ScopeError, parse_scope
 from .scope import resolve as resolve_scope
 
@@ -157,7 +157,7 @@ def _read_patch(value: str | None) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _dedup_plan(roster: list, settings: Settings) -> DedupPlan | None:
+def _dedup_plan(roster: list[RosterEntry], settings: Settings) -> DedupPlan | None:
     """Pin the dedup harness in run.json when the roster will need it (>1 review).
 
     Recording it freezes which harness this run used against later settings.json edits — the

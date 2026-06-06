@@ -13,6 +13,8 @@ never discarded. Findings are never rewritten.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .config import Settings
 from .dedup import DEDUP_TIMEOUT_S, run_dedup
 from .runstore import RunStore
@@ -45,7 +47,7 @@ _ById = dict[str, tuple[str, Finding]]
 
 
 async def merge_reviews(
-    results: list[ReviewResult], settings: Settings, store: RunStore, cwd
+    results: list[ReviewResult], settings: Settings, store: RunStore, cwd: Path
 ) -> Report:
     done = [r for r in results if r.status == "done"]
     failed = [r for r in results if r.status != "done"]
@@ -80,10 +82,17 @@ def _build_pool(done: list[ReviewResult]) -> tuple[list[PooledFinding], _ById]:
 
 
 async def _dedup_and_apply(
-    pool: list[PooledFinding], by_id: _ById, done: list[ReviewResult], settings, store, cwd
+    pool: list[PooledFinding],
+    by_id: _ById,
+    done: list[ReviewResult],
+    settings: Settings,
+    store: RunStore,
+    cwd: Path,
 ) -> tuple[Dedup, list[MergedFinding], Usage]:
-    # Need >1 contributing review to have anything to dedupe; otherwise pass through unchanged.
-    if len(done) <= 1:
+    # Dedup is meaningful only with >1 contributing review (the corroboration signal) *and*
+    # >1 finding (something that could be a duplicate); otherwise pass through unchanged and
+    # skip the billed harness call.
+    if len(done) <= 1 or len(pool) <= 1:
         return Dedup(status="skipped"), _raw_union(pool, by_id), Usage()
 
     instance = settings.deduplication_harness

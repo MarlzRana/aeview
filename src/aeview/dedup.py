@@ -11,12 +11,14 @@ outcome is `failed`, and merge emits the raw union of findings plus a loud notic
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
 from .config import HarnessInstance, load_dedup_prompt
 from .harness import AdapterError, get_adapter
-from .runstore import RunStore, now_iso
+from .runstore import RunStore, now_iso, pool_to_json
 from .schema import (
     DedupResult,
     DuplicateGroup,
@@ -36,9 +38,12 @@ _FAIL_WARNING = (
 
 @dataclass(slots=True)
 class DedupOutcome:
-    """The result merge needs: groups to apply (ok) or a failure to surface (failed)."""
+    """The result merge needs: groups to apply (ok) or a failure to surface (failed).
 
-    status: str  # "ok" | "failed"
+    An outcome is never "skipped" — that gate lives in merge before run_dedup is called.
+    """
+
+    status: Literal["ok", "failed"]
     groups: list[DuplicateGroup]
     usage: Usage
     harness_id: str
@@ -50,7 +55,7 @@ async def run_dedup(
     pool: list[PooledFinding],
     instance: HarnessInstance,
     store: RunStore,
-    cwd,
+    cwd: Path,
     timeout: float = DEDUP_TIMEOUT_S,
 ) -> DedupOutcome:
     instance_id = instance.descriptor_id
@@ -84,11 +89,10 @@ async def run_dedup(
 
 
 def _compose(pool: list[PooledFinding]) -> str:
-    findings = "[\n" + ",\n".join(f.model_dump_json() for f in pool) + "\n]" if pool else "[]"
     return (
         f"{load_dedup_prompt().rstrip()}\n\n"
         f"## Findings to deduplicate\n\n"
-        f"```json\n{findings}\n```\n"
+        f"```json\n{pool_to_json(pool)}\n```\n"
     )
 
 
@@ -97,7 +101,7 @@ def _persist(store: RunStore, outcome: DedupOutcome, started: str) -> None:
         outcome.harness_id,
         DedupResult(
             harness=outcome.harness_id,
-            status=outcome.status,  # type: ignore[arg-type]  # "ok"/"failed" are DedupState
+            status=outcome.status,
             started_at=started,
             finished_at=now_iso(),
             groups=outcome.groups,
