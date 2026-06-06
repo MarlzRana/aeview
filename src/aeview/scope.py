@@ -40,6 +40,10 @@ _INCLUDE_DIRTY_VALID = {"branch", "auto"}  # fold dirty onto the committed range
 _INCLUDE_DIRTY_NOOP = {"working-tree"}  # already dirty -> no effect
 _INCLUDE_DIRTY_WIDEN = {"staged"}  # staged is NOT already dirty -> widen to working-tree
 
+# Scopes whose diff incorporates the working tree; only these care about a dirty/conflicted
+# checkout. (branch with --include-dirty also reads it — handled via the include_dirty flag.)
+_WORKTREE_SCOPES = {"working-tree", "staged", "effective-pr", "auto"}
+
 
 class ScopeError(Exception):
     """Raised when a scope cannot be resolved, is unsupported, or has no changes."""
@@ -260,7 +264,11 @@ def resolve(
 
     _validate_include_dirty(raw_type, include_dirty)
 
-    if not allow_conflicts and (reason := _in_progress_conflict(cwd)):
+    # The conflict gate only matters when the diff reads the working tree. pr/commit/range
+    # (and plain branch) diff network/historical refs, so a local in-progress merge is
+    # irrelevant to them and must not block the review.
+    reads_worktree = raw_type in _WORKTREE_SCOPES or include_dirty
+    if reads_worktree and not allow_conflicts and (reason := _in_progress_conflict(cwd)):
         raise ScopeError(
             f"working tree has {reason}; resolve it before review (or pass --allow-conflicts)"
         )

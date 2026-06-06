@@ -189,6 +189,22 @@ def test_in_progress_merge_is_refused(git_repo):
     _resolve(git_repo, "working-tree", allow_conflicts=True)
 
 
+def test_in_progress_merge_does_not_block_historical_scopes(git_repo):
+    # commit/range diff historical refs and don't read the working tree, so an in-progress
+    # merge must not block them.
+    first = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "checkout", "-q", "-b", "feature")
+    commit(git_repo, "shared.py", "feature_side = 1\n", "feature edit")
+    git(git_repo, "checkout", "-q", "main")
+    second = commit(git_repo, "shared.py", "main_side = 1\n", "main edit")
+    import subprocess
+
+    subprocess.run(["git", "merge", "feature"], cwd=git_repo, capture_output=True)  # conflicts
+    # These resolve despite the unfinished merge.
+    assert not _resolve(git_repo, "commit", first).is_empty
+    assert not _resolve(git_repo, "range", f"{first}..{second}").is_empty
+
+
 # --- pr (fake gh) ---------------------------------------------------------------------
 
 
