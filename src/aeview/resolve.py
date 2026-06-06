@@ -174,6 +174,7 @@ def build_roster(reviewers: list[Reviewer]) -> list[RosterEntry]:
                     reviewer=reviewer.name,
                     harness=ref.instance.harness,
                     model=ref.instance.model,
+                    thinking=ref.instance.thinking,
                 )
             )
     return roster

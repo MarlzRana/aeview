@@ -44,7 +44,9 @@ class Adapter(Protocol):
     name: str
     schema_support: SchemaSupport
 
-    async def run(self, prompt: str, model: str, cwd: Path, log_path: Path) -> HarnessOutput: ...
+    async def run(
+        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+    ) -> HarnessOutput: ...
 
 
 def get_adapter(harness: str) -> Adapter:

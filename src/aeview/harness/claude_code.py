@@ -52,7 +52,9 @@ class ClaudeCodeAdapter:
     name: str = "claude-code"
     schema_support: SchemaSupport = "validated"
 
-    async def run(self, prompt: str, model: str, cwd: Path, log_path: Path) -> HarnessOutput:
+    async def run(
+        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+    ) -> HarnessOutput:
         schema = json.dumps(review_output_json_schema())
         args = [
             "claude",
@@ -71,6 +73,9 @@ class ClaudeCodeAdapter:
             _SANDBOX_SETTINGS,
             "--no-session-persistence",
         ]
+        # `thinking` maps to claude's reasoning effort; "default" means leave it unset.
+        if thinking and thinking != "default":
+            args += ["--effort", thinking]
         res = await run_async(args, cwd=cwd, log_path=log_path, input_text=prompt)
         return self._interpret(res.stdout, res.stderr, res.returncode)
 

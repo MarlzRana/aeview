@@ -58,6 +58,21 @@ async def test_adapter_pins_read_only_argv(capture_run_async, tmp_path):
     assert "--json-schema" in args
 
 
+async def test_adapter_maps_thinking_to_effort(capture_run_async, tmp_path):
+    adapter = claude_code.ClaudeCodeAdapter()
+    await adapter.run("p", "opus", tmp_path, tmp_path / "log", "xhigh")
+    args = capture_run_async["args"]
+    assert _flag_value(args, "--effort") == "xhigh"
+
+
+async def test_adapter_omits_effort_for_default_thinking(capture_run_async, tmp_path):
+    adapter = claude_code.ClaudeCodeAdapter()
+    await adapter.run("p", "opus", tmp_path, tmp_path / "log", "default")
+    assert "--effort" not in capture_run_async["args"]
+    await adapter.run("p", "opus", tmp_path, tmp_path / "log", None)
+    assert "--effort" not in capture_run_async["args"]
+
+
 async def test_adapter_passes_prompt_on_stdin_not_argv(capture_run_async, tmp_path):
     adapter = claude_code.ClaudeCodeAdapter()
     await adapter.run("REVIEW PROMPT", "sonnet", tmp_path, tmp_path / "log")

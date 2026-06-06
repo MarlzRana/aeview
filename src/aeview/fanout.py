@@ -46,7 +46,9 @@ async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> 
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            out = await adapter.run(prompt, entry.model, cwd, store.log_path(entry.id))
+            out = await adapter.run(
+                prompt, entry.model, cwd, store.log_path(entry.id), entry.thinking
+            )
         except AdapterError as exc:
             last_error = str(exc)
             if not exc.transient or attempt == MAX_ATTEMPTS:

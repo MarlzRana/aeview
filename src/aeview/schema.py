@@ -155,6 +155,7 @@ class RosterEntry(BaseModel):
     reviewer: str
     harness: str
     model: str
+    thinking: str | None = None
 
 
 class RunManifest(BaseModel):
