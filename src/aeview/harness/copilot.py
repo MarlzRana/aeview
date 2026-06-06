@@ -133,10 +133,13 @@ def _embed_schema(prompt: str, schema: dict) -> str:
     )
 
 
-# Bound the total characters raw_decode may scan across one source: a real review/dedup object
-# is far smaller, so this only trips on pathological brace-heavy output, keeping the inline
-# (synchronous) extraction from blocking the shared event loop during a fan-out.
-_MAX_SCAN_CHARS = 2_000_000
+# A real review/dedup object is small and appears early, so cap both the search window and the
+# number of candidate `{` starts. This keeps a pathological brace-heavy or unterminated-string
+# response from making the inline (synchronous) scan block the shared event loop during a
+# fan-out. We bound the *count* of attempts rather than chars scanned because exc.pos is not a
+# reliable proxy for scan distance — an unterminated string reports the string's start, not EOF.
+_MAX_SCAN_CHARS = 256_000
+_MAX_JSON_STARTS = 256
 
 _DECODER = json.JSONDecoder()
 
@@ -161,28 +164,25 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
 
 
 def _json_objects(text: str) -> Iterator[dict]:
-    """Yield each parseable JSON object embedded in `text`, in document order, via raw_decode.
+    """Yield each parseable JSON object in `text`, in document order, via raw_decode.
 
-    Advance past each parsed object (`i = end`) so its interior braces aren't rescanned, and
-    stop once the cumulative scan budget is spent — together these keep a brace-heavy response
-    from burning time re-decoding nested braces or scanning unboundedly.
+    Advance past each parsed object (`i = end`) so its interior braces aren't rescanned, within
+    a bounded window and a capped number of candidate starts. raw_decode at a `{` yields an
+    object (dict) or raises, so no type check is needed.
     """
+    text = text[:_MAX_SCAN_CHARS]
     i = 0
-    budget = _MAX_SCAN_CHARS
-    while budget > 0:
+    for _ in range(_MAX_JSON_STARTS):
         start = text.find("{", i)
         if start == -1:
             return
         try:
             obj, end = _DECODER.raw_decode(text, start)
-        except json.JSONDecodeError as exc:
-            budget -= max(1, exc.pos - start)  # account for the work spent failing this start
+        except json.JSONDecodeError:
             i = start + 1  # not a valid object start (e.g. a brace in prose) — try the next `{`
             continue
-        budget -= end - start
         i = end
-        if isinstance(obj, dict):
-            yield obj
+        yield obj
 
 
 def _matches(obj: object, required: set[str], properties: set[str]) -> bool:
