@@ -220,6 +220,27 @@ async def test_extracts_object_after_quoted_brace_in_prose(fake_copilot, tmp_pat
     assert out.review.verdict == "approve"
 
 
+async def test_truncated_object_reprompts_and_recovers(fake_copilot, tmp_path):
+    # A token-limit cutoff yields an unclosed object: the balanced scan never returns a span,
+    # extraction yields None, and the adapter re-prompts (never silently accepts a partial).
+    truncated = '{"verdict": "approve", "summary": "cut off here'  # no closing brace
+    fake_copilot.queue(_stream(truncated))  # attempt 1: truncated
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: complete
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2
+
+
+def test_matches_zero_required_accepts_partial_not_just_full():
+    # For an all-defaulted (no required) schema, _matches must accept a payload carrying ANY of
+    # the schema's properties — not require all of them — while still rejecting a stray {}.
+    props = {"a", "b"}
+    assert copilot._matches({"a": 1}, set(), props) is True  # one of two -> accepted
+    assert copilot._matches({"a": 1, "b": 2}, set(), props) is True
+    assert copilot._matches({}, set(), props) is False  # stray empty -> rejected
+    assert copilot._matches({"c": 3}, set(), props) is False  # unrelated keys -> rejected
+
+
 # --- retry-then-fail (the schema_support="prompt" reaction) ----------------------------
 
 
