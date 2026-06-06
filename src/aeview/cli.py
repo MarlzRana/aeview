@@ -22,7 +22,7 @@ from .fanout import fan_out
 from .merge import merge_reviews
 from .prompt import compose_prompt
 from .report import EXIT_ERROR, exit_code, render_human
-from .resolve import ResolveError, build_roster, resolve_reviewer
+from .resolve import ResolveError, build_roster, discover_reviewers, resolve_reviewer
 from .runstore import RunStore, new_run_id, now_iso
 from .schema import Invocation, Report, RunManifest
 from .scope import ScopeError, parse_scope
@@ -118,10 +118,16 @@ async def _orchestrate(
     patch_text: str | None,
 ) -> Report:
     settings = load_settings()
-    resolved_reviewers = [resolve_reviewer(name, settings) for name in names]
+    if "all" in names:
+        names = discover_reviewers(cwd, settings)
+        if not names:
+            raise ResolveError("no reviewers found via the walk-up from this directory")
+    else:
+        names = list(dict.fromkeys(names))  # de-dupe, preserve order
+    resolved_reviewers = [resolve_reviewer(name, cwd, settings) for name in names]
     roster = build_roster(resolved_reviewers)
     if not roster:
-        raise ResolveError("no harnesses configured (settings.json defaultHarnesses is empty)")
+        raise ResolveError("no harnesses resolved (check harness.json / fallbackReviewerHarnesses)")
 
     resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
     if resolved.is_empty:

@@ -14,8 +14,18 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-# Files seeded into ~/.aeview from src/aeview/_data on first run (write-if-absent).
-SEED_FILES = ("settings.json", "REVIEWER.md", "DEDUPLICATION.md")
+# Package-data file -> path under ~/.aeview, seeded on first run (write-if-absent).
+# REVIEWER.md lands inside reviewers/default/ so the default reviewer resolves through the
+# same uniform walk-up as any other reviewer; settings/dedup stay at the ~/.aeview root.
+SEED_FILES = {
+    "settings.json": "settings.json",
+    "DEDUPLICATION.md": "DEDUPLICATION.md",
+    "REVIEWER.md": "reviewers/default/REVIEWER.md",
+    "harness.json": "reviewers/default/harness.json",
+}
+
+# The directory a reviewer named <name> occupies under any rung's .aeview dir.
+REVIEWERS_SUBDIR = "reviewers"
 
 
 def aeview_home() -> Path:
@@ -48,7 +58,8 @@ class Retention(BaseModel):
 class Settings(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
-    default_harnesses: list[HarnessInstance] = Field(default_factory=list)
+    # The harnesses a reviewer runs on when it ships no co-located harness.json.
+    fallback_reviewer_harnesses: list[HarnessInstance] = Field(default_factory=list)
     deduplication_harness: HarnessInstance | None = None
     retention: Retention = Field(default_factory=Retention)
 
@@ -62,10 +73,11 @@ def ensure_seeded() -> Path:
     home = aeview_home()
     home.mkdir(parents=True, exist_ok=True)
     runs_dir().mkdir(parents=True, exist_ok=True)
-    for name in SEED_FILES:
-        target = home / name
+    for src_name, rel_target in SEED_FILES.items():
+        target = home / rel_target
         if not target.exists():
-            target.write_text(_package_data(name), encoding="utf-8")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_package_data(src_name), encoding="utf-8")
     return home
 
 
@@ -75,7 +87,7 @@ def load_settings() -> Settings:
     return Settings.model_validate(raw)
 
 
-def default_reviewer_path() -> Path:
-    """The global fallback reviewer prompt (~/.aeview/REVIEWER.md)."""
+def home_reviewers_dir() -> Path:
+    """The home rung of the reviewer walk-up: ~/.aeview/reviewers/."""
     ensure_seeded()
-    return aeview_home() / "REVIEWER.md"
+    return aeview_home() / REVIEWERS_SUBDIR

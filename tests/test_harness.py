@@ -75,5 +75,30 @@ async def test_adapter_missing_binary_becomes_adapter_error(monkeypatch, tmp_pat
         await adapter.run("p", "sonnet", tmp_path, tmp_path / "log")
 
 
+def test_interpret_classifies_rate_limit_as_transient():
+    adapter = claude_code.ClaudeCodeAdapter()
+    payload = json.dumps({"is_error": True, "api_error_status": 429, "result": "slow down"})
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret(payload, "", 1)
+    assert ei.value.transient is True
+
+
+def test_interpret_classifies_auth_error_as_non_transient():
+    adapter = claude_code.ClaudeCodeAdapter()
+    payload = json.dumps(
+        {"is_error": True, "api_error_status": 401, "result": "could not load credentials"}
+    )
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret(payload, "", 1)
+    assert ei.value.transient is False
+
+
+def test_interpret_missing_binary_is_non_transient():
+    adapter = claude_code.ClaudeCodeAdapter()
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret("", "claude: command not found", 127)
+    assert ei.value.transient is False
+
+
 def _flag_value(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]

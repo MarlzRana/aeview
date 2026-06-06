@@ -39,10 +39,10 @@ def test_e2e_needs_attention(aeview_home, git_repo, stub_claude):
     assert len(reviews) == 1
     review = json.loads(reviews[0].read_text())
     assert review["status"] == "done"
-    assert review["id"] == "default__claude-code-sonnet"
+    assert review["id"] == "default__claude-code-claude-opus-4-8"
     assert (run / "bundle" / "inline_bundle.diff").exists()
     assert (run / "bundle" / "prompt" / "default.md").exists()
-    assert (run / "logs" / "default__claude-code-sonnet.log").exists()
+    assert (run / "logs" / "default__claude-code-claude-opus-4-8.log").exists()
 
 
 def test_e2e_approve(aeview_home, git_repo, stub_claude):

@@ -20,7 +20,15 @@ SchemaSupport = Literal["constrained", "validated", "prompt"]
 
 
 class AdapterError(Exception):
-    """A harness invocation failed in a non-recoverable way."""
+    """A harness invocation failed.
+
+    `transient` marks failures worth retrying with backoff (rate-limit, overload, timeout);
+    everything else (bad auth, missing binary, schema-invalid output) fails fast.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 class HarnessOutput:

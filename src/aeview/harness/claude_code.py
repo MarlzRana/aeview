@@ -38,6 +38,15 @@ _SANDBOX_SETTINGS = json.dumps(
 
 _DISALLOWED_TOOLS = "Edit Write NotebookEdit"
 
+# HTTP statuses worth retrying, and text fragments that signal a transient failure.
+_TRANSIENT_STATUS = {429, 500, 502, 503, 529}
+_TRANSIENT_TEXT = ("rate limit", "overloaded", "capacity", "timeout", "timed out", "try again")
+
+
+def _looks_transient(text: str) -> bool:
+    low = text.lower()
+    return any(frag in low for frag in _TRANSIENT_TEXT)
+
 
 class ClaudeCodeAdapter:
     name: str = "claude-code"
@@ -63,21 +72,26 @@ class ClaudeCodeAdapter:
             "--no-session-persistence",
         ]
         res = await run_async(args, cwd=cwd, log_path=log_path, input_text=prompt)
-        if res.returncode != 0:
-            raise AdapterError(
-                f"claude exited {res.returncode}: {res.stderr.strip() or res.stdout.strip()}"
-            )
-        return self._parse(res.stdout)
+        return self._interpret(res.stdout, res.stderr, res.returncode)
 
-    def _parse(self, stdout: str) -> HarnessOutput:
+    def _interpret(self, stdout: str, stderr: str, returncode: int) -> HarnessOutput:
         try:
             payload = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise AdapterError(f"claude output was not JSON: {exc}") from exc
+        except json.JSONDecodeError:
+            # No parseable result: a non-zero exit is the failure (e.g. missing binary, crash).
+            detail = stderr.strip() or stdout.strip() or "no output"
+            raise AdapterError(
+                f"claude exited {returncode}: {detail}", transient=_looks_transient(detail)
+            ) from None
 
         if payload.get("is_error"):
-            status = payload.get("api_error_status") or payload.get("result") or "unknown error"
-            raise AdapterError(f"claude reported an error: {status}")
+            status = payload.get("api_error_status")
+            text = str(payload.get("result") or "")
+            transient = status in _TRANSIENT_STATUS or _looks_transient(text)
+            raise AdapterError(f"claude reported an error: {status or text}", transient=transient)
+
+        if returncode != 0:
+            raise AdapterError(f"claude exited {returncode} without an error payload")
 
         structured = payload.get("structured_output")
         if structured is None:

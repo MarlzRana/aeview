@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from aeview.bundle import build_bundle
 from aeview.prompt import compose_prompt
 from aeview.resolve import Reviewer
@@ -27,7 +29,9 @@ def _self_collect_bundle():
 
 
 def _reviewer():
-    return Reviewer(name="default", description="d", body="REVIEW BODY", harnesses=[])
+    return Reviewer(
+        name="default", description="d", body="REVIEW BODY", source=Path("."), harnesses=[]
+    )
 
 
 def test_write_bundle_self_collect_writes_artifacts_and_returns_path(aeview_home):

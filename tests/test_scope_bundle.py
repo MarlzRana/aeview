@@ -197,6 +197,27 @@ def test_auto_clean_default_branch_is_nothing_to_review(git_repo):
         _resolve(git_repo, "auto")
 
 
+def test_auto_reviews_unpushed_default_branch_commits(tmp_path):
+    import subprocess
+
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", "-q", str(bare)], check=True)
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", "-q", str(bare), str(work)], check=True)
+    git(work, "config", "user.email", "t@t.com")
+    git(work, "config", "user.name", "t")
+    git(work, "config", "commit.gpgsign", "false")
+    commit(work, "base.py", "base = 1\n", "base")
+    git(work, "push", "-q", "origin", "main")
+    # New commit on main, not pushed -> HEAD ahead of origin/main, clean tree.
+    commit(work, "extra.py", "extra = 1\n", "unpushed work")
+
+    r = _resolve(work, "auto")
+    assert r.spec.type == "branch"
+    assert "extra.py" in r.diff
+    assert "base.py" not in r.diff
+
+
 # --- conflict detection ---------------------------------------------------------------
 
 

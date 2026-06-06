@@ -118,10 +118,6 @@ def _ref_exists(cwd: Path, ref: str) -> bool:
     return _git_ok(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd)
 
 
-def _current_branch(cwd: Path) -> str:
-    return _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd).strip()
-
-
 def _is_dirty(cwd: Path) -> bool:
     return bool(_git(["status", "--porcelain"], cwd).strip())
 
@@ -399,15 +395,24 @@ def _resolve_patch(value: str | None, patch_text: str | None) -> ResolvedScope:
 def _resolve_auto(cwd: Path, include_dirty: bool, allow_conflicts: bool) -> ResolvedScope:
     if _is_dirty(cwd):
         return _resolve_working_tree(cwd)
-    if _has_head(cwd):
-        try:
-            base_ref = resolve_base(cwd, None, do_fetch=False)
-        except ScopeError:
-            base_ref = None
-        if base_ref and _current_branch(cwd) != _base_branch_name(base_ref):
-            return _resolve_branch(cwd, base_ref, include_dirty)
-    raise ScopeError("nothing to review (clean working tree on the default branch)")
+    # Clean tree: review the branch if HEAD is ahead of its base. This is an ahead-check, not
+    # a branch-name comparison, so unpushed commits on the default branch (HEAD ahead of
+    # origin/main) are reviewable instead of being reported as "nothing to review".
+    if _has_head(cwd) and (base_ref := _auto_base(cwd)) and _head_ahead_of(cwd, base_ref):
+        return _resolve_branch(cwd, base_ref, include_dirty)
+    raise ScopeError("nothing to review (clean working tree, no commits ahead of the base)")
 
 
-def _base_branch_name(base_ref: str) -> str:
-    return base_ref.split("/", 1)[1] if base_ref.startswith("origin/") else base_ref
+def _auto_base(cwd: Path) -> str | None:
+    try:
+        return resolve_base(cwd, None, do_fetch=False)
+    except ScopeError:
+        return None
+
+
+def _head_ahead_of(cwd: Path, base_ref: str) -> bool:
+    try:
+        mb = _merge_base(cwd, base_ref)
+    except ScopeError:
+        return False
+    return _git(["rev-list", "--count", f"{mb}..HEAD"], cwd).strip() != "0"

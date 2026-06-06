@@ -1,7 +1,7 @@
 {
-  "defaultHarnesses": [
-    { "harness": "claude-code", "model": "sonnet" }
+  "fallbackReviewerHarnesses": [
+    { "harness": "claude-code", "model": "claude-opus-4-8" }
   ],
-  "deduplicationHarness": { "harness": "claude-code", "model": "sonnet" },
+  "deduplicationHarness": { "harness": "claude-code", "model": "claude-opus-4-8" },
   "retention": { "keepLast": 20, "ttlDays": 14 }
 }
