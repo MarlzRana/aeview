@@ -90,10 +90,12 @@ def _registry() -> dict[str, Adapter]:
     # Lazy import keeps the adapter registry flat and avoids import cycles.
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
+    from .copilot import CopilotAdapter
 
     return {
         "claude-code": ClaudeCodeAdapter(),
         "codex": CodexAdapter(),
+        "copilot": CopilotAdapter(),
     }
 
 

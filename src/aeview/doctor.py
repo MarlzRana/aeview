@@ -75,6 +75,9 @@ def _check_harness(harness: str) -> Check:
         return Check(name, "fail", str(exc))
     if which(adapter.binary) is None:
         return Check(name, "fail", f"{adapter.binary} not found on PATH")
+    if not adapter.auth_status_args:
+        # Some CLIs (copilot) expose no no-cost auth-status command; don't burn a billed call.
+        return Check(name, "warn", f"{adapter.binary} present; auth not verifiable")
     if run_sync(adapter.auth_status_args, timeout=_AUTH_PROBE_TIMEOUT).returncode == 0:
         return Check(name, "ok", f"{adapter.binary} present and authenticated")
     return Check(name, "warn", f"{adapter.binary} present but auth could not be verified")
