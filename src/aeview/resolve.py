@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from .config import HarnessInstance, Settings
+from .config import HarnessInstance, Settings, split_frontmatter
 from .schema import RosterEntry
 
 REVIEWER_FILE = "REVIEWER.md"
@@ -55,13 +55,9 @@ class Reviewer:
 
 def parse_reviewer(path: Path) -> tuple[str, str, str]:
     """Split a REVIEWER.md into (name, description, body) using YAML frontmatter."""
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        raise ResolveError(f"{path} is missing YAML frontmatter")
-    _, _, rest = text.partition("---\n")
-    front, sep, body = rest.partition("\n---")
-    if not sep:
-        raise ResolveError(f"{path} has malformed frontmatter")
+    front, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    if front is None:
+        raise ResolveError(f"{path} is missing or has malformed YAML frontmatter")
     try:
         meta = yaml.safe_load(front)
     except yaml.YAMLError as exc:
@@ -75,7 +71,7 @@ def parse_reviewer(path: Path) -> tuple[str, str, str]:
     description = meta.get("description", "")
     if not name:
         raise ResolveError(f"{path} frontmatter is missing 'name'")
-    return str(name), str(description), body.lstrip("\n")
+    return str(name), str(description), body  # body already had its leading newlines stripped
 
 
 def _candidate_rungs(cwd: Path) -> list[Path]:

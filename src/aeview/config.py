@@ -92,13 +92,23 @@ def load_settings() -> Settings:
     return Settings.model_validate(raw)
 
 
+def split_frontmatter(text: str) -> tuple[str | None, str]:
+    """Split leading `---\\n...\\n---` YAML frontmatter from the body.
+
+    Returns (front, body). `front` is None when there's no opening `---` or no closing `---`
+    — the body is then the full text unchanged. Callers decide whether a missing front is an
+    error (reviewers) or fine (the dedup prompt). Keeps the `---` convention in one place."""
+    if not text.startswith("---"):
+        return None, text
+    _, _, rest = text.partition("---\n")
+    front, sep, body = rest.partition("\n---")
+    if not sep:
+        return None, text
+    return front, body.lstrip("\n")
+
+
 def load_dedup_prompt() -> str:
     """The dedup harness instructions: ~/.aeview/DEDUPLICATION.md, frontmatter stripped."""
     ensure_seeded()
     text = (aeview_home() / "DEDUPLICATION.md").read_text(encoding="utf-8")
-    if text.startswith("---"):
-        _, _, rest = text.partition("---\n")
-        _, sep, body = rest.partition("\n---")
-        if sep:
-            return body.lstrip("\n")
-    return text
+    return split_frontmatter(text)[1]
