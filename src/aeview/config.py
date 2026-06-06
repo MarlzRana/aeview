@@ -44,6 +44,14 @@ class HarnessInstance(BaseModel):
     def instance_id(self) -> str:
         return f"{self.harness}-{self.model}"
 
+    @property
+    def descriptor_id(self) -> str:
+        """Like instance_id but always includes thinking when set — used for the single dedup
+        instance's on-disk dir and run.json record (no collision-escalation needed there)."""
+        if self.thinking and self.thinking != "default":
+            return f"{self.harness}-{self.model}-{self.thinking}"
+        return self.instance_id
+
 
 class Retention(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
@@ -82,3 +90,15 @@ def load_settings() -> Settings:
     ensure_seeded()
     raw = json.loads((aeview_home() / "settings.json").read_text(encoding="utf-8"))
     return Settings.model_validate(raw)
+
+
+def load_dedup_prompt() -> str:
+    """The dedup harness instructions: ~/.aeview/DEDUPLICATION.md, frontmatter stripped."""
+    ensure_seeded()
+    text = (aeview_home() / "DEDUPLICATION.md").read_text(encoding="utf-8")
+    if text.startswith("---"):
+        _, _, rest = text.partition("---\n")
+        _, sep, body = rest.partition("\n---")
+        if sep:
+            return body.lstrip("\n")
+    return text

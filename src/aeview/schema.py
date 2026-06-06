@@ -12,6 +12,7 @@ only camelCase surface; see `config.py`).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -85,6 +86,29 @@ class ReviewResult(BaseModel):
     error: str | None = None
 
 
+class PooledFinding(Finding):
+    """A finding tagged with a stable, run-local id for the dedup harness to reference."""
+
+    id: str
+
+
+class DuplicateGroup(BaseModel):
+    """One dedup decision: the survivor id plus the ids it absorbs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    survivor: str
+    duplicates: list[str] = Field(default_factory=list)
+
+
+class DuplicateGroups(BaseModel):
+    """The dedup harness's output contract: id-groups only, never finding content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    duplicate_groups: list[DuplicateGroup] = Field(default_factory=list)
+
+
 class Source(BaseModel):
     """One review that raised a (possibly deduplicated) finding."""
 
@@ -96,8 +120,9 @@ class Source(BaseModel):
 
 
 class MergedFinding(Finding):
-    """A survivor finding plus provenance after merge."""
+    """A survivor finding (kept verbatim) plus its run-local id and provenance after merge."""
 
+    id: str
     sources: list[Source] = Field(default_factory=list)
     agreement: int = 1
 
@@ -117,9 +142,39 @@ class Coverage(BaseModel):
 
 
 class Dedup(BaseModel):
+    """The report-level dedup summary. `harness`/`reason`/`warning` carry the failure notice."""
+
     model_config = ConfigDict(extra="forbid")
 
     status: DedupState
+    harness: str | None = None
+    reason: str | None = None
+    warning: str | None = None
+
+
+class UsageBreakdown(BaseModel):
+    """Run-total cost, with the dedup call kept separate from the review fan-out."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviews: Usage = Field(default_factory=Usage)
+    dedup: Usage = Field(default_factory=Usage)
+    total: Usage = Field(default_factory=Usage)
+
+
+class DedupResult(BaseModel):
+    """Written to dedup/<instance>/result.json: the harness's grouping decision + its own usage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    harness: str
+    status: DedupState
+    started_at: str
+    finished_at: str
+    groups: list[DuplicateGroup] = Field(default_factory=list)
+    usage: Usage = Field(default_factory=Usage)
+    reason: str | None = None
+    warning: str | None = None
 
 
 class Report(BaseModel):
@@ -131,7 +186,7 @@ class Report(BaseModel):
     next_steps: list[NextStepBlock] = Field(default_factory=list)
     coverage: Coverage
     dedup: Dedup
-    usage: Usage
+    usage: UsageBreakdown
 
 
 class ScopeSpec(BaseModel):
@@ -158,6 +213,17 @@ class RosterEntry(BaseModel):
     thinking: str | None = None
 
 
+class DedupPlan(BaseModel):
+    """The dedup harness this run will use. Recorded in run.json only when roster > 1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    harness: str
+    model: str
+    thinking: str | None = None
+
+
 class RunManifest(BaseModel):
     """Orchestrator-owned, written to run.json. Run-level only, no per-review status."""
 
@@ -170,6 +236,7 @@ class RunManifest(BaseModel):
     overall: RunState
     invocation: Invocation
     roster: list[RosterEntry]
+    dedup: DedupPlan | None = None
     pid: int | None = None
     pgid: int | None = None
 
@@ -179,14 +246,20 @@ def review_output_json_schema() -> dict:
     return ReviewOutput.model_json_schema()
 
 
-def strict_review_output_schema() -> dict:
-    """OpenAI strict-mode schema for codex's constrained decoding.
+def duplicate_groups_json_schema() -> dict:
+    """JSON Schema for the dedup harness's id-group output."""
+    return DuplicateGroups.model_json_schema()
+
+
+def make_strict_schema(base: dict) -> dict:
+    """Return an OpenAI strict-mode copy of a JSON Schema for codex's constrained decoding.
 
     Strict mode requires every object to list *all* its properties in `required` and to set
-    `additionalProperties: false`. pydantic omits fields with defaults (findings/next_steps)
-    from `required`, which codex rejects — so mark every property required, recursively.
+    `additionalProperties: false`. pydantic omits fields with defaults from `required`, which
+    codex rejects — so mark every property required, recursively, on a copy (the lenient base
+    is reused as-is by validate-and-reprompt harnesses).
     """
-    schema = ReviewOutput.model_json_schema()
+    schema = deepcopy(base)
     _make_strict(schema)
     return schema
 

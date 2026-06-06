@@ -56,6 +56,7 @@ async def run_async(
     cwd: Path | None = None,
     log_path: Path | None = None,
     input_text: str | None = None,
+    timeout: float | None = None,
 ) -> ProcResult:
     """Run a command, capturing stdout/stderr. Optionally tee raw output to a log file.
 
@@ -64,6 +65,10 @@ async def run_async(
 
     `input_text` is fed on stdin — the way harness CLIs take large prompts without
     risking an ARG_MAX overflow from a giant argv element.
+
+    `timeout` (seconds) bounds the call: on expiry the child is killed and a 124 result is
+    returned, which the adapter turns into a failure. (Killing only the direct child, not its
+    process group — full group-kill on cancel is I6's lifecycle work.)
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -78,9 +83,25 @@ async def run_async(
         # AdapterError, so one absent CLI fails just that review instead of crashing the run.
         return _spawn_failure(args, cwd)
     stdin_b = input_text.encode("utf-8") if input_text is not None else None
-    stdout_b, stderr_b = await proc.communicate(input=stdin_b)
+    try:
+        stdout_b, stderr_b = await _communicate(proc, stdin_b, timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        msg = f"{args[0]}: timed out after {timeout}s"
+        if log_path is not None:
+            log_path.write_text(f"--- stderr ---\n{msg}", "utf-8")
+        return ProcResult(_TIMED_OUT, "", msg)
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
     if log_path is not None:
         log_path.write_text(stdout + ("\n--- stderr ---\n" + stderr if stderr else ""), "utf-8")
     return ProcResult(proc.returncode or 0, stdout, stderr)
+
+
+async def _communicate(
+    proc: asyncio.subprocess.Process, stdin_b: bytes | None, timeout: float | None
+) -> tuple[bytes, bytes]:
+    if timeout is None:
+        return await proc.communicate(input=stdin_b)
+    return await asyncio.wait_for(proc.communicate(input=stdin_b), timeout=timeout)

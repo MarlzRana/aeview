@@ -3,10 +3,40 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from aeview.cli import _resolve_all_lenient, _split_reviewers, app
+from aeview.cli import _dedup_plan, _resolve_all_lenient, _split_reviewers, app
 from aeview.config import HarnessInstance, Settings
 from aeview.resolve import ResolveError
+from aeview.schema import RosterEntry
 from conftest import make_reviewer
+
+
+def _roster(n: int) -> list[RosterEntry]:
+    return [
+        RosterEntry(id=f"r{i}__claude-code-opus", reviewer=f"r{i}", harness="claude-code",
+                    model="opus")
+        for i in range(n)
+    ]
+
+
+def _settings_with_dedup() -> Settings:
+    return Settings(
+        deduplication_harness=HarnessInstance(harness="claude-code", model="opus", thinking="high")
+    )
+
+
+def test_dedup_plan_pinned_when_roster_gt_1():
+    plan = _dedup_plan(_roster(2), _settings_with_dedup())
+    assert plan is not None
+    assert plan.id == "claude-code-opus-high"  # descriptor includes thinking
+    assert plan.harness == "claude-code" and plan.model == "opus" and plan.thinking == "high"
+
+
+def test_dedup_plan_none_for_single_review_roster():
+    assert _dedup_plan(_roster(1), _settings_with_dedup()) is None
+
+
+def test_dedup_plan_none_when_unconfigured():
+    assert _dedup_plan(_roster(3), Settings(deduplication_harness=None)) is None
 
 
 def test_default_when_none():

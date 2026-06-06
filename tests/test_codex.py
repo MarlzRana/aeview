@@ -33,9 +33,10 @@ def capture_codex(monkeypatch):
     """Replace run_async: capture argv and write the canned final message to the output file."""
     captured: dict = {}
 
-    async def fake(args, cwd=None, log_path=None, input_text=None):
+    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
         captured["args"] = args
         captured["input_text"] = input_text
+        captured["timeout"] = timeout
         out_path = Path(_find(args, "--output-last-message"))
         out_path.write_text(_VALID_FINAL, encoding="utf-8")
         return ProcResult(0, _USAGE_JSONL, "")
@@ -79,10 +80,17 @@ def test_interpret_rejects_non_json_final():
         codex.CodexAdapter()._interpret("not json", "", "", 0)
 
 
-def test_interpret_rejects_schema_invalid_final():
+async def test_run_rejects_schema_invalid_final(monkeypatch, tmp_path):
+    # _interpret now only parses JSON; the review-shape validation lives in run().
     bad = json.dumps({"verdict": "maybe", "summary": "x", "findings": [], "next_steps": []})
+
+    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
+        Path(_find(args, "--output-last-message")).write_text(bad, encoding="utf-8")
+        return ProcResult(0, "", "")
+
+    monkeypatch.setattr(codex, "run_async", fake)
     with pytest.raises(AdapterError, match="schema validation"):
-        codex.CodexAdapter()._interpret(bad, "", "", 0)
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
 
 
 def test_interpret_nonzero_with_empty_final_is_error():

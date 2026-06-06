@@ -16,8 +16,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from ..process import run_async
-from ..schema import ReviewOutput, Usage, strict_review_output_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport, looks_transient
+from ..schema import ReviewOutput, Usage, make_strict_schema, review_output_json_schema
+from .base import AdapterError, HarnessOutput, SchemaSupport, StructuredOutput, looks_transient
 
 # codex reasoning-effort levels (no "minimal", unlike claude); "default"/None -> leave unset.
 _EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
@@ -29,12 +29,20 @@ class CodexAdapter:
     binary: str = "codex"
     auth_status_args: list[str] = ["codex", "login", "status"]  # noqa: RUF012
 
-    async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
-    ) -> HarnessOutput:
+    async def run_structured(
+        self,
+        prompt: str,
+        schema: dict,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
+    ) -> StructuredOutput:
         with tempfile.TemporaryDirectory(prefix="aeview-codex-") as tmp:
             schema_file = Path(tmp) / "schema.json"
-            schema_file.write_text(json.dumps(strict_review_output_schema()), encoding="utf-8")
+            # codex's constrained decoding (OpenAI strict mode) needs every property required.
+            schema_file.write_text(json.dumps(make_strict_schema(schema)), encoding="utf-8")
             last_message = Path(tmp) / "last_message.txt"
 
             args = [
@@ -60,12 +68,26 @@ class CodexAdapter:
                     )
                 args += ["-c", f'model_reasoning_effort="{thinking}"']
 
-            res = await run_async(args, cwd=cwd, log_path=log_path, input_text=prompt)
+            res = await run_async(
+                args, cwd=cwd, log_path=log_path, input_text=prompt, timeout=timeout
+            )
             final = last_message.read_text(encoding="utf-8") if last_message.exists() else ""
 
         return self._interpret(final, res.stdout, res.stderr, res.returncode)
 
-    def _interpret(self, final: str, stdout: str, stderr: str, returncode: int) -> HarnessOutput:
+    async def run(
+        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+    ) -> HarnessOutput:
+        out = await self.run_structured(
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking
+        )
+        try:
+            review = ReviewOutput.model_validate(out.payload)
+        except ValidationError as exc:
+            raise AdapterError(f"codex output failed schema validation: {exc}") from exc
+        return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+
+    def _interpret(self, final: str, stdout: str, stderr: str, returncode: int) -> StructuredOutput:
         # codex exits 0 on success; a non-zero exit means the run failed, so never trust a
         # final message it may have left behind — treat the whole invocation as a failure.
         if returncode != 0:
@@ -82,12 +104,7 @@ class CodexAdapter:
             # --output-schema constrains decoding, so a non-JSON final message is a hard failure.
             raise AdapterError(f"codex final message was not JSON: {exc}") from exc
 
-        try:
-            review = ReviewOutput.model_validate(payload)
-        except ValidationError as exc:
-            raise AdapterError(f"codex output failed schema validation: {exc}") from exc
-
-        return HarnessOutput(review=review, usage=_usage_from_jsonl(stdout), raw=final)
+        return StructuredOutput(payload=payload, usage=_usage_from_jsonl(stdout), raw=final)
 
 
 def _event_type(event: dict) -> str | None:

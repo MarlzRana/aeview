@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .bundle import Bundle
 from .config import runs_dir
-from .schema import Report, ReviewResult, RunManifest
+from .schema import DedupResult, PooledFinding, Report, ReviewResult, RunManifest
 
 
 def now_iso() -> str:
@@ -113,6 +113,27 @@ class RunStore:
         # "/" while the id orders on "__", so a path sort can reorder prefix-named reviewers.
         results.sort(key=lambda r: r.id)
         return results
+
+    # --- dedup/<instance>/ (the one dedup call; absent when dedup is skipped) ---
+    def _dedup_dir(self, instance_id: str) -> Path:
+        d = self.dir / "dedup" / instance_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def write_dedup_prompt(self, instance_id: str, prompt: str) -> None:
+        _atomic_write(self._dedup_dir(instance_id) / "prompt.md", prompt)
+
+    def write_dedup_input(self, instance_id: str, pool: list[PooledFinding]) -> None:
+        body = ",\n".join(f.model_dump_json() for f in pool)
+        payload = f"[\n{body}\n]\n" if pool else "[]\n"
+        _atomic_write(self._dedup_dir(instance_id) / "input.json", payload)
+
+    def write_dedup_result(self, instance_id: str, result: DedupResult) -> None:
+        path = self._dedup_dir(instance_id) / "result.json"
+        _atomic_write(path, result.model_dump_json(indent=2))
+
+    def dedup_log_path(self, instance_id: str) -> Path:
+        return self._dedup_dir(instance_id) / "dedup.log"
 
     # --- report.json (written last) ---
     def write_report(self, report: Report) -> None:

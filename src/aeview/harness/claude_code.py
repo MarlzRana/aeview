@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, review_output_json_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport, looks_transient
+from .base import AdapterError, HarnessOutput, SchemaSupport, StructuredOutput, looks_transient
 
 _SANDBOX_SETTINGS = json.dumps(
     {
@@ -48,10 +48,16 @@ class ClaudeCodeAdapter:
     binary: str = "claude"
     auth_status_args: list[str] = ["claude", "auth", "status"]  # noqa: RUF012
 
-    async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
-    ) -> HarnessOutput:
-        schema = json.dumps(review_output_json_schema())
+    async def run_structured(
+        self,
+        prompt: str,
+        schema: dict,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
+    ) -> StructuredOutput:
         args = [
             "claude",
             "-p",
@@ -60,7 +66,7 @@ class ClaudeCodeAdapter:
             "--model",
             model,
             "--json-schema",
-            schema,
+            json.dumps(schema),
             "--permission-mode",
             "dontAsk",
             "--disallowedTools",
@@ -72,10 +78,22 @@ class ClaudeCodeAdapter:
         # `thinking` maps to claude's reasoning effort; "default" means leave it unset.
         if thinking and thinking != "default":
             args += ["--effort", thinking]
-        res = await run_async(args, cwd=cwd, log_path=log_path, input_text=prompt)
+        res = await run_async(args, cwd=cwd, log_path=log_path, input_text=prompt, timeout=timeout)
         return self._interpret(res.stdout, res.stderr, res.returncode)
 
-    def _interpret(self, stdout: str, stderr: str, returncode: int) -> HarnessOutput:
+    async def run(
+        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+    ) -> HarnessOutput:
+        out = await self.run_structured(
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking
+        )
+        try:
+            review = ReviewOutput.model_validate(out.payload)
+        except ValidationError as exc:
+            raise AdapterError(f"claude output failed schema validation: {exc}") from exc
+        return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+
+    def _interpret(self, stdout: str, stderr: str, returncode: int) -> StructuredOutput:
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError:
@@ -98,12 +116,7 @@ class ClaudeCodeAdapter:
         if structured is None:
             raise AdapterError("claude output had no structured_output (schema not honored)")
 
-        try:
-            review = ReviewOutput.model_validate(structured)
-        except ValidationError as exc:
-            raise AdapterError(f"claude output failed schema validation: {exc}") from exc
-
-        return HarnessOutput(review=review, usage=self._usage(payload), raw=stdout)
+        return StructuredOutput(payload=structured, usage=self._usage(payload), raw=stdout)
 
     @staticmethod
     def _usage(payload: dict) -> Usage:

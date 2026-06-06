@@ -44,6 +44,9 @@ def render_human(report: Report) -> str:
         lines.append(f"  - [{f.severity}] {f.title}{agree}")
         lines.append(f"    {loc} :: {f.recommendation}")
 
-    if report.usage.cost_usd:
-        lines.append(f"     cost: ${report.usage.cost_usd:.4f}")
+    if report.dedup.status == "failed":
+        lines.append(f"     dedup FAILED: {report.dedup.warning or report.dedup.reason}")
+
+    if report.usage.total.cost_usd:
+        lines.append(f"     cost: ${report.usage.total.cost_usd:.4f}")
     return "\n".join(lines)

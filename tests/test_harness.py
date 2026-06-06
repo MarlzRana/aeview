@@ -28,7 +28,7 @@ def capture_run_async(monkeypatch):
     """Replace the adapter's run_async with a capturing stub; return the captured call."""
     captured: dict = {}
 
-    async def fake(args, cwd=None, log_path=None, input_text=None):
+    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
         captured["args"] = args
         captured["cwd"] = cwd
         captured["input_text"] = input_text
@@ -81,7 +81,7 @@ async def test_adapter_passes_prompt_on_stdin_not_argv(capture_run_async, tmp_pa
 
 
 async def test_adapter_missing_binary_becomes_adapter_error(monkeypatch, tmp_path):
-    async def missing(args, cwd=None, log_path=None, input_text=None):
+    async def missing(args, cwd=None, log_path=None, input_text=None, timeout=None):
         return ProcResult(127, "", "claude: command not found")
 
     monkeypatch.setattr(claude_code, "run_async", missing)

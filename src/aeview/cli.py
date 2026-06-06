@@ -31,7 +31,7 @@ from .resolve import (
     resolve_reviewer,
 )
 from .runstore import RunStore, new_run_id, now_iso
-from .schema import Invocation, Report, RunManifest
+from .schema import DedupPlan, Invocation, Report, RunManifest
 from .scope import ScopeError, parse_scope
 from .scope import resolve as resolve_scope
 
@@ -157,6 +157,23 @@ def _read_patch(value: str | None) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _dedup_plan(roster: list, settings: Settings) -> DedupPlan | None:
+    """Pin the dedup harness in run.json when the roster will need it (>1 review).
+
+    Recording it freezes which harness this run used against later settings.json edits — the
+    same reason the roster and bundle are frozen. Null when roster=1 (dedup can't run) or no
+    harness is configured (the run then surfaces that as dedup.status=failed at merge time)."""
+    instance = settings.deduplication_harness
+    if len(roster) <= 1 or instance is None:
+        return None
+    return DedupPlan(
+        id=instance.descriptor_id,
+        harness=instance.harness,
+        model=instance.model,
+        thinking=instance.thinking,
+    )
+
+
 async def _orchestrate(
     names: list[str],
     stype: str,
@@ -199,6 +216,7 @@ async def _orchestrate(
         overall="running",
         invocation=Invocation(reviewers=names, scope=bundle.scope),
         roster=roster,
+        dedup=_dedup_plan(roster, settings),
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(bundle)
@@ -210,7 +228,7 @@ async def _orchestrate(
         store.write_prompt(reviewer_name, prompt)
 
     results = await fan_out(store, roster, prompt_by_reviewer, cwd)
-    report = merge_reviews(results)
+    report = await merge_reviews(results, settings, store, cwd)
     store.write_report(report)
 
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"

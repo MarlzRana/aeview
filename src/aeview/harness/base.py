@@ -40,10 +40,24 @@ class AdapterError(Exception):
 
 
 class HarnessOutput:
-    """Parsed result of one harness invocation."""
+    """Parsed result of one review invocation."""
 
     def __init__(self, review: ReviewOutput, usage: Usage, raw: str) -> None:
         self.review = review
+        self.usage = usage
+        self.raw = raw
+
+
+class StructuredOutput:
+    """Result of a generic schema-constrained invocation: the conforming JSON + usage.
+
+    `payload` is validated against the *caller's* schema (ReviewOutput for a review,
+    DuplicateGroups for dedup) by the caller; the adapter only guarantees it is the JSON the
+    harness produced under the given schema.
+    """
+
+    def __init__(self, payload: dict, usage: Usage, raw: str) -> None:
+        self.payload = payload
         self.usage = usage
         self.raw = raw
 
@@ -53,6 +67,19 @@ class Adapter(Protocol):
     schema_support: SchemaSupport
     binary: str  # the CLI executable, for doctor's PATH check
     auth_status_args: list[str]  # a no-cost auth/status command; rc==0 means authenticated
+
+    async def run_structured(
+        self,
+        prompt: str,
+        schema: dict,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
+    ) -> StructuredOutput:
+        """Invoke read-only under an arbitrary JSON Schema; the adapter owns schema delivery."""
+        ...
 
     async def run(
         self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
