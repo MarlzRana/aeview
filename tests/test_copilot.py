@@ -275,6 +275,46 @@ async def test_wrapped_answer_is_not_extracted_then_recovers_on_reprompt(fake_co
     assert len(fake_copilot.calls) == 2
 
 
+async def test_deeply_nested_input_is_caught_and_reprompts(fake_copilot, tmp_path):
+    # raw_decode raises RecursionError (not JSONDecodeError) on a deeply nested prefix; it must
+    # be caught so the review re-prompts (and dedup degrades) instead of escaping and aborting
+    # the orchestration with the manifest stuck in `running`.
+    deep = '{"a":' * 6000  # exceeds the interpreter recursion limit, never closes
+    fake_copilot.queue(_stream(deep))  # attempt 1: RecursionError territory
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: clean
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2
+
+
+def test_json_objects_does_not_raise_on_deep_nesting():
+    # Direct guard: the generator swallows RecursionError and simply yields nothing.
+    assert list(copilot._json_objects('{"a":' * 6000)) == []
+
+
+async def test_fallback_window_bounds_object_after_junk(fake_copilot, tmp_path, monkeypatch):
+    # The per-attempt window applies to the fallback scan (objects after a non-matching first
+    # object). A matching object larger than the window is truncated -> not found -> re-prompt.
+    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 20)  # smaller than a real review object
+    decoy = {"note": "not a review"}
+    fake_copilot.queue(_stream(f"{json.dumps(decoy)} {json.dumps(_VALID)}"))  # windowed away
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: bare -> fast path, unbounded
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2  # window truncated the post-decoy answer -> re-prompt
+
+
+async def test_fast_path_parses_large_object_beyond_window(fake_copilot, tmp_path, monkeypatch):
+    # The clean first object is parsed unbounded, so a complete answer larger than the window is
+    # still extracted (the window only caps the fallback, not the fast path).
+    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 20)
+    big = dict(_VALID, summary="x" * 500)  # well over the 20-char window
+    fake_copilot.queue(_stream(json.dumps(big)))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.summary == "x" * 500
+    assert len(fake_copilot.calls) == 1
+
+
 def test_matches_zero_required_accepts_partial_not_just_full():
     # For an all-defaulted (no required) schema, _matches must accept a payload carrying ANY of
     # the schema's properties — not require all of them — while still rejecting a stray {}.
