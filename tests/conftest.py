@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 
-def make_reviewer(base, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
+def make_reviewer(base: Path, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
     """Create a reviewer at <base>/.aeview/reviewers/<name>/ (optional harness.json)."""
     d = base / ".aeview" / "reviewers" / name
     d.mkdir(parents=True, exist_ok=True)
