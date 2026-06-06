@@ -24,9 +24,6 @@ SEED_FILES = {
     "harness.json": "reviewers/default/harness.json",
 }
 
-# The directory a reviewer named <name> occupies under any rung's .aeview dir.
-REVIEWERS_SUBDIR = "reviewers"
-
 
 def aeview_home() -> Path:
     return Path.home() / ".aeview"
@@ -85,9 +82,3 @@ def load_settings() -> Settings:
     ensure_seeded()
     raw = json.loads((aeview_home() / "settings.json").read_text(encoding="utf-8"))
     return Settings.model_validate(raw)
-
-
-def home_reviewers_dir() -> Path:
-    """The home rung of the reviewer walk-up: ~/.aeview/reviewers/."""
-    ensure_seeded()
-    return aeview_home() / REVIEWERS_SUBDIR
