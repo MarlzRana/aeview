@@ -90,6 +90,35 @@ def test_interpret_nonzero_with_empty_final_is_error():
         codex.CodexAdapter()._interpret("", "", "boom", 1)
 
 
+def test_interpret_nonzero_fails_even_with_a_final_message():
+    # A non-zero exit must not be trusted, even if codex left a parseable final message.
+    with pytest.raises(AdapterError, match="codex exited"):
+        codex.CodexAdapter()._interpret(_VALID_FINAL, "", "boom", 1)
+
+
+def test_interpret_error_detail_comes_from_jsonl():
+    jsonl = json.dumps({"type": "turn.failed", "error": {"message": "rate limit hit"}})
+    with pytest.raises(AdapterError) as ei:
+        codex.CodexAdapter()._interpret("", jsonl, "Reading prompt from stdin...", 1)
+    assert "rate limit hit" in str(ei.value)
+    assert ei.value.transient is True  # classified from the JSONL message, not noisy stderr
+
+
+def test_usage_parsing_survives_null_msg():
+    null_msg = json.dumps({"type": "item.completed", "msg": None})  # would crash naive indexing
+    done = {"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 3}}
+    usage = codex._usage_from_jsonl(f"{null_msg}\n{json.dumps(done)}")
+    assert usage.input_tokens == 7 and usage.output_tokens == 3
+
+
+def test_usage_parsing_handles_msg_wrapped_event():
+    jsonl = json.dumps(
+        {"msg": {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}}}
+    )
+    usage = codex._usage_from_jsonl(jsonl)
+    assert usage.input_tokens == 5 and usage.output_tokens == 2
+
+
 def test_interpret_classifies_transient_text():
     with pytest.raises(AdapterError) as ei:
         codex.CodexAdapter()._interpret("", "", "rate limit exceeded", 1)

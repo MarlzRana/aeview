@@ -66,8 +66,10 @@ class CodexAdapter:
         return self._interpret(final, res.stdout, res.stderr, res.returncode)
 
     def _interpret(self, final: str, stdout: str, stderr: str, returncode: int) -> HarnessOutput:
-        if returncode != 0 and not final.strip():
-            detail = stderr.strip() or stdout.strip() or "no output"
+        # codex exits 0 on success; a non-zero exit means the run failed, so never trust a
+        # final message it may have left behind — treat the whole invocation as a failure.
+        if returncode != 0:
+            detail = _error_detail(stdout, stderr)
             raise AdapterError(
                 f"codex exited {returncode}: {detail}", transient=looks_transient(detail)
             )
@@ -86,6 +88,23 @@ class CodexAdapter:
             raise AdapterError(f"codex output failed schema validation: {exc}") from exc
 
         return HarnessOutput(review=review, usage=_usage_from_jsonl(stdout), raw=final)
+
+
+def _error_detail(stdout: str, stderr: str) -> str:
+    """Prefer a codex error/turn.failed message from the JSONL stream over noisy stderr."""
+    message: str | None = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") in ("error", "turn.failed"):
+            err = event.get("error")
+            nested = err.get("message") if isinstance(err, dict) else None
+            candidate = event.get("message") or nested
+            if candidate:
+                message = str(candidate)
+    return (message or stderr.strip() or "codex failed").strip()
 
 
 def _usage_from_jsonl(stdout: str) -> Usage:
@@ -110,8 +129,11 @@ def _usage_from_jsonl(stdout: str) -> Usage:
 def _event_usage(event: dict) -> dict | None:
     if not isinstance(event, dict):
         return None
-    if "turn.completed" in (event.get("type"), event.get("msg", {}).get("type")):
-        usage = event.get("usage") or event.get("msg", {}).get("usage")
+    # `msg` may be absent or explicitly null; coerce to {} before indexing.
+    msg = event.get("msg")
+    msg = msg if isinstance(msg, dict) else {}
+    if "turn.completed" in (event.get("type"), msg.get("type")):
+        usage = event.get("usage") or msg.get("usage")
         if isinstance(usage, dict):
             return usage
     return None
