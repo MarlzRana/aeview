@@ -60,7 +60,11 @@ def run(
     ] = "auto",
     reviewers: Annotated[
         list[str] | None,
-        typer.Option("--reviewers", help="Reviewer names (this build supports: default)."),
+        typer.Option(
+            "--reviewers",
+            help="Reviewer names: comma-separated (--reviewers a,b) or repeated "
+            "(--reviewers a --reviewers b). Use 'all' for every reviewer found here.",
+        ),
     ] = None,
     include_dirty: Annotated[
         bool,
@@ -78,7 +82,7 @@ def run(
     ] = False,
 ) -> None:
     """Run reviewers over a scope and emit a merged report."""
-    names = reviewers or ["default"]
+    names = _split_reviewers(reviewers)
     cwd = Path.cwd()
     try:
         stype, value = parse_scope(scope)
@@ -95,6 +99,11 @@ def run(
     if output is not None:
         output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     raise typer.Exit(exit_code(report))
+
+
+def _split_reviewers(values: list[str] | None) -> list[str]:
+    """Flatten --reviewers: comma-separated (a,b) and/or repeated (--reviewers a --reviewers b)."""
+    return [n.strip() for item in (values or ["default"]) for n in item.split(",") if n.strip()]
 
 
 def _read_patch(value: str | None) -> str:
