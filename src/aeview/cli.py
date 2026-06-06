@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -24,7 +25,8 @@ from .report import EXIT_ERROR, exit_code, render_human
 from .resolve import ResolveError, build_roster, resolve_reviewer
 from .runstore import RunStore, new_run_id, now_iso
 from .schema import Invocation, Report, RunManifest
-from .scope import ScopeError
+from .scope import ScopeError, parse_scope
+from .scope import resolve as resolve_scope
 
 app = typer.Typer(
     name="aeview",
@@ -49,12 +51,25 @@ def version() -> None:
 @app.command()
 def run(
     scope: Annotated[
-        str, typer.Option("--scope", help="What to review (I1 supports: working-tree).")
-    ] = "working-tree",
+        str,
+        typer.Option(
+            "--scope",
+            help="What to review: <type>[:value]. Types: working-tree, staged, branch, "
+            "pr, effective-pr, commit, range, patch; omitted -> auto.",
+        ),
+    ] = "auto",
     reviewers: Annotated[
         list[str] | None,
-        typer.Option("--reviewers", help="Reviewer names (I1 supports: default)."),
+        typer.Option("--reviewers", help="Reviewer names (this build supports: default)."),
     ] = None,
+    include_dirty: Annotated[
+        bool,
+        typer.Option("--include-dirty", help="Fold uncommitted work onto a committed scope."),
+    ] = False,
+    allow_conflicts: Annotated[
+        bool,
+        typer.Option("--allow-conflicts", help="Review despite an in-progress merge/rebase."),
+    ] = False,
     output: Annotated[
         Path | None, typer.Option("--output", help="Also write report.json to this path.")
     ] = None,
@@ -66,7 +81,11 @@ def run(
     names = reviewers or ["default"]
     cwd = Path.cwd()
     try:
-        report = asyncio.run(_orchestrate(names, scope, cwd))
+        stype, value = parse_scope(scope)
+        patch_text = _read_patch(value) if stype == "patch" else None
+        report = asyncio.run(
+            _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text)
+        )
     except (ScopeError, ResolveError) as exc:
         typer.echo(f"aeview: {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
@@ -78,16 +97,36 @@ def run(
     raise typer.Exit(exit_code(report))
 
 
-async def _orchestrate(names: list[str], scope: str, cwd: Path) -> Report:
+def _read_patch(value: str | None) -> str:
+    if value == "-":
+        return sys.stdin.read()
+    if not value:
+        raise ScopeError("patch scope requires --scope patch:<file> or patch:-")
+    path = Path(value)
+    if not path.is_file():
+        raise ScopeError(f"patch file not found: {value}")
+    return path.read_text(encoding="utf-8")
+
+
+async def _orchestrate(
+    names: list[str],
+    stype: str,
+    value: str | None,
+    cwd: Path,
+    include_dirty: bool,
+    allow_conflicts: bool,
+    patch_text: str | None,
+) -> Report:
     settings = load_settings()
-    resolved = [resolve_reviewer(name, settings) for name in names]
-    roster = build_roster(resolved)
+    resolved_reviewers = [resolve_reviewer(name, settings) for name in names]
+    roster = build_roster(resolved_reviewers)
     if not roster:
         raise ResolveError("no harnesses configured (settings.json defaultHarnesses is empty)")
 
-    bundle = build_bundle(scope, cwd)
-    if bundle.is_empty:
-        raise ScopeError(f"nothing to review for scope '{scope}'")
+    resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
+    if resolved.is_empty:
+        raise ScopeError(f"nothing to review for scope '{stype}'")
+    bundle = build_bundle(resolved)
 
     store = RunStore.create(new_run_id())
     typer.echo(f"run {store.run_id}", err=True)
@@ -101,9 +140,11 @@ async def _orchestrate(names: list[str], scope: str, cwd: Path) -> Report:
         roster=roster,
     )
     store.write_manifest(manifest)
-    store.write_bundle(bundle)
+    full_diff_path = store.write_bundle(bundle)
 
-    prompt_by_reviewer = {r.name: compose_prompt(r, bundle) for r in resolved}
+    prompt_by_reviewer = {
+        r.name: compose_prompt(r, bundle, full_diff_path) for r in resolved_reviewers
+    }
     for reviewer_name, prompt in prompt_by_reviewer.items():
         store.write_prompt(reviewer_name, prompt)
 

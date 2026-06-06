@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Offline stub of the `gh` CLI for Tier-1 tests.
+
+Handles just what aeview's pr scope uses:
+  gh pr view --json baseRefName   -> {"baseRefName": "<AEVIEW_GH_BASE or main>"}
+  gh pr diff [<number>]           -> a small canned unified diff
+"""
+
+import json
+import os
+import sys
+
+argv = sys.argv[1:]
+
+if argv[:2] == ["pr", "view"]:
+    sys.stdout.write(json.dumps({"baseRefName": os.environ.get("AEVIEW_GH_BASE", "main")}))
+    sys.exit(0)
+
+if argv[:2] == ["pr", "diff"]:
+    sys.stdout.write(
+        "diff --git a/pr_file.py b/pr_file.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/pr_file.py\n"
+        "+++ b/pr_file.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+y = 2\n"
+    )
+    sys.exit(0)
+
+sys.stderr.write(f"gh stub: unhandled args {argv}\n")
+sys.exit(1)

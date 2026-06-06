@@ -39,7 +39,7 @@ def git_repo(tmp_path):
     def git(*args: str) -> None:
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
-    git("init", "-q")
+    git("init", "-b", "main", "-q")
     git("config", "user.email", "test@example.com")
     git("config", "user.name", "Test")
     git("config", "commit.gpgsign", "false")
@@ -48,3 +48,30 @@ def git_repo(tmp_path):
     git("add", "app.py")
     git("commit", "-q", "--no-verify", "-m", "init")
     return repo
+
+
+def git(repo, *args: str) -> str:
+    """Run a git command in `repo`, returning stdout (raises on failure)."""
+    return subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def commit(repo, filename: str, content: str, message: str) -> str:
+    """Write a file, stage it, commit it; return the new commit sha."""
+    (repo / filename).write_text(content)
+    git(repo, "add", filename)
+    git(repo, "commit", "-q", "--no-verify", "-m", message)
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
+@pytest.fixture
+def stub_gh(monkeypatch):
+    """Put the offline `gh` stub first on PATH (works with stub_claude's PATH edit)."""
+    stub_dir = Path(__file__).parent / "stubs"
+    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AEVIEW_GH_BASE", "main")

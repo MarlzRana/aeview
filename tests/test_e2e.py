@@ -14,7 +14,9 @@ from aeview.scope import ScopeError
 
 
 def _run(repo):
-    return asyncio.run(_orchestrate(["default"], "working-tree", repo))
+    return asyncio.run(
+        _orchestrate(["default"], "working-tree", None, repo, False, False, None)
+    )
 
 
 def test_e2e_needs_attention(aeview_home, git_repo, stub_claude):
@@ -76,4 +78,4 @@ def test_empty_diff_raises(aeview_home, git_repo, stub_claude):
 def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     with pytest.raises(ResolveError):
-        asyncio.run(_orchestrate(["nope"], "working-tree", git_repo))
+        asyncio.run(_orchestrate(["nope"], "working-tree", None, git_repo, False, False, None))

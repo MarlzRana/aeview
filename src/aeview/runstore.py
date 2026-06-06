@@ -32,6 +32,18 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _self_collect_md(bundle: Bundle, full_diff: Path) -> str:
+    inspect = "\n".join(f"- `{cmd}`" for cmd in bundle.inspect) or "- (read the diff file)"
+    return (
+        f"# Self-collect bundle\n\n"
+        f"Scope: {bundle.scope.type} (base {bundle.scope.base})\n"
+        f"Diff size: {bundle.diff_bytes} bytes (over the inline threshold)\n\n"
+        f"Full diff: {full_diff}\n\n"
+        f"Inspect read-only:\n{inspect}\n\n"
+        f"## Summary\n\n{bundle.summary}\n"
+    )
+
+
 class RunStore:
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
@@ -56,9 +68,16 @@ class RunStore:
         return RunManifest.model_validate_json((self.dir / "run.json").read_text("utf-8"))
 
     # --- bundle/ ---
-    def write_bundle(self, bundle: Bundle) -> None:
+    def write_bundle(self, bundle: Bundle) -> Path | None:
+        """Persist bundle artifacts. Returns the full-diff path in self-collect mode."""
         _atomic_write(self.bundle_dir / "bundle.json", json.dumps(bundle.manifest(), indent=2))
-        _atomic_write(self.bundle_dir / "inline_bundle.diff", bundle.diff)
+        if bundle.is_inline:
+            _atomic_write(self.bundle_dir / "inline_bundle.diff", bundle.diff)
+            return None
+        full = self.bundle_dir / "self_collect.diff"
+        _atomic_write(full, bundle.diff)
+        _atomic_write(self.bundle_dir / "self_collect_bundle.md", _self_collect_md(bundle, full))
+        return full
 
     def write_prompt(self, reviewer: str, prompt: str) -> None:
         _atomic_write(self.prompt_dir / f"{reviewer}.md", prompt)
