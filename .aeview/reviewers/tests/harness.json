@@ -1,5 +1,5 @@
 {
   "harnesses": [
-    { "harness": "claude-code", "model": "claude-sonnet-4-6[1m]" }
+    { "harness": "codex", "model": "gpt-5.5" }
   ]
 }
