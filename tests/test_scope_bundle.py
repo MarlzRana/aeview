@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from aeview.bundle import INLINE_MAX_BYTES, build_bundle
-from aeview.scope import ScopeError, parse_scope
+from aeview.scope import ScopeError, parse_scope, resolve_base
 from aeview.scope import resolve as resolve_scope
 from conftest import commit, git
 
@@ -67,6 +67,25 @@ def test_staged_only_sees_staged(git_repo):
 
 def test_clean_tree_is_empty(git_repo):
     assert _resolve(git_repo, "working-tree").is_empty
+
+
+def test_no_head_working_tree_includes_unstaged_edits(tmp_path):
+    # Pre-first-commit repo: a file added then modified must still show the unstaged delta.
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    git(repo, "init", "-b", "main", "-q")
+    (repo / "f.py").write_text("staged = 1\n")
+    git(repo, "add", "f.py")
+    (repo / "f.py").write_text("staged = 1\nunstaged = 2\n")  # modify after staging
+    r = _resolve(repo, "working-tree")
+    assert "unstaged = 2" in r.diff  # the unstaged edit is not dropped
+
+
+def test_resolve_base_rejects_option_like_ref_segment(git_repo):
+    # `origin/-p` slips past parse_scope's guard but its split segment '-p' must not reach
+    # `git fetch` as the --prune option.
+    with pytest.raises(ScopeError, match="git option"):
+        resolve_base(git_repo, "origin/-p", do_fetch=True)
 
 
 # --- commit / range -------------------------------------------------------------------

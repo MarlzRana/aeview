@@ -212,6 +212,10 @@ def resolve_base(cwd: Path, explicit: str | None, do_fetch: bool) -> str:
         raise ScopeError("could not determine a base branch; pass --scope branch:<ref>")
     if do_fetch:
         branch = ref.split("/", 1)[1] if ref.startswith("origin/") else ref
+        # parse_scope rejects values starting with '-', but an `origin/<x>` ref re-splits to
+        # `<x>`; guard that segment too so e.g. `origin/-p` can't reach `git fetch` as `--prune`.
+        if branch.startswith("-"):
+            raise ScopeError(f"invalid base ref segment {branch!r} (looks like a git option)")
         if run_sync(["git", "fetch", "origin", branch], cwd=cwd).returncode == 0:
             ref = _prefer_remote(cwd, branch)
     if not _ref_exists(cwd, ref):
@@ -317,10 +321,12 @@ def _result(
 
 
 def _resolve_working_tree(cwd: Path) -> ResolvedScope:
-    tracked = _git(["diff", "HEAD"], cwd) if _has_head(cwd) else _git(["diff", "--cached"], cwd)
-    diff = tracked + _untracked_diff(cwd)
+    # Pre-first-commit (no HEAD): diff the working tree against the empty tree so staged AND
+    # unstaged edits to already-added files are captured; `git diff --cached` drops the unstaged.
     base = "HEAD" if _has_head(cwd) else EMPTY_TREE
-    return _result("working-tree", base, diff, ["git diff HEAD"])
+    tracked = _git(["diff", base], cwd)
+    diff = tracked + _untracked_diff(cwd)
+    return _result("working-tree", base, diff, [f"git diff {base}"])
 
 
 def _resolve_staged(cwd: Path) -> ResolvedScope:
