@@ -231,6 +231,25 @@ async def test_truncated_object_reprompts_and_recovers(fake_copilot, tmp_path):
     assert len(fake_copilot.calls) == 2
 
 
+async def test_skips_non_matching_object_before_real_answer(fake_copilot, tmp_path):
+    # A decoy/echoed object that doesn't match the schema must be skipped past (its nested
+    # braces not rescanned) and the real review after it still found — in one attempt.
+    decoy = {"example": {"nested": {"deep": [1, 2, 3]}}, "note": "ignore me"}
+    fake_copilot.queue(_stream(f"{json.dumps(decoy)} then: {json.dumps(_VALID)}"))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 1
+
+
+async def test_finds_answer_after_brace_heavy_preamble(fake_copilot, tmp_path):
+    # Many unmatched braces before the answer must not prevent reaching it (the pre-rewrite
+    # per-brace start cap would have aborted first). Found in one attempt, no re-prompt.
+    fake_copilot.queue(_stream(("{" * 1000) + " " + json.dumps(_VALID)))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 1
+
+
 def test_matches_zero_required_accepts_partial_not_just_full():
     # For an all-defaulted (no required) schema, _matches must accept a payload carrying ANY of
     # the schema's properties — not require all of them — while still rejecting a stray {}.
