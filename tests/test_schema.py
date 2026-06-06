@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from aeview.schema import ReviewOutput, review_output_json_schema
+from aeview.schema import (
+    ReviewOutput,
+    review_output_json_schema,
+    strict_review_output_schema,
+)
 
 
 def test_review_output_round_trips():
@@ -29,3 +33,20 @@ def test_json_schema_is_strict():
     schema = review_output_json_schema()
     assert schema["additionalProperties"] is False
     assert "verdict" in schema["required"]
+
+
+def test_lenient_schema_omits_defaulted_required():
+    # The claude (validate-and-reprompt) schema leaves defaulted fields optional.
+    schema = review_output_json_schema()
+    assert "findings" not in schema["required"]
+
+
+def test_strict_schema_marks_every_property_required():
+    # codex's constrained decoding requires all properties in `required`, recursively.
+    schema = strict_review_output_schema()
+    assert set(schema["required"]) == {"verdict", "summary", "findings", "next_steps"}
+    assert schema["additionalProperties"] is False
+    for definition in schema.get("$defs", {}).values():
+        if definition.get("type") == "object":
+            assert set(definition["required"]) == set(definition["properties"])
+            assert definition["additionalProperties"] is False

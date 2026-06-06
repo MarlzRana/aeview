@@ -45,6 +45,22 @@ def test_run_blank_reviewers_exits_error(aeview_home, tmp_path, monkeypatch):
     assert "empty" in result.output
 
 
+def test_doctor_command_exit_codes(aeview_home, monkeypatch):
+    from aeview import cli
+    from aeview.doctor import Check, DoctorReport
+
+    ok = DoctorReport([Check("harness:claude-code", "ok", "present")])
+    monkeypatch.setattr(cli, "run_doctor", lambda cwd, settings: ok)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "harness:claude-code" in result.output
+
+    bad = DoctorReport([Check("harness:codex", "fail", "codex not found on PATH")])
+    monkeypatch.setattr(cli, "run_doctor", lambda cwd, settings: bad)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 1
+
+
 def _settings():
     return Settings(
         fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model="m")]

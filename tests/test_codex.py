@@ -129,3 +129,12 @@ def test_usage_from_jsonl_sums_turn_completed():
     usage = codex._usage_from_jsonl(_USAGE_JSONL)
     assert usage.input_tokens == 100
     assert usage.output_tokens == 20
+
+
+def test_codex_resolves_through_the_registry():
+    from aeview.harness import get_adapter
+
+    adapter = get_adapter("codex")
+    assert isinstance(adapter, codex.CodexAdapter)
+    assert adapter.schema_support == "constrained"
+    assert adapter.binary == "codex"
