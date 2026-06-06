@@ -18,6 +18,18 @@ class ProcResult:
 _CMD_NOT_FOUND = 127  # conventional shell exit code for a missing executable
 
 
+def _spawn_failure(args: list[str], cwd: Path | None) -> ProcResult:
+    """Turn a spawn FileNotFoundError into a failed result with the *right* cause.
+
+    `subprocess`/`create_subprocess_exec` raise the same FileNotFoundError whether the
+    executable is missing or `cwd` does not exist; disambiguate so we never blame the
+    binary for a bad working directory.
+    """
+    if cwd is not None and not Path(cwd).exists():
+        return ProcResult(_CMD_NOT_FOUND, "", f"working directory not found: {cwd}")
+    return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: command not found")
+
+
 def run_sync(args: list[str], cwd: Path | None = None) -> ProcResult:
     try:
         proc = subprocess.run(  # noqa: S603 - args are constructed internally, not shell
@@ -28,9 +40,9 @@ def run_sync(args: list[str], cwd: Path | None = None) -> ProcResult:
             check=False,
         )
     except FileNotFoundError:
-        # A missing binary must look like a failed command, not an uncaught exception, so
-        # callers (scope's gh/git helpers, harness adapters) can degrade gracefully.
-        return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: command not found")
+        # A missing binary/cwd must look like a failed command, not an uncaught exception,
+        # so callers (scope's gh/git helpers, harness adapters) can degrade gracefully.
+        return _spawn_failure(args, cwd)
     return ProcResult(proc.returncode, proc.stdout, proc.stderr)
 
 
@@ -57,9 +69,9 @@ async def run_async(
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
-        # A missing harness binary becomes a failed result the adapter turns into an
+        # A missing harness binary/cwd becomes a failed result the adapter turns into an
         # AdapterError, so one absent CLI fails just that review instead of crashing the run.
-        return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: command not found")
+        return _spawn_failure(args, cwd)
     stdin_b = input_text.encode("utf-8") if input_text is not None else None
     stdout_b, stderr_b = await proc.communicate(input=stdin_b)
     stdout = stdout_b.decode("utf-8", errors="replace")
