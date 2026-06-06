@@ -171,8 +171,10 @@ def test_discover_reviewers_includes_default_and_repo(aeview_home, tmp_path):
 
 
 def test_bundled_repo_reviewers_resolve(tmp_path):
-    # Guards the repo's own .aeview/reviewers/* configs (harness.json typos, dir!=name,
-    # unsupported harness/model) — synthetic tests wouldn't catch a bad checked-in config.
+    # Guards the repo's own .aeview/reviewers/* configs: each resolves (valid harness.json,
+    # dir == frontmatter name) and names a supported harness. Models aren't validated here
+    # (they're free-form strings checked only at run time), but a typo'd/broken checked-in
+    # config that synthetic tests would miss is caught.
     reviewers_dir = _REPO_ROOT / ".aeview" / "reviewers"
     names = [d.name for d in reviewers_dir.iterdir() if (d / "REVIEWER.md").is_file()]
     assert names, "repo ships no reviewers to validate"
