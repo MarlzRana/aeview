@@ -19,7 +19,6 @@ revisit when it does — see the implementation log's deferred item.)
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -134,25 +133,48 @@ def _embed_schema(prompt: str, schema: dict) -> str:
     )
 
 
+# A response shouldn't carry more than this many `{` before the answer; bound the scan so a
+# pathological brace-heavy output (e.g. echoed minified code) can't make the O(n^2) worst case
+# block the event loop. raw_decode itself is the real JSON parser, so each start fails fast.
+_MAX_JSON_STARTS = 500
+
+_DECODER = json.JSONDecoder()
+
+
 def _extract_json(stdout: str, schema: dict) -> dict | None:
     """Pull the schema-conforming object out of copilot's JSONL stream.
 
-    The answer is the final `assistant.message`'s `data.content`; we try that first (raw, then
-    fenced, then a brace-matched span), falling back to scanning the whole stream.
+    The answer is the final `assistant.message`'s `data.content` (tried first, then the raw
+    stream). Within a source, scan each `{` with json.raw_decode — the real parser, so it
+    handles strings/escapes/nesting correctly and ignores trailing prose/fences — and keep the
+    first object that matches the schema.
     """
     required = set(schema.get("required", []))
     properties = set(schema.get("properties", {}))
     content = _final_assistant_content(stdout)
     sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
     for text in sources:
-        for candidate in _json_candidates(text):
-            try:
-                obj = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
+        for obj in _json_objects(text):
             if _matches(obj, required, properties):
                 return obj
     return None
+
+
+def _json_objects(text: str) -> Iterator[dict]:
+    """Yield each parseable JSON object embedded in `text`, in order, via json.raw_decode."""
+    starts = 0
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        starts += 1
+        if starts > _MAX_JSON_STARTS:
+            return
+        try:
+            obj, _ = _DECODER.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue  # not a valid object start (e.g. a brace in prose) — try the next `{`
+        if isinstance(obj, dict):
+            yield obj
 
 
 def _matches(obj: object, required: set[str], properties: set[str]) -> bool:
@@ -174,66 +196,6 @@ def _final_assistant_content(stdout: str) -> str | None:
             if isinstance(data, dict) and isinstance(data.get("content"), str):
                 content = data["content"]  # keep the last one
     return content
-
-
-def _json_candidates(text: str) -> Iterator[str]:
-    text = text.strip()
-    yield text
-    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
-        yield match.group(1).strip()
-    yield from _brace_spans(text)
-
-
-# Scanning from every `{` is O(n^2) in the worst case, so bound it: a real review/dedup object
-# fits well under _MAX_SPAN_SCAN, and prose rarely has more than _MAX_SPAN_STARTS braces. These
-# caps keep a pathological brace-heavy response (e.g. echoed minified code) from blocking the
-# event loop — raw/fenced parsing has already been tried before we reach this fallback.
-_MAX_SPAN_SCAN = 200_000
-_MAX_SPAN_STARTS = 500
-
-
-def _brace_spans(text: str) -> Iterator[str]:
-    """Balanced {...} spans — a last-resort way to find an object embedded in prose.
-
-    Try a string/escape-aware balanced scan starting from EVERY `{` (up to a cap), and let the
-    caller's json.loads filter false starts. This is robust to junk in the preamble (a quoted
-    brace, an unbalanced quote) that no single fixed start point handles: a bad start yields a
-    non-parseable candidate that is skipped, and the real object is still found.
-    """
-    starts = 0
-    for i, ch in enumerate(text):
-        if ch != "{":
-            continue
-        starts += 1
-        if starts > _MAX_SPAN_STARTS:
-            return
-        span = _balanced_span(text, i)
-        if span is not None:
-            yield span
-
-
-def _balanced_span(text: str, start: int) -> str | None:
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(start, min(len(text), start + _MAX_SPAN_SCAN)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
 
 
 def _output_tokens(stdout: str) -> int:
