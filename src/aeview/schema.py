@@ -3,7 +3,7 @@
 These models are the contract that flows through the whole pipeline:
 - `ReviewOutput` is the shape every harness must emit (and the JSON Schema we hand
   to harnesses that support structured output).
-- `ReviewResult` is what a worker persists to `reviews/<id>.json`.
+- `ReviewResult` is what a worker persists to `reviewers/<reviewer>/<instance>/review.json`.
 - `Report` is the merged, deduplicated artifact written last to `report.json`.
 
 JSON is snake_case throughout for consistency (user-facing `settings.json` is the
@@ -66,7 +66,7 @@ class Usage(BaseModel):
 
 
 class ReviewResult(BaseModel):
-    """Worker-owned, written to reviews/<id>.json. Holds its own status."""
+    """Worker-owned, persisted to reviewers/<reviewer>/<instance>/review.json; holds its status."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -1,8 +1,10 @@
 """Owns the on-disk run directory: ~/.aeview/runs/<uuid>/.
 
-aeview is the sole writer. The orchestrator owns run.json; each worker is the sole
-writer of its reviews/<id>.json. All writes are atomic (tmp file -> os.replace) so a
-SIGKILL mid-write can never leave a half-written JSON that a reader would trust.
+aeview is the sole writer. The orchestrator owns run.json; each worker is the sole writer
+of its reviewers/<reviewer>/<instance>/review.json. Inputs are grouped by phase: the shared
+diff in bundle/, then per-reviewer dirs that hold the shared prompt.md plus one subdir per
+harness instance (the review). All writes are atomic (tmp file -> os.replace) so a SIGKILL
+mid-write can never leave a half-written JSON that a reader would trust.
 """
 
 from __future__ import annotations
@@ -49,14 +51,12 @@ class RunStore:
         self.run_id = run_id
         self.dir = runs_dir() / run_id
         self.bundle_dir = self.dir / "bundle"
-        self.prompt_dir = self.bundle_dir / "prompt"
-        self.reviews_dir = self.dir / "reviews"
-        self.logs_dir = self.dir / "logs"
+        self.reviewers_dir = self.dir / "reviewers"
 
     @classmethod
     def create(cls, run_id: str) -> RunStore:
         store = cls(run_id)
-        for d in (store.dir, store.bundle_dir, store.prompt_dir, store.reviews_dir, store.logs_dir):
+        for d in (store.dir, store.bundle_dir, store.reviewers_dir):
             d.mkdir(parents=True, exist_ok=True)
         return store
 
@@ -79,19 +79,34 @@ class RunStore:
         _atomic_write(self.bundle_dir / "self_collect_bundle.md", _self_collect_md(bundle, full))
         return full
 
+    # --- reviewers/<reviewer>/ (prompt shared across that reviewer's harness instances) ---
     def write_prompt(self, reviewer: str, prompt: str) -> None:
-        _atomic_write(self.prompt_dir / f"{reviewer}.md", prompt)
+        reviewer_dir = self.reviewers_dir / reviewer
+        reviewer_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(reviewer_dir / "prompt.md", prompt)
 
-    # --- reviews/<id>.json (worker-owned) ---
+    # --- reviewers/<reviewer>/<instance>/ (one review = reviewer x harness instance) ---
+    def _review_dir(self, reviewer: str, review_id: str) -> Path:
+        # review_id is "<reviewer>__<instance>"; the instance is the on-disk subdir name.
+        instance = review_id.removeprefix(f"{reviewer}__")
+        return self.reviewers_dir / reviewer / instance
+
+    def review_path(self, reviewer: str, review_id: str) -> Path:
+        return self._review_dir(reviewer, review_id) / "review.json"
+
     def write_review(self, result: ReviewResult) -> None:
-        _atomic_write(self.reviews_dir / f"{result.id}.json", result.model_dump_json(indent=2))
+        review_dir = self._review_dir(result.reviewer, result.id)
+        review_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(review_dir / "review.json", result.model_dump_json(indent=2))
 
-    def log_path(self, review_id: str) -> Path:
-        return self.logs_dir / f"{review_id}.log"
+    def log_path(self, reviewer: str, review_id: str) -> Path:
+        review_dir = self._review_dir(reviewer, review_id)
+        review_dir.mkdir(parents=True, exist_ok=True)
+        return review_dir / "review.log"
 
     def read_reviews(self) -> list[ReviewResult]:
         results: list[ReviewResult] = []
-        for path in sorted(self.reviews_dir.glob("*.json")):
+        for path in sorted(self.reviewers_dir.glob("*/*/review.json")):
             results.append(ReviewResult.model_validate_json(path.read_text("utf-8")))
         return results
 

@@ -99,6 +99,6 @@ async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
     monkeypatch.setattr(fanout, "get_adapter", lambda h: _AuthFailAdapter())
     store = RunStore.create(new_run_id())
     await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
-    on_disk = json.loads((store.reviews_dir / f"{_ENTRY.id}.json").read_text())
+    on_disk = json.loads(store.review_path(_ENTRY.reviewer, _ENTRY.id).read_text())
     assert on_disk["status"] == "failed"
     assert "bad auth" in on_disk["error"]

@@ -1,8 +1,8 @@
 """Fan one prompt across the roster, one asyncio task per review (unbounded).
 
-Each worker is the sole writer of its reviews/<id>.json: it persists `running` before the
-harness call and a terminal `done`/`failed` after, so a killed run leaves a truthful status
-on disk (resume re-runs anything non-terminal).
+Each worker is the sole writer of its reviewers/<reviewer>/<instance>/review.json: it
+persists `running` before the harness call and a terminal `done`/`failed` after, so a killed
+run leaves a truthful status on disk (resume re-runs anything non-terminal).
 
 Transient failures (rate-limit, overload, timeout) retry with exponential backoff + jitter;
 non-transient ones (bad auth, missing binary, schema-invalid output) fail fast. A single
@@ -55,7 +55,7 @@ async def _attempt_review(
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             out = await adapter.run(
-                prompt, entry.model, cwd, store.log_path(entry.id), entry.thinking
+                prompt, entry.model, cwd, store.log_path(entry.reviewer, entry.id), entry.thinking
             )
         except AdapterError as exc:
             last_error = str(exc)
