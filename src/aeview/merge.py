@@ -221,7 +221,9 @@ def _summary(findings: list[MergedFinding], done: list[ReviewResult], failed: li
     noun = "finding" if n == 1 else "findings"
     review_word = "review" if len(done) == 1 else "reviews"
     base = f"{n} {noun} across {len(done)} {review_word}"
-    corroborated = sum(1 for f in findings if f.agreement > 1)
+    # Corroboration is cross-review agreement: count findings raised by >1 *distinct* review,
+    # not raw group size — one reviewer repeating itself isn't corroboration.
+    corroborated = sum(1 for f in findings if len({s.review for s in f.sources}) > 1)
     if corroborated:
         base += f"; {corroborated} corroborated"
     if failed:
