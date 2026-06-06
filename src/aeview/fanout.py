@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import random
 
-from .harness import AdapterError, get_adapter
+from .harness import AdapterError, HarnessOutput, get_adapter
 from .runstore import RunStore, now_iso
 from .schema import ReviewResult, RosterEntry
 
@@ -37,12 +37,20 @@ async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> 
         started_at=now_iso(),
     )
     store.write_review(result)
-
+    # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
+    # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        adapter = get_adapter(entry.harness)
+        return await _attempt_review(store, result, entry, prompt, cwd)
     except AdapterError as exc:
         return _mark_failed(store, result, str(exc))
+    except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
+        return _mark_failed(store, result, f"unexpected error: {exc}")
 
+
+async def _attempt_review(
+    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd
+) -> ReviewResult:
+    adapter = get_adapter(entry.harness)
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -56,11 +64,10 @@ async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> 
             await asyncio.sleep(_backoff_delay(attempt))
             continue
         return _mark_done(store, result, out)
-
     return _mark_failed(store, result, last_error)
 
 
-def _mark_done(store: RunStore, result: ReviewResult, out) -> ReviewResult:
+def _mark_done(store: RunStore, result: ReviewResult, out: HarnessOutput) -> ReviewResult:
     result.status = "done"
     result.finished_at = now_iso()
     result.verdict = out.review.verdict

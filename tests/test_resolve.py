@@ -104,6 +104,44 @@ def test_instance_id_collision_escalates(tmp_path):
     assert ids == {"claude-code-opus-high", "claude-code-opus-low"}
 
 
+def test_instance_ids_never_collide_with_escalated_form(tmp_path):
+    # A model literally named "opus-high" must not clash with opus + thinking:high.
+    make_reviewer(
+        tmp_path, "python",
+        harnesses=[
+            {"harness": "claude-code", "model": "opus-high"},
+            {"harness": "claude-code", "model": "opus", "thinking": "high"},
+            {"harness": "claude-code", "model": "opus", "thinking": "low"},
+        ],
+    )
+    r = resolve_reviewer("python", tmp_path, _settings())
+    ids = [h.id for h in r.harnesses]
+    assert len(ids) == len(set(ids))  # all unique -> no file clobbering
+
+
+def test_malformed_harness_json_raises_resolve_error(tmp_path):
+    d = make_reviewer(tmp_path, "python", harnesses=[{"harness": "claude-code", "model": "m"}])
+    (d / "harness.json").write_text("{not valid json")
+    with pytest.raises(ResolveError, match="invalid"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_empty_harness_json_raises(tmp_path):
+    make_reviewer(tmp_path, "python", harnesses=[])
+    with pytest.raises(ResolveError, match="no harnesses"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_discover_first_match_shadows_outer(tmp_path):
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    sub.mkdir(parents=True)
+    make_reviewer(repo, "python", harnesses=[{"harness": "claude-code", "model": "m"}])
+    make_reviewer(sub, "python", harnesses=[{"harness": "claude-code", "model": "m"}])
+    # `python` appears at two rungs but is listed once (nearest shadows the outer).
+    assert discover_reviewers(sub).count("python") == 1
+
+
 # --- discovery & roster ----------------------------------------------------------------
 
 
@@ -113,7 +151,7 @@ def test_discover_reviewers_includes_default_and_repo(aeview_home, tmp_path):
     repo.mkdir()
     make_reviewer(repo, "python", harnesses=[{"harness": "claude-code", "model": "m"}])
     make_reviewer(repo, "security", harnesses=[{"harness": "claude-code", "model": "m"}])
-    names = discover_reviewers(repo, _settings())
+    names = discover_reviewers(repo)
     assert "default" in names  # from ~/.aeview
     assert "python" in names and "security" in names
 

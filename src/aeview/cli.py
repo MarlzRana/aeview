@@ -119,7 +119,7 @@ async def _orchestrate(
 ) -> Report:
     settings = load_settings()
     if "all" in names:
-        names = discover_reviewers(cwd, settings)
+        names = discover_reviewers(cwd)
         if not names:
             raise ResolveError("no reviewers found via the walk-up from this directory")
     else:

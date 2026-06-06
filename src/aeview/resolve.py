@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from .config import HarnessInstance, Settings
 from .schema import RosterEntry
@@ -96,7 +97,7 @@ def resolve_reviewer(name: str, cwd: Path, settings: Settings) -> Reviewer:
     )
 
 
-def discover_reviewers(cwd: Path, settings: Settings) -> list[str]:
+def discover_reviewers(cwd: Path) -> list[str]:
     """All reviewer names visible here via the walk-up, nearest-first, first-match-wins."""
     names: list[str] = []
     seen: set[str] = set()
@@ -130,8 +131,11 @@ def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Rev
 def _resolve_harnesses(reviewer_dir: Path, settings: Settings) -> list[HarnessRef]:
     harness_file = reviewer_dir / HARNESS_FILE
     if harness_file.is_file():
-        raw = json.loads(harness_file.read_text(encoding="utf-8"))
-        instances = [HarnessInstance.model_validate(h) for h in raw.get("harnesses", [])]
+        try:
+            raw = json.loads(harness_file.read_text(encoding="utf-8"))
+            instances = [HarnessInstance.model_validate(h) for h in raw.get("harnesses", [])]
+        except (json.JSONDecodeError, ValidationError, AttributeError) as exc:
+            raise ResolveError(f"{harness_file} is invalid: {exc}") from exc
         if not instances:
             raise ResolveError(f"{harness_file} lists no harnesses")
         return _assign_ids(instances)
@@ -143,24 +147,31 @@ def _resolve_harnesses(reviewer_dir: Path, settings: Settings) -> list[HarnessRe
 
 
 def _assign_ids(instances: list[HarnessInstance]) -> list[HarnessRef]:
-    """Derive a unique id per instance: harness-model, escalating to +thinking then -N."""
+    """Derive a unique id per instance: harness-model, escalating to +thinking then -N.
+
+    Every id is uniquified against the ids already assigned, so a non-escalated base id
+    (e.g. a model literally named `opus-high`) can never collide with another instance's
+    escalated id (`opus` + thinking `high`) — duplicate ids would clobber review files.
+    """
     base = [f"{i.harness}-{i.model}" for i in instances]
     base_counts = Counter(base)
     used: set[str] = set()
     refs: list[HarnessRef] = []
     for inst, b in zip(instances, base, strict=True):
-        if base_counts[b] == 1:
-            rid = b
-        else:
-            rid = f"{b}-{inst.thinking or 'default'}"
-            if rid in used:
-                n = 2
-                while f"{rid}-{n}" in used:
-                    n += 1
-                rid = f"{rid}-{n}"
+        candidate = b if base_counts[b] == 1 else f"{b}-{inst.thinking or 'default'}"
+        rid = _uniquify(candidate, used)
         used.add(rid)
         refs.append(HarnessRef(instance=inst, id=rid))
     return refs
+
+
+def _uniquify(candidate: str, used: set[str]) -> str:
+    if candidate not in used:
+        return candidate
+    n = 2
+    while f"{candidate}-{n}" in used:
+        n += 1
+    return f"{candidate}-{n}"
 
 
 def build_roster(reviewers: list[Reviewer]) -> list[RosterEntry]:

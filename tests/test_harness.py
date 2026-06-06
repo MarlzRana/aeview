@@ -115,5 +115,20 @@ def test_interpret_missing_binary_is_non_transient():
     assert ei.value.transient is False
 
 
+def test_interpret_transient_text_on_non_json_is_transient():
+    adapter = claude_code.ClaudeCodeAdapter()
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret("", "error: overloaded, please try again", 1)
+    assert ei.value.transient is True
+
+
+def test_interpret_transient_via_result_text_without_status():
+    adapter = claude_code.ClaudeCodeAdapter()
+    payload = json.dumps({"is_error": True, "api_error_status": None, "result": "rate limit hit"})
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret(payload, "", 1)
+    assert ei.value.transient is True
+
+
 def _flag_value(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]
