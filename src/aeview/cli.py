@@ -108,8 +108,12 @@ def run(
 
 
 def _split_reviewers(values: list[str] | None) -> list[str]:
-    """Flatten --reviewers: comma-separated (a,b) and/or repeated (--reviewers a --reviewers b)."""
-    return [n.strip() for item in (values or ["default"]) for n in item.split(",") if n.strip()]
+    """Flatten --reviewers: comma-separated (a,b) and/or repeated (--reviewers a --reviewers b).
+
+    An absent or all-blank value (e.g. `--reviewers ""`) falls back to the default reviewer.
+    """
+    names = [n.strip() for item in (values or []) for n in item.split(",") if n.strip()]
+    return names or ["default"]
 
 
 def _resolve_all_lenient(names: list[str], cwd: Path, settings: Settings) -> list[Reviewer]:

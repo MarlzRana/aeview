@@ -25,6 +25,11 @@ def test_all_passthrough():
     assert _split_reviewers(["all"]) == ["all"]
 
 
+def test_blank_value_falls_back_to_default():
+    assert _split_reviewers([""]) == ["default"]
+    assert _split_reviewers([" , "]) == ["default"]
+
+
 def _settings():
     return Settings(
         fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model="m")]
