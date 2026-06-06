@@ -34,14 +34,27 @@ def test_instance_segment_keeps_dashes_and_does_not_split_on_them(aeview_home):
 
 
 def test_read_reviews_orders_by_id_not_glob_path(aeview_home):
-    # 'test' / 'test2': a path sort ("/" = 0x2F) orders [test, test2], but the canonical id
-    # sort ("__" = 0x5F) orders [test2, test]. read_reviews must follow the id, not the path.
+    # read_reviews must return canonical id order. Two regressions to catch:
+    #  - reverting to a path sort: 'test'/'test2' order on "/" (0x2F) as [test, test2] but on
+    #    the id "__" (0x5F) as [test2, test], so the pair pins the separator.
+    #  - dropping the sort entirely: the result would fall back to glob/scandir order, which is
+    #    filesystem-nondeterministic — so we write several ids in a deliberately non-sorted
+    #    order and assert the full output equals its own id-sorted form, making an unsorted
+    #    fallback fail rather than pass by luck.
+    written = [
+        "zeta__codex-gpt-5.5",
+        "test__claude-code-opus",
+        "test2__claude-code-opus",
+        "alpha__codex-gpt-5.5",
+        "alpha__claude-code-opus",
+    ]
     store = RunStore.create(new_run_id())
-    store.write_review(_result("test__claude-code-opus", "test"))
-    store.write_review(_result("test2__claude-code-opus", "test2"))
+    for review_id in written:
+        store.write_review(_result(review_id, review_id.split("__", 1)[0]))
 
     got = [r.id for r in store.read_reviews()]
-    assert got == ["test2__claude-code-opus", "test__claude-code-opus"]
+    assert got == sorted(written)  # canonical id order, regardless of write/glob order
+    assert got.index("test2__claude-code-opus") < got.index("test__claude-code-opus")
 
 
 # --- multi-instance layout through the fan-out -----------------------------------------
