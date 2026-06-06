@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-
-from pydantic import ValidationError
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, review_output_json_schema
@@ -46,9 +44,11 @@ _READ_ONLY_ARGS = [
     "--no-ask-user",
 ]
 
+# Each attempt is a fresh stateless process, so this can't reference a "previous response" —
+# it just re-states the format requirement more forcefully.
 _RETRY_SUFFIX = (
-    "\n\nYour previous response was not valid JSON matching the schema. Respond with ONLY the "
-    "JSON object — no prose, no explanation, no markdown fence."
+    "\n\nIMPORTANT: Respond with ONLY the JSON object described above — no prose, no explanation, "
+    "no markdown fence, nothing before or after the object."
 )
 
 
@@ -67,7 +67,11 @@ class CopilotAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
+        """`validate` (optional) is the deep schema check (e.g. ReviewOutput.model_validate); it
+        raises on a structurally-present-but-invalid payload (wrong enum/type) so that case also
+        re-prompts, instead of slipping past the cheap key check to fail later in the caller."""
         base_prompt = _embed_schema(prompt, schema)
         args = ["copilot", *_READ_ONLY_ARGS]
         if model:
@@ -80,6 +84,7 @@ class CopilotAdapter:
             args += ["--effort", thinking]
 
         last_error = "copilot produced no valid output"
+        output_tokens = 0  # accumulate across attempts so a re-prompt isn't under-counted
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             text = base_prompt if attempt == 1 else base_prompt + _RETRY_SUFFIX
             res = await run_async(
@@ -92,22 +97,29 @@ class CopilotAdapter:
                 raise AdapterError(
                     f"copilot exited {res.returncode}: {detail}", transient=looks_transient(detail)
                 )
+            output_tokens += _output_tokens(res.stdout)
             payload = _extract_json(res.stdout, schema)
-            if payload is not None:
-                return StructuredOutput(payload=payload, usage=_usage(res.stdout), raw=res.stdout)
-            last_error = "copilot did not return a JSON object matching the schema"
+            if payload is None:
+                last_error = "copilot did not return a JSON object matching the schema"
+                continue
+            if validate is not None:
+                try:
+                    validate(payload)
+                except Exception as exc:  # noqa: BLE001 - any validation failure should re-prompt
+                    last_error = f"copilot output failed schema validation: {exc}"
+                    continue
+            usage = Usage(input_tokens=0, output_tokens=output_tokens, cost_usd=0.0)
+            return StructuredOutput(payload=payload, usage=usage, raw=res.stdout)
         raise AdapterError(last_error)
 
     async def run(
         self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking,
+            validate=ReviewOutput.model_validate,
         )
-        try:
-            review = ReviewOutput.model_validate(out.payload)
-        except ValidationError as exc:
-            raise AdapterError(f"copilot output failed schema validation: {exc}") from exc
+        review = ReviewOutput.model_validate(out.payload)
         return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
 
 
@@ -127,9 +139,12 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
     The answer is the final `assistant.message`'s `data.content`; we try that first (raw, then
     fenced, then a brace-matched span), falling back to scanning the whole stream.
     """
-    required = set(schema.get("required", []))
-    sources = [c for c in (_final_assistant_content(stdout),) if c]
-    sources.append(stdout)  # fallback: scan the raw stream
+    # The cheap structural check: an object must carry the schema's required keys. When a schema
+    # has NO required keys (e.g. DuplicateGroups, all-defaulted), that test is vacuous and would
+    # accept a stray `{}` before the real answer — so then require the property keys instead.
+    required = set(schema.get("required", [])) or set(schema.get("properties", {}))
+    content = _final_assistant_content(stdout)
+    sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
     for text in sources:
         for candidate in _json_candidates(text):
             try:
@@ -170,6 +185,13 @@ def _brace_spans(text: str) -> Iterator[str]:
     in_string = False
     escaped = False
     for i, ch in enumerate(text):
+        # Only track string state *inside* an object: a stray quote in the prose before the
+        # object (e.g. `the "fix":`) must not flip in_string and swallow the opening brace.
+        if depth == 0:
+            if ch == "{":
+                start = i
+                depth = 1
+            continue
         if in_string:
             if escaped:
                 escaped = False
@@ -177,28 +199,23 @@ def _brace_spans(text: str) -> Iterator[str]:
                 escaped = True
             elif ch == '"':
                 in_string = False
-            continue
-        if ch == '"':
+        elif ch == '"':
             in_string = True
         elif ch == "{":
-            if depth == 0:
-                start = i
             depth += 1
-        elif ch == "}" and depth > 0:
+        elif ch == "}":
             depth -= 1
-            if depth == 0 and start >= 0:
+            if depth == 0:
                 yield text[start : i + 1]
 
 
-def _usage(stdout: str) -> Usage:
+def _output_tokens(stdout: str) -> int:
     """Sum output tokens across assistant.message events; copilot reports no input/USD cost."""
-    output_tokens = 0
-    for event in _events(stdout):
-        if event.get("type") == "assistant.message":
-            data = event.get("data")
-            if isinstance(data, dict):
-                output_tokens += int(data.get("outputTokens", 0) or 0)
-    return Usage(input_tokens=0, output_tokens=output_tokens, cost_usd=0.0)
+    return sum(
+        int(event.get("data", {}).get("outputTokens", 0) or 0)
+        for event in _events(stdout)
+        if event.get("type") == "assistant.message" and isinstance(event.get("data"), dict)
+    )
 
 
 def _events(stdout: str) -> Iterator[dict]:
