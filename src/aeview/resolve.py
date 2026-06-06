@@ -62,7 +62,15 @@ def parse_reviewer(path: Path) -> tuple[str, str, str]:
     front, sep, body = rest.partition("\n---")
     if not sep:
         raise ResolveError(f"{path} has malformed frontmatter")
-    meta = yaml.safe_load(front) or {}
+    try:
+        meta = yaml.safe_load(front)
+    except yaml.YAMLError as exc:
+        # Normalize to ResolveError so --reviewers all leniency catches it uniformly.
+        raise ResolveError(f"{path} has invalid YAML frontmatter: {exc}") from exc
+    if meta is None:
+        meta = {}
+    if not isinstance(meta, dict):
+        raise ResolveError(f"{path} frontmatter must be a mapping")
     name = meta.get("name")
     description = meta.get("description", "")
     if not name:

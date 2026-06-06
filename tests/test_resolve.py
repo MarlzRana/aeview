@@ -81,6 +81,22 @@ def test_reserved_name_all_is_rejected(tmp_path):
         resolve_reviewer("all", tmp_path, _settings())
 
 
+def test_malformed_yaml_frontmatter_raises_resolve_error(tmp_path):
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\nname: [unclosed\n---\nbody\n")  # invalid YAML
+    with pytest.raises(ResolveError, match="YAML"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_non_mapping_frontmatter_raises_resolve_error(tmp_path):
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\n- just a list\n---\nbody\n")
+    with pytest.raises(ResolveError, match="mapping"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
 # --- harness resolution ----------------------------------------------------------------
 
 
