@@ -184,26 +184,39 @@ def _json_candidates(text: str) -> Iterator[str]:
     yield from _brace_spans(text)
 
 
+# Scanning from every `{` is O(n^2) in the worst case, so bound it: a real review/dedup object
+# fits well under _MAX_SPAN_SCAN, and prose rarely has more than _MAX_SPAN_STARTS braces. These
+# caps keep a pathological brace-heavy response (e.g. echoed minified code) from blocking the
+# event loop — raw/fenced parsing has already been tried before we reach this fallback.
+_MAX_SPAN_SCAN = 200_000
+_MAX_SPAN_STARTS = 500
+
+
 def _brace_spans(text: str) -> Iterator[str]:
     """Balanced {...} spans — a last-resort way to find an object embedded in prose.
 
-    Try a string/escape-aware balanced scan starting from EVERY `{`, and let the caller's
-    json.loads filter false starts. This is robust to junk in the preamble (a quoted brace, an
-    unbalanced quote) that no single fixed start point handles: a bad start yields a
+    Try a string/escape-aware balanced scan starting from EVERY `{` (up to a cap), and let the
+    caller's json.loads filter false starts. This is robust to junk in the preamble (a quoted
+    brace, an unbalanced quote) that no single fixed start point handles: a bad start yields a
     non-parseable candidate that is skipped, and the real object is still found.
     """
+    starts = 0
     for i, ch in enumerate(text):
-        if ch == "{":
-            span = _balanced_span(text, i)
-            if span is not None:
-                yield span
+        if ch != "{":
+            continue
+        starts += 1
+        if starts > _MAX_SPAN_STARTS:
+            return
+        span = _balanced_span(text, i)
+        if span is not None:
+            yield span
 
 
 def _balanced_span(text: str, start: int) -> str | None:
     depth = 0
     in_string = False
     escaped = False
-    for i in range(start, len(text)):
+    for i in range(start, min(len(text), start + _MAX_SPAN_SCAN)):
         ch = text[i]
         if in_string:
             if escaped:
