@@ -133,11 +133,10 @@ def _embed_schema(prompt: str, schema: dict) -> str:
     )
 
 
-# A real review/dedup object is small and appears early, so cap both the search window and the
-# number of candidate `{` starts. This keeps a pathological brace-heavy or unterminated-string
-# response from making the inline (synchronous) scan block the shared event loop during a
-# fan-out. We bound the *count* of attempts rather than chars scanned because exc.pos is not a
-# reliable proxy for scan distance — an unterminated string reports the string's start, not EOF.
+# For the fallback scan only: cap the per-attempt window and the number of candidate `{` starts
+# so a pathological brace-heavy / unterminated-string response can't make the inline
+# (synchronous) scan block the shared event loop. We bound the per-attempt window (a slice)
+# rather than trusting exc.pos — an unterminated string reports the string's start, not EOF.
 _MAX_SCAN_CHARS = 256_000
 _MAX_JSON_STARTS = 256
 
@@ -166,23 +165,43 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
 def _json_objects(text: str) -> Iterator[dict]:
     """Yield each parseable JSON object in `text`, in document order, via raw_decode.
 
-    Advance past each parsed object (`i = end`) so its interior braces aren't rescanned, within
-    a bounded window and a capped number of candidate starts. raw_decode at a `{` yields an
-    object (dict) or raises, so no type check is needed.
+    Fast path: parse the first `{` in a single unbounded pass — the clean common case (one
+    decode is O(n), not the repeated-scan DoS), so a complete large answer is never truncated.
+    Fallback: if that wasn't the answer, scan the rest with a bounded per-attempt window and a
+    capped number of starts, advancing past each parsed object so interiors aren't rescanned.
     """
-    text = text[:_MAX_SCAN_CHARS]
-    i = 0
+    first = text.find("{")
+    if first == -1:
+        return
+    decoded = _decode_at(text, first)
+    if decoded is not None:
+        obj, end = decoded
+        i = end  # skip the whole object; don't rescan its interior braces
+        yield obj
+    else:
+        i = first + 1
+
     for _ in range(_MAX_JSON_STARTS):
         start = text.find("{", i)
         if start == -1:
             return
-        try:
-            obj, end = _DECODER.raw_decode(text, start)
-        except json.JSONDecodeError:
+        decoded = _decode_at(text[start : start + _MAX_SCAN_CHARS], 0)
+        if decoded is None:
             i = start + 1  # not a valid object start (e.g. a brace in prose) — try the next `{`
             continue
-        i = end
+        obj, end = decoded
+        i = start + end
         yield obj
+
+
+def _decode_at(text: str, pos: int) -> tuple[dict, int] | None:
+    # raw_decode at a `{` yields an object (dict) or raises; RecursionError comes from a deeply
+    # nested prefix and must be caught too, else it escapes run_dedup and aborts orchestration.
+    try:
+        obj, end = _DECODER.raw_decode(text, pos)
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    return obj, end
 
 
 def _matches(obj: object, required: set[str], properties: set[str]) -> bool:
