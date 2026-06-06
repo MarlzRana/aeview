@@ -17,12 +17,18 @@ import typer
 
 from . import __version__
 from .bundle import build_bundle
-from .config import ensure_seeded, load_settings
+from .config import Settings, ensure_seeded, load_settings
 from .fanout import fan_out
 from .merge import merge_reviews
 from .prompt import compose_prompt
 from .report import EXIT_ERROR, exit_code, render_human
-from .resolve import ResolveError, build_roster, discover_reviewers, resolve_reviewer
+from .resolve import (
+    ResolveError,
+    Reviewer,
+    build_roster,
+    discover_reviewers,
+    resolve_reviewer,
+)
 from .runstore import RunStore, new_run_id, now_iso
 from .schema import Invocation, Report, RunManifest
 from .scope import ScopeError, parse_scope
@@ -106,6 +112,18 @@ def _split_reviewers(values: list[str] | None) -> list[str]:
     return [n.strip() for item in (values or ["default"]) for n in item.split(",") if n.strip()]
 
 
+def _resolve_all_lenient(names: list[str], cwd: Path, settings: Settings) -> list[Reviewer]:
+    """Resolve discovered reviewers for `--reviewers all`, skipping (with a warning) any that
+    have invalid config, so one broken reviewer doesn't abort the whole bulk run."""
+    resolved = []
+    for name in names:
+        try:
+            resolved.append(resolve_reviewer(name, cwd, settings))
+        except ResolveError as exc:
+            typer.echo(f"aeview: skipping reviewer '{name}': {exc}", err=True)
+    return resolved
+
+
 def _read_patch(value: str | None) -> str:
     if value == "-":
         return sys.stdin.read()
@@ -128,12 +146,18 @@ async def _orchestrate(
 ) -> Report:
     settings = load_settings()
     if "all" in names:
-        names = discover_reviewers(cwd)
-        if not names:
+        discovered = discover_reviewers(cwd)
+        if not discovered:
             raise ResolveError("no reviewers found via the walk-up from this directory")
+        # `all` is a bulk request: one mis-configured reviewer shouldn't abort the rest.
+        resolved_reviewers = _resolve_all_lenient(discovered, cwd, settings)
+        if not resolved_reviewers:
+            raise ResolveError("every discovered reviewer had invalid config")
+        names = [r.name for r in resolved_reviewers]
     else:
+        # Explicitly named reviewers fail fast — you asked for these specific ones.
         names = list(dict.fromkeys(names))  # de-dupe, preserve order
-    resolved_reviewers = [resolve_reviewer(name, cwd, settings) for name in names]
+        resolved_reviewers = [resolve_reviewer(name, cwd, settings) for name in names]
     roster = build_roster(resolved_reviewers)
     if not roster:
         raise ResolveError("no harnesses resolved (check harness.json / fallbackReviewerHarnesses)")
