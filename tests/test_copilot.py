@@ -109,6 +109,44 @@ async def test_extracts_fenced_json_from_assistant_message(fake_copilot, tmp_pat
     assert out.review.verdict == "approve"
 
 
+async def test_last_assistant_message_wins_and_tokens_sum(fake_copilot, tmp_path):
+    # With --allow-all-tools copilot emits intermediate assistant messages while it reads, then
+    # the final answer. Extraction must take the LAST message; usage sums tokens across all.
+    events = [
+        _assistant("Reading the files now...", output_tokens=5),
+        _assistant(json.dumps(_VALID), output_tokens=12),
+        {"type": "result", "exitCode": 0, "usage": {"premiumRequests": 1}},
+    ]
+    fake_copilot.queue("\n".join(json.dumps(e) for e in events))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # last message, not the "Reading..." one
+    assert out.usage.output_tokens == 17  # 5 + 12 summed
+
+
+async def test_tokens_accumulate_across_reprompt(fake_copilot, tmp_path):
+    fake_copilot.queue(_stream("no json", output_tokens=8))  # attempt 1 (invalid) still billed
+    fake_copilot.queue(_stream(json.dumps(_VALID), output_tokens=12))  # attempt 2 valid
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.usage.output_tokens == 20  # both attempts counted, not just the winner
+
+
+async def test_skips_non_json_lines_in_stream(fake_copilot, tmp_path):
+    # A stray banner / blank line in stdout must be tolerated, not crash extraction.
+    stream = "Starting copilot...\n\n" + _stream(json.dumps(_VALID)) + "\ntrailing noise"
+    fake_copilot.queue(stream)
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+
+
+async def test_extracts_bare_top_level_json_when_no_assistant_message(fake_copilot, tmp_path):
+    # Fallback: if no assistant.message carries the answer, recover a bare top-level JSON blob
+    # from the raw stream (guards the stdout-scan fallback against being silently dead).
+    stream = '{"type":"result","exitCode":0}\n' + json.dumps(_VALID)
+    fake_copilot.queue(stream)
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+
+
 async def test_extracts_prose_wrapped_json_with_braces_in_strings(fake_copilot, tmp_path):
     # Prose around the object (no fence) forces the brace-span fallback; the JSON string fields
     # contain { and } (code snippets), which a naive brace counter would mis-split.
@@ -135,6 +173,35 @@ async def test_extracts_prose_wrapped_json_with_braces_in_strings(fake_copilot, 
     assert out.review.findings[0].title == "guard clause"
 
 
+async def test_extracts_prose_wrapped_json_with_escaped_quotes_and_stray_prose_quote(
+    fake_copilot, tmp_path
+):
+    # Prose contains an unbalanced quote (`the "fix":`) before the object, and a finding string
+    # contains an escaped quote and a brace. Both must be handled: the prose quote must not flip
+    # string state at depth 0, and the escaped quote inside the object must not close the string.
+    review = {
+        "verdict": "needs-attention",
+        "summary": "one issue",
+        "findings": [
+            {
+                "title": "quote handling",
+                "body": 'it printed "}" then stopped',
+                "severity": "medium",
+                "category": "bug",
+                "confidence": 0.6,
+                "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+                "recommendation": "escape the quote",
+            }
+        ],
+        "next_steps": [],
+    }
+    content = f'Here is the "fix": {json.dumps(review)}'
+    fake_copilot.queue(_stream(content))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "needs-attention"
+    assert out.review.findings[0].body == 'it printed "}" then stopped'
+
+
 # --- retry-then-fail (the schema_support="prompt" reaction) ----------------------------
 
 
@@ -144,7 +211,9 @@ async def test_invalid_output_reprompts_then_fails(fake_copilot, tmp_path):
     with pytest.raises(AdapterError, match="did not return a JSON object"):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert len(fake_copilot.calls) == 2  # one re-prompt, then fail
-    assert "previous response was not valid" in fake_copilot.calls[1]["input_text"]  # corrective
+    # attempt 2 carries the corrective suffix; attempt 1 does not
+    assert "IMPORTANT" in fake_copilot.calls[1]["input_text"]
+    assert "IMPORTANT" not in fake_copilot.calls[0]["input_text"]
 
 
 async def test_reprompt_recovers_on_second_attempt(fake_copilot, tmp_path):
@@ -172,12 +241,27 @@ async def test_nonzero_exit_classifies_transient(fake_copilot, tmp_path):
     assert ei.value.transient is True
 
 
-async def test_schema_invalid_payload_fails(fake_copilot, tmp_path):
-    # Has the required keys so it's extracted, but verdict is not a valid enum -> run() rejects.
-    bad = {"verdict": "maybe", "summary": "x", "findings": [], "next_steps": []}
-    fake_copilot.queue(_stream(json.dumps(bad)))
+def _bad_enum() -> str:
+    # Parseable JSON with the required keys, but verdict isn't a valid enum value.
+    return json.dumps({"verdict": "maybe", "summary": "x", "findings": [], "next_steps": []})
+
+
+async def test_schema_invalid_enum_reprompts_then_fails(fake_copilot, tmp_path):
+    # A structurally-present but enum-invalid payload must RE-PROMPT (not slip past to fail at
+    # the caller). Two bad attempts -> AdapterError after the re-prompt.
+    fake_copilot.queue(_stream(_bad_enum()))
+    fake_copilot.queue(_stream(_bad_enum()))
     with pytest.raises(AdapterError, match="schema validation"):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert len(fake_copilot.calls) == 2
+
+
+async def test_schema_invalid_enum_recovers_on_reprompt(fake_copilot, tmp_path):
+    fake_copilot.queue(_stream(_bad_enum()))  # attempt 1: invalid enum
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: valid
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2
 
 
 # --- registry + capability -------------------------------------------------------------

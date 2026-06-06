@@ -92,3 +92,24 @@ def test_doctor_only_checks_referenced_harnesses(tmp_path, monkeypatch):
     _all_present(monkeypatch)
     report = doctor.run_doctor(tmp_path, _settings())
     assert not any(c.name == "harness:codex" for c in report.checks)
+
+
+def test_doctor_copilot_warns_without_a_billed_auth_call(tmp_path, monkeypatch):
+    # copilot has no no-cost auth-status command (empty auth_status_args). doctor must warn it's
+    # present-but-unverifiable WITHOUT invoking run_sync (which would be a billed/erroring call).
+    make_reviewer(tmp_path, "cop", harnesses=[{"harness": "copilot", "model": "gpt-5.4"}])
+    monkeypatch.setattr(doctor, "which", lambda binary: f"/usr/bin/{binary}")
+    run_sync_calls = []
+
+    def record(args, cwd=None, timeout=None):
+        run_sync_calls.append(args)
+        return ProcResult(0, "", "")
+
+    monkeypatch.setattr(doctor, "run_sync", record)
+
+    report = doctor.run_doctor(tmp_path, _settings())
+
+    check = _check(report, "harness:copilot")
+    assert check.status == "warn"
+    assert "auth not verifiable" in check.detail
+    assert all(args != [] for args in run_sync_calls)  # never probed copilot's empty auth args
