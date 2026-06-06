@@ -75,6 +75,12 @@ def test_dir_name_must_match_frontmatter(tmp_path):
         resolve_reviewer("python", tmp_path, _settings())
 
 
+def test_reserved_name_all_is_rejected(tmp_path):
+    make_reviewer(tmp_path, "all", harnesses=[{"harness": "claude-code", "model": "m"}])
+    with pytest.raises(ResolveError, match="reserved"):
+        resolve_reviewer("all", tmp_path, _settings())
+
+
 # --- harness resolution ----------------------------------------------------------------
 
 

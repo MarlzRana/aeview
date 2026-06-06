@@ -27,6 +27,9 @@ REVIEWER_FILE = "REVIEWER.md"
 HARNESS_FILE = "harness.json"
 _AEVIEW_DIR = ".aeview"
 _REVIEWERS = "reviewers"
+# Names that can't be reviewers because they're CLI keywords. `all` is the bulk-sweep
+# keyword for --reviewers, so a reviewer named `all` would be unreachable by name.
+RESERVED_REVIEWER_NAMES = {"all"}
 
 
 class ResolveError(Exception):
@@ -119,6 +122,8 @@ def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Rev
             f"reviewer directory '{dir_name}' does not match its REVIEWER.md name "
             f"'{name}' ({reviewer_dir})"
         )
+    if name in RESERVED_REVIEWER_NAMES:
+        raise ResolveError(f"'{name}' is a reserved reviewer name (it's a --reviewers keyword)")
     return Reviewer(
         name=name,
         description=description,
