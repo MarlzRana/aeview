@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from aeview.config import HarnessInstance, Settings, ensure_seeded
+from aeview.harness import get_adapter
 from aeview.resolve import (
     ResolveError,
     build_roster,
@@ -10,6 +13,8 @@ from aeview.resolve import (
     resolve_reviewer,
 )
 from conftest import make_reviewer
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _settings(fallback_model: str = "fallbackmodel") -> Settings:
@@ -163,6 +168,20 @@ def test_discover_reviewers_includes_default_and_repo(aeview_home, tmp_path):
     names = discover_reviewers(repo)
     assert "default" in names  # from ~/.aeview
     assert "python" in names and "security" in names
+
+
+def test_bundled_repo_reviewers_resolve(tmp_path):
+    # Guards the repo's own .aeview/reviewers/* configs (harness.json typos, dir!=name,
+    # unsupported harness/model) — synthetic tests wouldn't catch a bad checked-in config.
+    reviewers_dir = _REPO_ROOT / ".aeview" / "reviewers"
+    names = [d.name for d in reviewers_dir.iterdir() if (d / "REVIEWER.md").is_file()]
+    assert names, "repo ships no reviewers to validate"
+    settings = _settings()
+    for name in names:
+        reviewer = resolve_reviewer(name, _REPO_ROOT, settings)
+        assert reviewer.harnesses
+        for ref in reviewer.harnesses:
+            get_adapter(ref.instance.harness)  # raises AdapterError on an unsupported harness
 
 
 def test_build_roster_is_cross_product(tmp_path):

@@ -70,6 +70,22 @@ def test_doctor_missing_gh_is_warn(tmp_path, monkeypatch):
     assert _check(report, "gh").status == "warn"
 
 
+def test_doctor_auth_probes_are_bounded_by_a_timeout(tmp_path, monkeypatch):
+    # Guards the boundary: doctor must pass a timeout so a wedged auth CLI can't hang it.
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
+    monkeypatch.setattr(doctor, "which", lambda binary: f"/b/{binary}")
+    seen_timeouts = []
+
+    def record(args, cwd=None, timeout=None):
+        seen_timeouts.append(timeout)
+        return ProcResult(0, "", "")
+
+    monkeypatch.setattr(doctor, "run_sync", record)
+    doctor.run_doctor(tmp_path, _settings())
+    assert seen_timeouts  # probes ran
+    assert all(t is not None and t > 0 for t in seen_timeouts)  # every probe bounded
+
+
 def test_doctor_only_checks_referenced_harnesses(tmp_path, monkeypatch):
     # A reviewer using only claude -> codex is never checked (its absence isn't a problem).
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
