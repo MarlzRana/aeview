@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aeview.cli import _resolve_all_lenient, _split_reviewers
 from aeview.config import HarnessInstance, Settings
-from test_resolve import make_reviewer
+from conftest import make_reviewer
 
 
 def test_default_when_none():
@@ -43,3 +43,20 @@ def test_resolve_all_lenient_skips_bad_reviewer(tmp_path, capsys):
     resolved = _resolve_all_lenient(["good", "bad"], tmp_path, _settings())
     assert [r.name for r in resolved] == ["good"]  # bad one skipped
     assert "skipping reviewer 'bad'" in capsys.readouterr().err
+
+
+def test_resolve_all_lenient_all_bad_returns_empty(tmp_path, capsys):
+    bad = make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code", "model": "m"}])
+    (bad / "harness.json").write_text("{broken json")
+    # The only discovered reviewer is broken -> empty list (the run's hard-error guard).
+    assert _resolve_all_lenient(["bad"], tmp_path, _settings()) == []
+    assert "skipping reviewer 'bad'" in capsys.readouterr().err
+
+
+def test_resolve_all_lenient_skips_reserved_name_in_sweep(tmp_path, capsys):
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "m"}])
+    make_reviewer(tmp_path, "all", harnesses=[{"harness": "claude-code", "model": "m"}])
+    # A reviewer dir literally named `all` is reserved -> skipped (loudly), not run.
+    resolved = _resolve_all_lenient(["all", "good"], tmp_path, _settings())
+    assert [r.name for r in resolved] == ["good"]
+    assert "skipping reviewer 'all'" in capsys.readouterr().err

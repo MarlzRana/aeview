@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+def make_reviewer(base, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
+    """Create a reviewer at <base>/.aeview/reviewers/<name>/ (optional harness.json)."""
+    d = base / ".aeview" / "reviewers" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "REVIEWER.md").write_text(f"---\nname: {fm_name or name}\ndescription: d\n---\n{body}\n")
+    if harnesses is not None:
+        (d / "harness.json").write_text(json.dumps({"harnesses": harnesses}))
+    return d
 
 
 @pytest.fixture

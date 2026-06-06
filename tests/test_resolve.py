@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from aeview.config import HarnessInstance, Settings, ensure_seeded
@@ -12,23 +9,13 @@ from aeview.resolve import (
     discover_reviewers,
     resolve_reviewer,
 )
+from conftest import make_reviewer
 
 
 def _settings(fallback_model: str = "fallbackmodel") -> Settings:
     return Settings(
         fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model=fallback_model)]
     )
-
-
-def make_reviewer(base: Path, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
-    d = base / ".aeview" / "reviewers" / name
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "REVIEWER.md").write_text(
-        f"---\nname: {fm_name or name}\ndescription: d\n---\n{body}\n"
-    )
-    if harnesses is not None:
-        (d / "harness.json").write_text(json.dumps({"harnesses": harnesses}))
-    return d
 
 
 # --- walk-up ---------------------------------------------------------------------------
