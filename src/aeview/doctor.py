@@ -19,6 +19,9 @@ from .resolve import ResolveError, discover_reviewers, resolve_reviewer
 
 CheckStatus = Literal["ok", "warn", "fail"]
 
+# Auth probes are no-cost status commands; bound them so a wedged CLI can't hang doctor.
+_AUTH_PROBE_TIMEOUT = 10.0
+
 
 @dataclass(slots=True)
 class Check:
@@ -72,7 +75,7 @@ def _check_harness(harness: str) -> Check:
         return Check(name, "fail", str(exc))
     if which(adapter.binary) is None:
         return Check(name, "fail", f"{adapter.binary} not found on PATH")
-    if run_sync(adapter.auth_status_args).returncode == 0:
+    if run_sync(adapter.auth_status_args, timeout=_AUTH_PROBE_TIMEOUT).returncode == 0:
         return Check(name, "ok", f"{adapter.binary} present and authenticated")
     return Check(name, "warn", f"{adapter.binary} present but auth could not be verified")
 
@@ -80,6 +83,6 @@ def _check_harness(harness: str) -> Check:
 def _check_gh() -> Check:
     if which("gh") is None:
         return Check("gh", "warn", "gh not found (needed only for --scope pr)")
-    if run_sync(["gh", "auth", "status"]).returncode == 0:
+    if run_sync(["gh", "auth", "status"], timeout=_AUTH_PROBE_TIMEOUT).returncode == 0:
         return Check("gh", "ok", "present and authenticated")
     return Check("gh", "warn", "present but not authenticated")

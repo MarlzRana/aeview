@@ -16,6 +16,7 @@ class ProcResult:
 
 
 _CMD_NOT_FOUND = 127  # conventional shell exit code for a missing executable
+_TIMED_OUT = 124  # conventional shell exit code for a timed-out command
 
 
 def _spawn_failure(args: list[str], cwd: Path | None) -> ProcResult:
@@ -30,7 +31,7 @@ def _spawn_failure(args: list[str], cwd: Path | None) -> ProcResult:
     return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: command not found")
 
 
-def run_sync(args: list[str], cwd: Path | None = None) -> ProcResult:
+def run_sync(args: list[str], cwd: Path | None = None, timeout: float | None = None) -> ProcResult:
     try:
         proc = subprocess.run(  # noqa: S603 - args are constructed internally, not shell
             args,
@@ -38,11 +39,15 @@ def run_sync(args: list[str], cwd: Path | None = None) -> ProcResult:
             capture_output=True,
             text=True,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError:
         # A missing binary/cwd must look like a failed command, not an uncaught exception,
         # so callers (scope's gh/git helpers, harness adapters) can degrade gracefully.
         return _spawn_failure(args, cwd)
+    except subprocess.TimeoutExpired:
+        # A wedged command (e.g. a hanging auth probe) becomes a failed result, not a hang.
+        return ProcResult(_TIMED_OUT, "", f"{args[0]}: timed out after {timeout}s")
     return ProcResult(proc.returncode, proc.stdout, proc.stderr)
 
 

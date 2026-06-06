@@ -13,11 +13,13 @@ def _settings():
     )
 
 
+def _run_sync_rc(rc: int):
+    return lambda args, cwd=None, timeout=None: ProcResult(rc, "", "")
+
+
 def _all_present(monkeypatch, *, authed=True):
     monkeypatch.setattr(doctor, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(
-        doctor, "run_sync", lambda args, cwd=None: ProcResult(0 if authed else 1, "", "")
-    )
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0 if authed else 1))
 
 
 def _check(report, name):
@@ -36,7 +38,7 @@ def test_doctor_all_ok(tmp_path, monkeypatch):
 def test_doctor_missing_binary_fails(tmp_path, monkeypatch):
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
     monkeypatch.setattr(doctor, "which", lambda binary: None)
-    monkeypatch.setattr(doctor, "run_sync", lambda args, cwd=None: ProcResult(0, "", ""))
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     report = doctor.run_doctor(tmp_path, _settings())
     assert not report.ok
     assert _check(report, "harness:claude-code").status == "fail"
@@ -62,7 +64,7 @@ def test_doctor_unverified_auth_is_warn_not_fail(tmp_path, monkeypatch):
 def test_doctor_missing_gh_is_warn(tmp_path, monkeypatch):
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
     monkeypatch.setattr(doctor, "which", lambda binary: None if binary == "gh" else f"/b/{binary}")
-    monkeypatch.setattr(doctor, "run_sync", lambda args, cwd=None: ProcResult(0, "", ""))
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     report = doctor.run_doctor(tmp_path, _settings())
     assert report.ok  # gh only needed for --scope pr
     assert _check(report, "gh").status == "warn"

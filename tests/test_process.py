@@ -32,3 +32,9 @@ async def test_run_async_missing_cwd():
     assert res.returncode == 127
     assert "working directory not found" in res.stderr
     assert "command not found" not in res.stderr
+
+
+def test_run_sync_timeout():
+    res = run_sync(["sleep", "5"], timeout=0.1)
+    assert res.returncode == 124
+    assert "timed out" in res.stderr
