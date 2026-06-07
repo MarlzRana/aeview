@@ -3,10 +3,12 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
+from aeview import __version__
 from aeview.cli import _dedup_plan, _resolve_all_lenient, _split_reviewers, app
-from aeview.config import HarnessInstance, Settings
+from aeview.config import HarnessInstance, Settings, runs_dir
 from aeview.resolve import ResolveError
-from aeview.schema import RosterEntry
+from aeview.runstore import RunStore
+from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
 from conftest import make_reviewer
 
 
@@ -132,3 +134,37 @@ def test_resolve_all_lenient_skips_reserved_name_in_sweep(tmp_path, capsys):
     resolved = _resolve_all_lenient(["all", "good"], tmp_path, _settings())
     assert [r.name for r in resolved] == ["good"]
     assert "skipping reviewer 'all'" in capsys.readouterr().err
+
+
+def test_version_flag(aeview_home):
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.output
+
+
+def test_dry_run_persists_nothing(aeview_home, git_repo, monkeypatch):
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--dry-run"])
+    assert result.exit_code == 0
+    assert "dry run" in result.output
+    assert "roster" in result.output
+    assert not any(runs_dir().iterdir())  # zero model calls AND no run dir written
+
+
+def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monkeypatch):
+    # A real `run` triggers retention prune: an old terminal run (past ttlDays) is removed.
+    monkeypatch.chdir(git_repo)
+    old = RunStore.create("stale-run")
+    old.write_manifest(
+        RunManifest(
+            run_id="stale-run",
+            created_at="2000-01-01T00:00:00Z",
+            overall="done",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=[],
+        )
+    )
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    CliRunner().invoke(app, ["run", "--scope", "working-tree"])
+    assert "stale-run" not in {p.name for p in runs_dir().iterdir()}

@@ -104,19 +104,39 @@ def resolve_reviewer(name: str, cwd: Path, settings: Settings) -> Reviewer:
     )
 
 
-def discover_reviewers(cwd: Path) -> list[str]:
-    """All reviewer names visible here via the walk-up, nearest-first, first-match-wins."""
-    names: list[str] = []
-    seen: set[str] = set()
+@dataclass(slots=True)
+class DiscoveredReviewer:
+    """A reviewer name seen via the walk-up: the winning (nearest) dir plus any farther dirs
+    that define the same name and are therefore shadowed (surfaced by `aeview reviewers`)."""
+
+    name: str
+    source: Path  # nearest rung's reviewer dir — the one that wins
+    shadowed: list[Path]  # farther rungs defining the same name (not used)
+
+
+def discover_reviewer_sources(cwd: Path) -> list[DiscoveredReviewer]:
+    """Every reviewer name visible here, nearest-first, with its winning dir + shadowed dirs."""
+    found: dict[str, DiscoveredReviewer] = {}
+    order: list[str] = []
     for rung in _candidate_rungs(cwd):
         parent = rung / _AEVIEW_DIR / _REVIEWERS
         if not parent.is_dir():
             continue
         for child in sorted(parent.iterdir()):
-            if child.name not in seen and (child / REVIEWER_FILE).is_file():
-                seen.add(child.name)
-                names.append(child.name)
-    return names
+            if not (child / REVIEWER_FILE).is_file():
+                continue
+            existing = found.get(child.name)
+            if existing is None:
+                found[child.name] = DiscoveredReviewer(child.name, child, [])
+                order.append(child.name)
+            else:
+                existing.shadowed.append(child)  # a farther rung shadowed by the nearer one
+    return [found[name] for name in order]
+
+
+def discover_reviewers(cwd: Path) -> list[str]:
+    """All reviewer names visible here via the walk-up, nearest-first, first-match-wins."""
+    return [d.name for d in discover_reviewer_sources(cwd)]
 
 
 def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Reviewer:

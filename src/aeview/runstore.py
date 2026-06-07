@@ -11,17 +11,83 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .bundle import Bundle
-from .config import runs_dir
+from .config import Retention, runs_dir
 from .schema import DedupResult, PooledFinding, Report, ReviewResult, RunManifest
+
+_RUN_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime(_RUN_TS_FMT)
+
+
+def _parse_ts(ts: str) -> datetime | None:
+    try:
+        return datetime.strptime(ts, _RUN_TS_FMT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def list_manifests() -> list[RunManifest]:
+    """Every run's manifest, newest-first by created_at (ISO Z, so lexical == chronological).
+
+    A run dir without a readable/valid run.json is skipped, not an error: a run killed before
+    its first manifest write, or a hand-corrupted dir, shouldn't break `list`/`status`/prune.
+    """
+    root = runs_dir()
+    if not root.is_dir():
+        return []
+    manifests: list[RunManifest] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            text = (child / "run.json").read_text("utf-8")
+        except OSError:
+            continue
+        try:
+            manifests.append(RunManifest.model_validate_json(text))
+        except ValueError:
+            continue
+    manifests.sort(key=lambda m: m.created_at, reverse=True)
+    return manifests
+
+
+def latest_run_id() -> str | None:
+    manifests = list_manifests()
+    return manifests[0].run_id if manifests else None
+
+
+def prune_runs(retention: Retention) -> list[str]:
+    """Delete terminal runs outside the newest keepLast OR older than ttlDays; return their ids.
+
+    Never deletes a non-terminal ('running') run — it may still be writing, and I6a has no
+    liveness check to tell a live run from a crashed one. Best-effort: a deletion error is
+    skipped rather than aborting the caller (this runs at the start of every `run`).
+    """
+    manifests = list_manifests()  # newest-first
+    protected = {m.run_id for m in manifests[: max(retention.keep_last, 0)]}
+    cutoff = datetime.now(UTC) - timedelta(days=retention.ttl_days)
+    removed: list[str] = []
+    for m in manifests:
+        if m.overall == "running":
+            continue
+        ts = _parse_ts(m.created_at)
+        too_old = ts is not None and ts < cutoff
+        if m.run_id in protected and not too_old:
+            continue
+        try:
+            shutil.rmtree(runs_dir() / m.run_id)
+        except OSError:
+            continue
+        removed.append(m.run_id)
+    return removed
 
 
 def pool_to_json(pool: list[PooledFinding]) -> str:

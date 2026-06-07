@@ -5,13 +5,20 @@ import json
 
 import pytest
 
-from aeview.cli import _orchestrate
-from aeview.config import runs_dir
+from aeview.cli import _execute, _plan_run
+from aeview.config import load_settings, runs_dir
 from aeview.report import EXIT_APPROVE, EXIT_ERROR, EXIT_NEEDS_ATTENTION, exit_code
 from aeview.resolve import ResolveError
 from aeview.schema import Report
 from aeview.scope import ScopeError
 from conftest import make_reviewer
+
+
+async def _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text):
+    # The full run path = plan (sync, raises ScopeError/ResolveError) then execute (async).
+    settings = load_settings()
+    plan = _plan_run(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings)
+    return await _execute(plan, settings, cwd)
 
 
 def _run(repo):
