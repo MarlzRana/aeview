@@ -148,8 +148,8 @@ async def test_extracts_bare_top_level_json_when_no_assistant_message(fake_copil
 
 
 async def test_extracts_prose_wrapped_json_with_braces_in_strings(fake_copilot, tmp_path):
-    # Prose around the object (no fence) forces the brace-span fallback; the JSON string fields
-    # contain { and } (code snippets), which a naive brace counter would mis-split.
+    # Prose around the object (no fence); raw_decode parses from the `{` and ignores trailing
+    # text. The JSON string fields contain { and } (code snippets), which the real parser handles.
     review = {
         "verdict": "needs-attention",
         "summary": "found one issue",
@@ -203,9 +203,8 @@ async def test_extracts_prose_wrapped_json_with_escaped_quotes_and_stray_prose_q
 
 
 async def test_extracts_object_after_unbalanced_prose_quote(fake_copilot, tmp_path):
-    # An ODD number of quotes in the preamble (`He said "look here: `) must not consume the
-    # object's opening brace. Fails on a depth-0 string-tracking scanner; passes on the
-    # start-from-every-brace scan. (The cycle-1 fix regressed this; this locks it in.)
+    # An ODD number of quotes in the preamble (`He said "look here: `) must not break extraction:
+    # raw_decode starts at the `{` so the preceding quote is irrelevant (it ignores leading text).
     content = f'He said "look here: {json.dumps(_VALID)}'
     fake_copilot.queue(_stream(content))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
@@ -221,8 +220,8 @@ async def test_extracts_object_after_quoted_brace_in_prose(fake_copilot, tmp_pat
 
 
 async def test_truncated_object_reprompts_and_recovers(fake_copilot, tmp_path):
-    # A token-limit cutoff yields an unclosed object: the balanced scan never returns a span,
-    # extraction yields None, and the adapter re-prompts (never silently accepts a partial).
+    # A token-limit cutoff yields an unclosed object: raw_decode raises (no object), extraction
+    # yields None, and the adapter re-prompts (never silently accepts a partial).
     truncated = '{"verdict": "approve", "summary": "cut off here'  # no closing brace
     fake_copilot.queue(_stream(truncated))  # attempt 1: truncated
     fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: complete
@@ -266,23 +265,34 @@ async def test_start_cap_bounds_scan_then_reprompts(fake_copilot, tmp_path, monk
     assert len(fake_copilot.calls) == 2  # cap hit on attempt 1 -> re-prompt recovered
 
 
-async def test_wrapped_answer_is_not_extracted_then_recovers_on_reprompt(fake_copilot, tmp_path):
-    # The model is told to emit the bare object; a wrapped answer ({"output": {...}}) is NOT
-    # dug out of the wrapper (we don't descend) — it re-prompts and the bare answer recovers.
-    wrapped = {"output": dict(_VALID)}
-    fake_copilot.queue(_stream(json.dumps(wrapped)))  # attempt 1: wrapped -> no top-level match
-    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: bare
+async def test_wrapped_answer_is_recovered_by_descent(fake_copilot, tmp_path):
+    # A prompt-only model may wrap the answer ({"output": {<review>}}) despite the instruction.
+    # When no top-level object matches, we descend into the parsed objects and recover it — in
+    # one attempt, no re-prompt.
+    fake_copilot.queue(_stream(json.dumps({"output": dict(_VALID)})))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
-    assert len(fake_copilot.calls) == 2
+    assert len(fake_copilot.calls) == 1
 
 
-async def test_deeply_nested_input_is_caught_and_reprompts(fake_copilot, tmp_path):
-    # raw_decode raises RecursionError (not JSONDecodeError) on a deeply nested prefix; it must
-    # be caught so the review re-prompts (and dedup degrades) instead of escaping and aborting
-    # the orchestration with the manifest stuck in `running`.
-    deep = '{"a":' * 6000  # exceeds the interpreter recursion limit, never closes
-    fake_copilot.queue(_stream(deep))  # attempt 1: RecursionError territory
+async def test_descent_does_not_match_findings_subobjects(fake_copilot, tmp_path):
+    # Descent must find the wrapped review, not a finding sub-object (findings lack verdict/
+    # summary, so they never match) — guards against grabbing the wrong nested dict.
+    review = dict(_VALID, verdict="needs-attention", findings=[
+        {"title": "t", "body": "b", "severity": "high", "category": "bug", "confidence": 0.5,
+         "location": {"file": "a.py", "line_start": 1, "line_end": 1}, "recommendation": "r"}
+    ])
+    fake_copilot.queue(_stream(json.dumps({"result": review})))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "needs-attention"
+    assert out.review.findings[0].title == "t"
+
+
+async def test_deeply_nested_unterminated_input_reprompts(fake_copilot, tmp_path):
+    # A deeply nested, never-closed prefix is a JSONDecodeError (the C scanner reports the
+    # unterminated end, not RecursionError); it must be caught so the review re-prompts.
+    deep = '{"a":' * 6000  # 6000 levels deep, never closed
+    fake_copilot.queue(_stream(deep))  # attempt 1: unparseable
     fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: clean
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
@@ -290,8 +300,19 @@ async def test_deeply_nested_input_is_caught_and_reprompts(fake_copilot, tmp_pat
 
 
 def test_json_objects_does_not_raise_on_deep_nesting():
-    # Direct guard: the generator swallows RecursionError and simply yields nothing.
+    # Direct guard: deeply nested unterminated input is swallowed (JSONDecodeError), not raised.
     assert list(copilot._json_objects('{"a":' * 6000)) == []
+
+
+async def test_two_non_matching_objects_before_answer(fake_copilot, tmp_path):
+    # Two non-matching objects precede the answer; the SECOND is at a non-zero offset, so the
+    # cursor re-base (i = start + length, not the slice-relative length) must be correct or the
+    # scan re-finds the second object and never reaches the answer.
+    content = f'{{"x": 1}} {{"y": 2}} {json.dumps(_VALID)}'
+    fake_copilot.queue(_stream(content))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 1
 
 
 async def test_object_larger_than_window_is_truncated_then_reprompts(
