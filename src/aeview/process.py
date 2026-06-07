@@ -16,7 +16,7 @@ class ProcResult:
 
 
 _CMD_NOT_FOUND = 127  # conventional shell exit code for a missing executable
-_TIMED_OUT = 124  # conventional shell exit code for a timed-out command
+TIMED_OUT = 124  # conventional shell exit code for a timed-out command
 
 
 def _spawn_failure(args: list[str], cwd: Path | None) -> ProcResult:
@@ -47,7 +47,7 @@ def run_sync(args: list[str], cwd: Path | None = None, timeout: float | None = N
         return _spawn_failure(args, cwd)
     except subprocess.TimeoutExpired:
         # A wedged command (e.g. a hanging auth probe) becomes a failed result, not a hang.
-        return ProcResult(_TIMED_OUT, "", f"{args[0]}: timed out after {timeout}s")
+        return ProcResult(TIMED_OUT, "", f"{args[0]}: timed out after {timeout}s")
     return ProcResult(proc.returncode, proc.stdout, proc.stderr)
 
 
@@ -91,7 +91,7 @@ async def run_async(
         msg = f"{args[0]}: timed out after {timeout}s"
         if log_path is not None:
             log_path.write_text(f"--- stderr ---\n{msg}", "utf-8")
-        return ProcResult(_TIMED_OUT, "", msg)
+        return ProcResult(TIMED_OUT, "", msg)
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
     if log_path is not None:

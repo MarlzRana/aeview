@@ -19,7 +19,10 @@ from pathlib import Path
 
 from .bundle import Bundle
 from .config import Retention, runs_dir
-from .schema import DedupResult, PooledFinding, Report, ReviewResult, RunManifest
+from .schema import DedupResult, PooledFinding, Report, ReviewResult, RunManifest, RunState
+
+# A run is non-terminal only while 'running'; every other state is final.
+_NON_TERMINAL: RunState = "running"
 
 # Microsecond resolution so back-to-back/parallel runs get distinct, correctly-orderable stamps
 # (a whole-second stamp made same-second runs tie, leaving `latest`/prune to an arbitrary
@@ -98,12 +101,12 @@ def prune_runs(retention: Retention) -> list[str]:
 
     Deletes the *enumerated* run dir, never a path rebuilt from the manifest's run_id, so a
     corrupt run.json can't redirect the delete outside ~/.aeview/runs. Only terminal runs are
-    candidates — a non-terminal ('running') run may still be writing, and I6a has no liveness
-    check to tell a live run from a crashed one. Protection counts terminal runs only, so
-    accumulated crashed-but-'running' dirs can't shrink the floor for real history. Best-effort:
+    candidates — a still-'running' run here is genuinely alive (crashed 'running' runs were first
+    reconciled to 'interrupted' by reconcile_interrupted, so they become prunable). Protection
+    counts terminal runs only, so a live run can't shrink the floor for real history. Best-effort:
     a deletion error is skipped rather than aborting the caller (this runs at the start of `run`).
     """
-    terminal = [(child, m) for child, m in _runs_newest_first() if m.overall != "running"]
+    terminal = [(child, m) for child, m in _runs_newest_first() if m.overall != _NON_TERMINAL]
     protected = {child for child, _ in terminal[: retention.keep_last]}
     cutoff = datetime.now(UTC) - timedelta(days=retention.ttl_days)
     removed: list[str] = []
@@ -118,6 +121,48 @@ def prune_runs(retention: Retention) -> list[str]:
             continue
         removed.append(manifest.run_id)
     return removed
+
+
+def pid_alive(pid: int | None) -> bool:
+    """Whether a recorded run pid is still alive (os.kill(pid, 0)). No recorded pid (or a pid
+    that's gone) reads as not-alive — a crashed or pre-liveness run, safe to reconcile."""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # the pid exists but is owned by another uid — still alive
+    return True
+
+
+def effective_overall(manifest: RunManifest) -> RunState:
+    """The run's state accounting for liveness: a 'running' manifest whose recorded pid is dead is
+    a crashed run, reported as 'interrupted'. Read-only — display callers (status/list/--wait) use
+    this; prune/resume make it durable via reconcile_interrupted or their own terminal write."""
+    if manifest.overall == _NON_TERMINAL and not pid_alive(manifest.pid):
+        return "interrupted"
+    return manifest.overall
+
+
+def reconcile_interrupted() -> list[str]:
+    """Persist the liveness verdict for crashed runs: a 'running' run whose recorded pid is dead is
+    rewritten to 'interrupted' (terminal — prune can then collect it, resume can recover it).
+    Returns the reconciled run-ids. Best-effort: a write error is skipped. Runs at the start of
+    `run` (before prune) so a Ctrl-C'd/killed run doesn't linger 'running' or leak forever."""
+    reconciled: list[str] = []
+    for child, manifest in _iter_run_dirs():
+        if manifest.overall != _NON_TERMINAL or pid_alive(manifest.pid):
+            continue
+        manifest.overall = "interrupted"
+        manifest.finished_at = now_iso()
+        try:
+            atomic_write_text(child / "run.json", manifest.model_dump_json(indent=2))
+        except OSError:
+            continue
+        reconciled.append(manifest.run_id)
+    return reconciled
 
 
 def pool_to_json(pool: list[PooledFinding]) -> str:
@@ -196,6 +241,11 @@ class RunStore:
         reviewer_dir = self.reviewers_dir / reviewer
         reviewer_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(reviewer_dir / "prompt.md", prompt)
+
+    def read_prompt(self, reviewer: str) -> str:
+        # resume reuses the prompt frozen at run start (never re-composes), so a resumed review
+        # sees byte-identical input to the original.
+        return (self.reviewers_dir / reviewer / "prompt.md").read_text("utf-8")
 
     # --- reviewers/<reviewer>/<instance>/ (one review = reviewer x harness instance) ---
     def _review_dir(self, reviewer: str, review_id: str) -> Path:

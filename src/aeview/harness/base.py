@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Protocol
 
+from ..process import TIMED_OUT
 from ..schema import ReviewOutput, Usage
 
 SchemaSupport = Literal["constrained", "validated", "prompt"]
@@ -25,6 +26,14 @@ _TRANSIENT_TEXT = ("rate limit", "overloaded", "capacity", "timeout", "timed out
 def looks_transient(text: str) -> bool:
     low = text.lower()
     return any(frag in low for frag in _TRANSIENT_TEXT)
+
+
+def classify_transient(returncode: int, detail: str) -> bool:
+    """Whether a non-zero harness exit is worth retrying. A per-review timeout (our dedicated
+    TIMED_OUT exit) is never retried — fail-fast: one timeout marks the review failed and
+    `resume` can re-run it. (Its detail text contains "timed out", which would otherwise read as
+    transient.) Every other failure defers to the shared text classifier."""
+    return returncode != TIMED_OUT and looks_transient(detail)
 
 
 class AdapterError(Exception):
@@ -82,7 +91,13 @@ class Adapter(Protocol):
         ...
 
     async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+        self,
+        prompt: str,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
     ) -> HarnessOutput: ...
 
 

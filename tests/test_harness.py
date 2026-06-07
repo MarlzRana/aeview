@@ -131,6 +131,24 @@ def test_interpret_missing_binary_is_non_transient():
     assert ei.value.transient is False
 
 
+def test_interpret_timeout_is_non_transient():
+    # A per-review timeout (our 124) must NOT be retried, even though "timed out" reads transient
+    # to the text classifier — fail-fast so a stuck review burns one window, not three.
+    adapter = claude_code.ClaudeCodeAdapter()
+    with pytest.raises(AdapterError) as ei:
+        adapter._interpret("", "claude: timed out after 1s", 124)
+    assert ei.value.transient is False
+
+
+def test_classify_transient_timeout_vs_real_transient():
+    from aeview.harness.base import classify_transient
+    from aeview.process import TIMED_OUT
+
+    assert classify_transient(TIMED_OUT, "x: timed out after 1s") is False  # fail-fast
+    assert classify_transient(1, "rate limit hit") is True
+    assert classify_transient(1, "some other error") is False
+
+
 def test_interpret_transient_text_on_non_json_is_transient():
     adapter = claude_code.ClaudeCodeAdapter()
     with pytest.raises(AdapterError) as ei:

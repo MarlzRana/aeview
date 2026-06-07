@@ -190,6 +190,32 @@ def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monk
     assert "stale-run" not in {p.name for p in runs_dir().iterdir()}
 
 
+def test_run_reconciles_and_prunes_crashed_running_run(aeview_home, git_repo, stub_claude,
+                                                       monkeypatch):
+    # A crashed run stuck 'running' (dead pid) is reconciled to 'interrupted' at the start of a
+    # real run, which makes it a prune candidate (keepLast=0 + old) -> the stuck-running leak is
+    # collected instead of lingering forever.
+    import json
+
+    monkeypatch.chdir(git_repo)
+    aeview_home.mkdir(parents=True, exist_ok=True)
+    settings = {"retention": {"keepLast": 0, "ttlDays": 14}}
+    (aeview_home / "settings.json").write_text(json.dumps(settings))
+    RunStore.create("crashed").write_manifest(
+        RunManifest(
+            run_id="crashed",
+            created_at="2000-01-01T00:00:00Z",
+            overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=[],
+            pid=999_999,  # dead
+        )
+    )
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    CliRunner().invoke(app, ["run", "--scope", "working-tree"])
+    assert "crashed" not in {p.name for p in runs_dir().iterdir()}
+
+
 def test_dry_run_does_not_prune_existing_runs(aeview_home, git_repo, monkeypatch):
     # --dry-run persists nothing AND has no side effects: an old terminal run is NOT pruned.
     monkeypatch.chdir(git_repo)

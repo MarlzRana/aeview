@@ -17,7 +17,13 @@ from pydantic import ValidationError
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, make_strict_schema, review_output_json_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport, StructuredOutput, looks_transient
+from .base import (
+    AdapterError,
+    HarnessOutput,
+    SchemaSupport,
+    StructuredOutput,
+    classify_transient,
+)
 
 # codex reasoning-effort levels (no "minimal", unlike claude); "default"/None -> leave unset.
 _EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
@@ -76,10 +82,16 @@ class CodexAdapter:
         return self._interpret(final, res.stdout, res.stderr, res.returncode)
 
     async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+        self,
+        prompt: str,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout
         )
         try:
             review = ReviewOutput.model_validate(out.payload)
@@ -93,7 +105,8 @@ class CodexAdapter:
         if returncode != 0:
             detail = _error_detail(stdout, stderr)
             raise AdapterError(
-                f"codex exited {returncode}: {detail}", transient=looks_transient(detail)
+                f"codex exited {returncode}: {detail}",
+                transient=classify_transient(returncode, detail),
             )
         if not final.strip():
             raise AdapterError("codex produced no final message")

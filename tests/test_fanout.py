@@ -29,7 +29,7 @@ class _FlakyAdapter:
         self.remaining = transient_failures
         self.calls = 0
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
         self.calls += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -41,7 +41,7 @@ class _AuthFailAdapter:
     def __init__(self):
         self.calls = 0
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
         self.calls += 1
         raise AdapterError("bad auth", transient=False)
 

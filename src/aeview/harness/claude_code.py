@@ -22,7 +22,14 @@ from pydantic import ValidationError
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, review_output_json_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport, StructuredOutput, looks_transient
+from .base import (
+    AdapterError,
+    HarnessOutput,
+    SchemaSupport,
+    StructuredOutput,
+    classify_transient,
+    looks_transient,
+)
 
 _SANDBOX_SETTINGS = json.dumps(
     {
@@ -82,10 +89,16 @@ class ClaudeCodeAdapter:
         return self._interpret(res.stdout, res.stderr, res.returncode)
 
     async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+        self,
+        prompt: str,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout
         )
         try:
             review = ReviewOutput.model_validate(out.payload)
@@ -100,7 +113,8 @@ class ClaudeCodeAdapter:
             # No parseable result: a non-zero exit is the failure (e.g. missing binary, crash).
             detail = stderr.strip() or stdout.strip() or "no output"
             raise AdapterError(
-                f"claude exited {returncode}: {detail}", transient=looks_transient(detail)
+                f"claude exited {returncode}: {detail}",
+                transient=classify_transient(returncode, detail),
             ) from None
 
         if payload.get("is_error"):

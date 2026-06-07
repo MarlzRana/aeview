@@ -27,7 +27,9 @@ def _backoff_delay(attempt: int) -> float:
     return _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)  # noqa: S311 - jitter, not crypto
 
 
-async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> ReviewResult:
+async def _run_review(
+    store: RunStore, entry: RosterEntry, prompt: str, cwd, timeout: float | None
+) -> ReviewResult:
     result = ReviewResult(
         id=entry.id,
         reviewer=entry.reviewer,
@@ -40,7 +42,7 @@ async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> 
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        return await _attempt_review(store, result, entry, prompt, cwd)
+        return await _attempt_review(store, result, entry, prompt, cwd, timeout)
     except AdapterError as exc:
         return _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
@@ -48,14 +50,16 @@ async def _run_review(store: RunStore, entry: RosterEntry, prompt: str, cwd) -> 
 
 
 async def _attempt_review(
-    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd
+    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd,
+    timeout: float | None,
 ) -> ReviewResult:
     adapter = get_adapter(entry.harness)
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             out = await adapter.run(
-                prompt, entry.model, cwd, store.log_path(entry.reviewer, entry.id), entry.thinking
+                prompt, entry.model, cwd, store.log_path(entry.reviewer, entry.id),
+                entry.thinking, timeout,
             )
         except AdapterError as exc:
             last_error = str(exc)
@@ -92,9 +96,12 @@ async def fan_out(
     roster: list[RosterEntry],
     prompt_by_reviewer: dict[str, str],
     cwd,
+    timeout: float | None = None,
 ) -> list[ReviewResult]:
     tasks = [
-        asyncio.create_task(_run_review(store, entry, prompt_by_reviewer[entry.reviewer], cwd))
+        asyncio.create_task(
+            _run_review(store, entry, prompt_by_reviewer[entry.reviewer], cwd, timeout)
+        )
         for entry in roster
     ]
     return list(await asyncio.gather(*tasks))

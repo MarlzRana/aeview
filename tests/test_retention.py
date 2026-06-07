@@ -1,20 +1,30 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from pydantic import ValidationError
 
 from aeview.config import Retention, Settings
 from aeview.runstore import (
     RunStore,
+    effective_overall,
     latest_run_id,
     list_manifests,
     now_iso,
+    pid_alive,
     prune_runs,
+    reconcile_interrupted,
 )
 from aeview.schema import Invocation, RunManifest, ScopeSpec
 
+# A pid that fits pid_t but is overwhelmingly unlikely to be a live process -> reads as dead.
+_DEAD_PID = 999_999
 
-def _write_run(run_id: str, created_at: str, *, overall: str = "done") -> None:
+
+def _write_run(
+    run_id: str, created_at: str, *, overall: str = "done", pid: int | None = None
+) -> None:
     store = RunStore.create(run_id)
     store.write_manifest(
         RunManifest(
@@ -23,6 +33,7 @@ def _write_run(run_id: str, created_at: str, *, overall: str = "done") -> None:
             overall=overall,
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
             roster=[],
+            pid=pid,
         )
     )
 
@@ -192,6 +203,37 @@ def test_prune_unparseable_created_at_is_not_too_old(aeview_home):
     removed = prune_runs(Retention(keep_last=0, ttl_days=14))
     assert removed == ["aged"]
     assert _ids() == {"bad"}
+
+
+def test_pid_alive(aeview_home):
+    assert pid_alive(os.getpid()) is True
+    assert pid_alive(None) is False  # no pid recorded -> treat as dead (crashed/old run)
+    assert pid_alive(_DEAD_PID) is False
+
+
+def test_effective_overall_folds_in_liveness(aeview_home):
+    def m(overall: str, pid: int | None) -> RunManifest:
+        return RunManifest(
+            run_id="x", created_at=now_iso(), overall=overall,
+            invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+            roster=[], pid=pid,
+        )
+
+    assert effective_overall(m("running", os.getpid())) == "running"  # live
+    assert effective_overall(m("running", _DEAD_PID)) == "interrupted"  # crashed
+    assert effective_overall(m("running", None)) == "interrupted"  # no pid -> crashed
+    assert effective_overall(m("done", _DEAD_PID)) == "done"  # terminal unaffected
+
+
+def test_reconcile_interrupted_persists_only_crashed_running(aeview_home):
+    _write_run("crashed", now_iso(), overall="running", pid=_DEAD_PID)
+    _write_run("alive", now_iso(), overall="running", pid=os.getpid())
+    _write_run("finished", now_iso(), overall="done", pid=_DEAD_PID)
+    assert reconcile_interrupted() == ["crashed"]
+    states = {m.run_id: m.overall for m in list_manifests()}
+    assert states["crashed"] == "interrupted"  # persisted
+    assert states["alive"] == "running"  # a live run is left alone
+    assert states["finished"] == "done"  # terminal unaffected
 
 
 def test_retention_rejects_nonpositive_bounds_at_the_config_boundary():

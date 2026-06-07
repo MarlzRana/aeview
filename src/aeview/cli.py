@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +22,7 @@ import typer
 
 from . import __version__
 from .bundle import Bundle, build_bundle
-from .config import Settings, ensure_seeded, load_settings
+from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
 from .fanout import fan_out
 from .merge import merge_reviews
@@ -39,11 +41,14 @@ from .resolve import (
 from .runstore import (
     RunStore,
     atomic_write_text,
+    effective_overall,
     latest_run_id,
     list_manifests,
     new_run_id,
     now_iso,
+    pid_alive,
     prune_runs,
+    reconcile_interrupted,
 )
 from .schema import DedupPlan, Invocation, Report, RosterEntry, RunManifest, ScopeSpec
 from .scope import ScopeError, parse_scope
@@ -153,6 +158,7 @@ def run(
         typer.echo(_render_dry_run(plan, settings))
         raise typer.Exit(EXIT_APPROVE)
 
+    reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
     report = asyncio.run(_execute(plan, settings, cwd))
 
@@ -274,6 +280,8 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         invocation=Invocation(reviewers=plan.names, scope=plan.bundle.scope),
         roster=plan.roster,
         dedup=_dedup_plan(plan.roster, settings),
+        pid=os.getpid(),
+        pgid=os.getpgrp(),
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
@@ -284,10 +292,38 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
     for reviewer_name, prompt in prompt_by_reviewer.items():
         store.write_prompt(reviewer_name, prompt)
 
-    results = await fan_out(store, plan.roster, prompt_by_reviewer, cwd)
-    report = await merge_reviews(results, settings, store, cwd)
-    store.write_report(report)
+    return await _run_reviews_and_merge(
+        store, manifest, plan.roster, prompt_by_reviewer, cwd, settings.review_timeout_seconds
+    )
 
+
+def _merge_settings(dedup: DedupPlan | None) -> Settings:
+    """Settings carrying only the run's *pinned* dedup harness, so a re-merge (run or resume) uses
+    the harness frozen in run.json — never whatever settings.json says now."""
+    instance = (
+        HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
+        if dedup is not None
+        else None
+    )
+    return Settings(deduplication_harness=instance)
+
+
+async def _run_reviews_and_merge(
+    store: RunStore,
+    manifest: RunManifest,
+    entries: list[RosterEntry],
+    prompt_by_reviewer: dict[str, str],
+    cwd: Path,
+    timeout: float | None,
+) -> Report:
+    """Run the given roster entries (fresh run = all; resume = the non-done subset), then merge
+    *all* on-disk reviews. The shared core of `run` and `resume` (and the I6b-2 detached worker):
+    it reads the persisted prompts + frozen bundle and re-merges via the run.json-pinned dedup
+    plan, so completion truth comes from the run dir, not the in-memory plan."""
+    if entries:
+        await fan_out(store, entries, prompt_by_reviewer, cwd, timeout)
+    report = await merge_reviews(store.read_reviews(), _merge_settings(manifest.dedup), store, cwd)
+    store.write_report(report)
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"
     manifest.finished_at = now_iso()
     store.write_manifest(manifest)
@@ -354,27 +390,38 @@ def _load_manifest_or_exit(run_id: str | None) -> tuple[str, RunManifest]:
         raise typer.Exit(EXIT_ERROR) from exc
 
 
-@app.command()
-def status(
-    run_id: Annotated[
-        str | None, typer.Argument(help="Run id; defaults to the latest run.")
-    ] = None,
-    json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
-) -> None:
-    """Show a run's progress: per-review state + coverage (defaults to the latest run)."""
-    rid, manifest = _load_manifest_or_exit(run_id)
+_WAIT_POLL_S = 1.0
+
+
+def _is_terminal(manifest: RunManifest) -> bool:
+    # effective_overall folds in liveness, so a crashed 'running' run (dead pid) reads terminal
+    # and --wait stops instead of polling a dead run forever.
+    return effective_overall(manifest) != "running"
+
+
+def _terminal_exit_code(rid: str) -> int:
+    # A finished run carries its verdict in report.json; a run that ended without one
+    # (interrupted/failed before merge) is an error.
+    try:
+        return exit_code(RunStore(rid).read_report())
+    except (OSError, ValueError):
+        return EXIT_ERROR
+
+
+def _render_status(rid: str, manifest: RunManifest, json_out: bool) -> None:
     reviews = {r.id: r for r in RunStore(rid).read_reviews()}
     rows = [
         {"id": e.id, "status": reviews[e.id].status if e.id in reviews else "pending"}
         for e in manifest.roster
     ]
     counts = Counter(r["status"] for r in rows)
+    state = effective_overall(manifest)  # crashed 'running' (dead pid) shows as 'interrupted'
     if json_out:
         typer.echo(
             json.dumps(
                 {
                     "run_id": rid,
-                    "overall": manifest.overall,
+                    "overall": state,
                     "created_at": manifest.created_at,
                     "started_at": manifest.started_at,
                     "finished_at": manifest.finished_at,
@@ -387,12 +434,38 @@ def status(
         )
         return
     typer.echo(f"run {rid}")
-    typer.echo(f"state: {manifest.overall}")
+    typer.echo(f"state: {state}")
     typer.echo(f"scope: {_scope_label(manifest.invocation.scope)}")
     parts = [f"{counts[s]} {s}" for s in _REVIEW_STATUS_ORDER if counts.get(s)]
     typer.echo(f"reviews: {', '.join(parts) or '0'} (of {len(rows)})")
     for r in rows:
         typer.echo(f"  [{r['status']}] {r['id']}")
+
+
+@app.command()
+def status(
+    run_id: Annotated[
+        str | None, typer.Argument(help="Run id; defaults to the latest run.")
+    ] = None,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help="Block until the run reaches a terminal state, then exit with its 0/1/2 verdict.",
+        ),
+    ] = False,
+    json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
+) -> None:
+    """Show a run's progress: per-review state + coverage (defaults to the latest run)."""
+    rid, manifest = _load_manifest_or_exit(run_id)
+    if not wait:
+        _render_status(rid, manifest, json_out)
+        return
+    while not _is_terminal(manifest):
+        time.sleep(_WAIT_POLL_S)
+        manifest = RunStore(rid).read_manifest()
+    _render_status(rid, manifest, json_out)
+    raise typer.Exit(_terminal_exit_code(rid))
 
 
 @app.command()
@@ -408,22 +481,76 @@ def result(
         report = RunStore(rid).read_report()
     except (OSError, ValueError) as exc:
         typer.echo(
-            f"aeview: run '{rid}' has no report yet (state: {manifest.overall}); "
+            f"aeview: run '{rid}' has no report yet (state: {effective_overall(manifest)}); "
             f"see `aeview status {rid}`",
             err=True,
         )
         raise typer.Exit(EXIT_ERROR) from exc
+    _emit_report(report, json_out)
+
+
+def _emit_report(report: Report, json_out: bool) -> None:
+    """Print a report (human or JSON) and exit with its 0/1/2 verdict code — the shared tail of
+    `result` and `resume`."""
     rendered = json.dumps(report.model_dump(), indent=2) if json_out else render_human(report)
     typer.echo(rendered)
     raise typer.Exit(exit_code(report))
 
 
+@app.command()
+def resume(
+    run_id: Annotated[str, typer.Argument(help="Run id to resume.")],
+    json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
+) -> None:
+    """Re-run a run's non-`done` reviews against its frozen bundle, then re-merge."""
+    cwd = Path.cwd()
+    rid, manifest = _load_manifest_or_exit(run_id)
+    store = RunStore(rid)
+    # Refuse to double-run a live run (a detached run still going): only a finished or crashed
+    # (dead-pid) run is safe to take over.
+    if manifest.overall == "running" and pid_alive(manifest.pid):
+        typer.echo(
+            f"aeview: run '{rid}' is still running; cancel it or wait before resuming", err=True
+        )
+        raise typer.Exit(EXIT_ERROR)
+
+    done_ids = {r.id for r in store.read_reviews() if r.status == "done"}
+    pending = [e for e in manifest.roster if e.id not in done_ids]
+    if not pending:
+        try:
+            existing = store.read_report()
+        except (OSError, ValueError):
+            existing = None
+        if existing is not None:
+            typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
+            _emit_report(existing, json_out)
+        # else: every review is done but the run crashed before merge — fall through to merge-only.
+
+    try:
+        prompts = {entry.reviewer: store.read_prompt(entry.reviewer) for entry in pending}
+    except OSError as exc:
+        typer.echo(f"aeview: cannot resume run '{rid}': {exc}", err=True)
+        raise typer.Exit(EXIT_ERROR) from exc
+
+    # Take ownership: mark running under this process so liveness tracks it; clear the old finish.
+    manifest.overall = "running"
+    manifest.finished_at = None
+    manifest.pid = os.getpid()
+    manifest.pgid = os.getpgrp()
+    store.write_manifest(manifest)
+
+    timeout = load_settings().review_timeout_seconds
+    report = asyncio.run(_run_reviews_and_merge(store, manifest, pending, prompts, cwd, timeout))
+    _emit_report(report, json_out)
+
+
 def _run_row(manifest: RunManifest) -> dict:
     """One `list` row: verdict + coverage come from report.json when the run has one; a
-    still-running or report-less run shows its run-state instead."""
-    verdict: str = manifest.overall
+    still-running or report-less run shows its run-state (liveness-adjusted) instead."""
+    state = effective_overall(manifest)  # a crashed 'running' run shows as 'interrupted'
+    verdict: str = state
     coverage: dict | None = None
-    if manifest.overall != "running":
+    if state != "running":
         try:
             report = RunStore(manifest.run_id).read_report()
         except (OSError, ValueError):

@@ -25,7 +25,13 @@ from pathlib import Path
 
 from ..process import run_async
 from ..schema import ReviewOutput, Usage, review_output_json_schema
-from .base import AdapterError, HarnessOutput, SchemaSupport, StructuredOutput, looks_transient
+from .base import (
+    AdapterError,
+    HarnessOutput,
+    SchemaSupport,
+    StructuredOutput,
+    classify_transient,
+)
 
 # copilot reasoning-effort levels (--effort); "default"/None -> leave unset.
 _EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh", "max"}
@@ -93,10 +99,12 @@ class CopilotAdapter:
             )
             if res.returncode != 0:
                 # A non-zero exit is a hard failure (bad auth, crash, timeout) — re-prompting
-                # won't help, so fail fast (transient-aware so the fan-out can retry overload).
+                # won't help, so fail fast (transient-aware so the fan-out can retry overload, but
+                # a per-review timeout stays non-transient so it isn't retried).
                 detail = res.stderr.strip() or res.stdout.strip() or "no output"
                 raise AdapterError(
-                    f"copilot exited {res.returncode}: {detail}", transient=looks_transient(detail)
+                    f"copilot exited {res.returncode}: {detail}",
+                    transient=classify_transient(res.returncode, detail),
                 )
             output_tokens += _output_tokens(res.stdout)
             payload = _extract_json(res.stdout, schema)
@@ -114,10 +122,16 @@ class CopilotAdapter:
         raise AdapterError(last_error)
 
     async def run(
-        self, prompt: str, model: str, cwd: Path, log_path: Path, thinking: str | None = None
+        self,
+        prompt: str,
+        model: str,
+        cwd: Path,
+        log_path: Path,
+        thinking: str | None = None,
+        timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking,
+            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout,
             validate=ReviewOutput.model_validate,
         )
         review = ReviewOutput.model_validate(out.payload)

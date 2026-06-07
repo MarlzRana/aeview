@@ -63,7 +63,7 @@ def test_read_reviews_orders_by_id_not_glob_path(aeview_home):
 class _OkAdapter:
     """Writes its log (as the real adapters do) and returns an approve review."""
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
         log_path.write_text("stub log", encoding="utf-8")
         return HarnessOutput(
             review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),

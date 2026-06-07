@@ -1,26 +1,43 @@
 from __future__ import annotations
 
 import json
+import os
 
 from typer.testing import CliRunner
 
+from aeview import fanout
 from aeview.cli import app
+from aeview.harness.base import HarnessOutput
 from aeview.runstore import RunStore
 from aeview.schema import (
     Coverage,
     Dedup,
     Invocation,
     Report,
+    ReviewOutput,
     ReviewResult,
     RosterEntry,
     RunManifest,
     ScopeSpec,
+    Usage,
     UsageBreakdown,
 )
 
 runner = CliRunner()
 
 _REVIEW_ID = "default__claude-code-opus"
+_DEAD_PID = 999_999  # fits pid_t, ~never a live process -> reads as a crashed run
+
+
+class _ApproveAdapter:
+    """A stub harness that approves with no findings — used to drive resume's re-run."""
+
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+        return HarnessOutput(
+            review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
+            usage=Usage(),
+            raw="{}",
+        )
 
 
 def _roster() -> list[RosterEntry]:
@@ -39,6 +56,7 @@ def _write_run(
     verdict: str = "needs-attention",
     contributed: int = 1,
     failed: int = 0,
+    pid: int | None = None,
 ) -> None:
     store = RunStore.create(run_id)
     store.write_manifest(
@@ -48,6 +66,9 @@ def _write_run(
             overall=overall,
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
             roster=_roster(),
+            # A live pid by default so a 'running' fixture reads as live (not crashed/interrupted);
+            # liveness treats a missing/dead pid as interrupted.
+            pid=os.getpid() if pid is None else pid,
         )
     )
     if review_status is not None:
@@ -373,3 +394,93 @@ def test_list_uses_directory_not_manifest_run_id(aeview_home):
     row = json.loads(runner.invoke(app, ["list", "--json"]).output)[0]
     assert row["run_id"] == "realdir2"  # not "ghost2"
     assert row["verdict"] == "approve"  # report read from realdir2, not the absent "ghost2"
+
+
+# --- status --wait ---
+
+
+def test_status_wait_finished_run_exits_verdict(aeview_home):
+    _write_run("r", verdict="approve", contributed=1)  # done + report present
+    res = runner.invoke(app, ["status", "r", "--wait"])
+    assert res.exit_code == 0  # already terminal -> adopts the run's verdict (approve)
+
+
+def test_status_wait_needs_attention_exits_1(aeview_home):
+    _write_run("r", verdict="needs-attention", contributed=1)
+    res = runner.invoke(app, ["status", "r", "--wait"])
+    assert res.exit_code == 1
+
+
+def test_status_wait_crashed_run_exits_error(aeview_home):
+    # running + dead pid -> liveness treats it as terminal (interrupted); no report -> exit 2.
+    _write_run("r", overall="running", with_report=False, pid=_DEAD_PID)
+    res = runner.invoke(app, ["status", "r", "--wait"])
+    assert res.exit_code == 2
+    assert "interrupted" in res.output
+
+
+# --- resume ---
+
+
+def _resume_run(run_id: str, statuses: dict[str, str]) -> RunStore:
+    """A run dir with a 2-entry roster, the given per-review statuses, and persisted prompts."""
+    store = RunStore.create(run_id)
+    store.write_prompt("default", "PROMPT")
+    roster = [
+        RosterEntry(id="default__a", reviewer="default", harness="claude-code", model="a"),
+        RosterEntry(id="default__b", reviewer="default", harness="claude-code", model="b"),
+    ]
+    store.write_manifest(
+        RunManifest(
+            run_id=run_id,
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=roster,
+            dedup=None,  # 2 reviews but no findings -> dedup skipped, no harness call needed
+            pid=_DEAD_PID,
+        )
+    )
+    for rid, status in statuses.items():
+        store.write_review(
+            ReviewResult(
+                id=rid, reviewer="default", harness="claude-code",
+                model=rid.split("__")[1], status=status,
+                verdict="approve" if status == "done" else None, summary="s",
+            )
+        )
+    return store
+
+
+def test_resume_reruns_only_non_done_and_remerges(aeview_home, monkeypatch):
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: _ApproveAdapter())
+    store = _resume_run("rerun", {"default__a": "done", "default__b": "failed"})
+    res = runner.invoke(app, ["resume", "rerun"])
+    assert res.exit_code == 0  # both approve now -> merged approve
+    statuses = {r.id: r.status for r in store.read_reviews()}
+    assert statuses == {"default__a": "done", "default__b": "done"}  # b was re-run
+    assert store.read_report().coverage.contributed == 2
+
+
+def test_resume_refuses_a_live_run(aeview_home):
+    store = RunStore.create("live")
+    store.write_manifest(
+        RunManifest(
+            run_id="live",
+            created_at="2026-06-07T10:00:00Z",
+            overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID),
+            pid=os.getpid(),  # alive
+        )
+    )
+    res = runner.invoke(app, ["resume", "live"])
+    assert res.exit_code == 2
+    assert "still running" in res.output
+
+
+def test_resume_already_complete_is_a_noop(aeview_home):
+    _write_run("done1", verdict="approve", contributed=1)  # all reviews done + report present
+    res = runner.invoke(app, ["resume", "done1"])
+    assert res.exit_code == 0
+    assert "already complete" in res.output
