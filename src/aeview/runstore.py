@@ -41,9 +41,10 @@ def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
     The enumerated *directory* is a run's authoritative identity — callers act on this exact
     path, never on a path rebuilt from the manifest's self-declared `run_id` (a corrupt or
     hostile run.json could point at another dir, or an absolute path, and redirect a delete
-    outside ~/.aeview/runs). A dir without a readable/valid run.json is skipped, not an error:
-    a run killed before its first manifest write, or a hand-corrupted dir, shouldn't break
-    `list`/`status`/prune.
+    outside ~/.aeview/runs). The parsed manifest's `run_id` is normalized to the dir name so
+    every downstream reader (`list`/`status`/`latest_run_id`) is dir-authoritative too. A dir
+    without a readable/valid run.json is skipped, not an error: a run killed before its first
+    manifest write, or a hand-corrupted dir, shouldn't break `list`/`status`/prune.
     """
     root = runs_dir()
     if not root.is_dir():
@@ -56,9 +57,11 @@ def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
         except OSError:
             continue
         try:
-            yield child, RunManifest.model_validate_json(text)
+            manifest = RunManifest.model_validate_json(text)
         except ValueError:
             continue
+        manifest.run_id = child.name  # the directory wins over the self-declared field
+        yield child, manifest
 
 
 def _runs_newest_first() -> list[tuple[Path, RunManifest]]:

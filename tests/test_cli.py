@@ -194,6 +194,18 @@ def test_dry_run_does_not_prune_existing_runs(aeview_home, git_repo, monkeypatch
     assert (runs_dir() / "stale-run").exists()  # preview must not delete history
 
 
+def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
+    # "persist nothing" includes --output: the preview exits before any report write.
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    out = tmp_path / "should_not_exist.json"
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "working-tree", "--dry-run", "--output", str(out)]
+    )
+    assert result.exit_code == 0
+    assert not out.exists()
+
+
 def _dry_plan(n_reviews: int) -> _Plan:
     roster = [
         RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from aeview.config import Retention
+import pytest
+from pydantic import ValidationError
+
+from aeview.config import Retention, Settings
 from aeview.runstore import (
     RunStore,
     latest_run_id,
@@ -95,3 +98,31 @@ def test_prune_deletes_enumerated_dir_not_manifest_run_id(aeview_home):
     prune_runs(Retention(keep_last=1, ttl_days=14))
     assert (runs_dir() / "keep").exists()  # the lie did not redirect the delete
     assert not (runs_dir() / "liar").exists()  # the enumerated stale dir was removed
+
+
+def test_prune_keep_last_zero_protects_nothing(aeview_home):
+    # The destructive boundary: keepLast=0 must protect *no* run, even a fresh terminal one.
+    # A `runs[: keep_last or None]` regression (0 -> "unlimited") would keep it and fail here.
+    _write_run("term", now_iso())  # recent + terminal
+    removed = prune_runs(Retention(keep_last=0, ttl_days=36500))
+    assert removed == ["term"]
+    assert _ids() == set()
+
+
+def test_prune_unparseable_created_at_survives_ttl(aeview_home):
+    # A syntactically-valid-but-unparseable timestamp -> _parse_ts None -> never "too old", so
+    # ttl can't evict it (only the count cap can). Guards the `ts is not None` branch in prune.
+    _write_run("bad", "not-a-timestamp")
+    removed = prune_runs(Retention(keep_last=20, ttl_days=1))  # within count, ancient ttl
+    assert removed == []
+    assert _ids() == {"bad"}
+
+
+def test_retention_rejects_nonpositive_bounds_at_the_config_boundary():
+    # The validation IS the only guard between a settings.json typo and total history loss.
+    with pytest.raises(ValidationError):
+        Retention(ttl_days=0)  # 0 would make cutoff==now and prune every terminal run
+    with pytest.raises(ValidationError):
+        Retention(keep_last=-1)
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"retention": {"ttlDays": 0}})  # through settings.json shape

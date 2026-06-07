@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -25,7 +26,7 @@ from .doctor import run_doctor
 from .fanout import fan_out
 from .merge import merge_reviews
 from .prompt import compose_prompt
-from .report import EXIT_APPROVE, EXIT_ERROR, exit_code, render_human
+from .report import EXIT_APPROVE, EXIT_ERROR, exit_code, render_human, report_verdict_label
 from .resolve import (
     RESERVED_REVIEWER_NAMES,
     DiscoveredReviewer,
@@ -325,14 +326,23 @@ def _scope_label(scope: ScopeSpec) -> str:
     return f"{scope.type} (base {scope.base})" if scope.base else scope.type
 
 
-def _load_manifest_or_exit(run_id: str | None) -> RunManifest:
-    """Resolve a run-id (or the latest run) to its manifest, or exit 2 with a clear message."""
+def _load_manifest_or_exit(run_id: str | None) -> tuple[str, RunManifest]:
+    """Resolve a run-id (or the latest run) to (dir-id, manifest), or exit 2 with a clear message.
+
+    Returns the run *directory* name as the authoritative id; callers read all of a run's files
+    via this id, never via the manifest's self-declared run_id (which a corrupt run.json could
+    point elsewhere). A user-supplied id is rejected if it isn't a plain run-dir name, so a read
+    command can't escape ~/.aeview/runs — the same dir-is-authoritative invariant prune relies on.
+    """
     rid = run_id or latest_run_id()
     if rid is None:
         typer.echo("aeview: no runs found", err=True)
         raise typer.Exit(EXIT_ERROR)
+    if rid in {"", ".", ".."} or "/" in rid or "\\" in rid:
+        typer.echo(f"aeview: run '{rid}' not found", err=True)
+        raise typer.Exit(EXIT_ERROR)
     try:
-        return RunStore(rid).read_manifest()
+        return rid, RunStore(rid).read_manifest()
     except (OSError, ValueError) as exc:
         typer.echo(f"aeview: run '{rid}' not found", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
@@ -346,8 +356,8 @@ def status(
     json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
 ) -> None:
     """Show a run's progress: per-review state + coverage (defaults to the latest run)."""
-    manifest = _load_manifest_or_exit(run_id)
-    reviews = {r.id: r for r in RunStore(manifest.run_id).read_reviews()}
+    rid, manifest = _load_manifest_or_exit(run_id)
+    reviews = {r.id: r for r in RunStore(rid).read_reviews()}
     rows = [
         {"id": e.id, "status": reviews[e.id].status if e.id in reviews else "pending"}
         for e in manifest.roster
@@ -357,7 +367,7 @@ def status(
         typer.echo(
             json.dumps(
                 {
-                    "run_id": manifest.run_id,
+                    "run_id": rid,
                     "overall": manifest.overall,
                     "created_at": manifest.created_at,
                     "started_at": manifest.started_at,
@@ -370,7 +380,7 @@ def status(
             )
         )
         return
-    typer.echo(f"run {manifest.run_id}")
+    typer.echo(f"run {rid}")
     typer.echo(f"state: {manifest.overall}")
     typer.echo(f"scope: {_scope_label(manifest.invocation.scope)}")
     parts = [f"{counts[s]} {s}" for s in _REVIEW_STATUS_ORDER if counts.get(s)]
@@ -387,13 +397,13 @@ def result(
     json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
 ) -> None:
     """Print the merged report for a finished run; exits with that run's 0/1/2 verdict code."""
-    manifest = _load_manifest_or_exit(run_id)
+    rid, manifest = _load_manifest_or_exit(run_id)
     try:
-        report = RunStore(manifest.run_id).read_report()
+        report = RunStore(rid).read_report()
     except (OSError, ValueError) as exc:
         typer.echo(
-            f"aeview: run '{manifest.run_id}' has no report yet (state: {manifest.overall}); "
-            f"see `aeview status {manifest.run_id}`",
+            f"aeview: run '{rid}' has no report yet (state: {manifest.overall}); "
+            f"see `aeview status {rid}`",
             err=True,
         )
         raise typer.Exit(EXIT_ERROR) from exc
@@ -413,7 +423,7 @@ def _run_row(manifest: RunManifest) -> dict:
         except (OSError, ValueError):
             report = None
         if report is not None:
-            verdict = "error" if report.coverage.contributed == 0 else report.verdict
+            verdict = report_verdict_label(report)  # shares the contributed==0 rule with result
             coverage = {
                 "contributed": report.coverage.contributed,
                 "failed": report.coverage.failed,
@@ -555,6 +565,14 @@ _STARTER_HARNESS = (
 )
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    # Publish all-or-nothing (tmp -> os.replace), mirroring runstore: a reader never sees a
+    # half-written file, and a crash leaves either nothing or the complete file.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _starter_reviewer(name: str) -> str:
     return (
         f"---\n"
@@ -600,12 +618,13 @@ def init(
     created: list[Path] = []
     if with_harness:
         harness_json = target / "harness.json"
-        harness_json.write_text(_STARTER_HARNESS, encoding="utf-8")
+        _atomic_write_text(harness_json, _STARTER_HARNESS)
         created.append(harness_json)
     # REVIEWER.md is the visibility marker — discovery and the existing-reviewer guard both key
-    # on it — so write it last. A crash mid-init then leaves a dir that's invisible to discovery
-    # and safe to re-init, never a reviewer published without its intended harness.json.
-    reviewer_md.write_text(_starter_reviewer(name), encoding="utf-8")
+    # on it — so write it last, and atomically: a concurrent reader never sees a half-written
+    # marker, and a crash leaves a dir that's invisible to discovery and safe to re-init, never
+    # a reviewer published without (or with a partial) harness.json.
+    _atomic_write_text(reviewer_md, _starter_reviewer(name))
     created.append(reviewer_md)
     typer.echo(f"created reviewer '{name}':")
     for path in created:

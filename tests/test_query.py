@@ -119,6 +119,35 @@ def test_status_no_runs_exits_error(aeview_home):
     assert "no runs" in res.output
 
 
+def test_status_uses_directory_not_manifest_run_id(aeview_home):
+    # The dir is authoritative: a run.json whose run_id names another ("ghost") dir must not
+    # redirect reads. status reads realdir's reviews and reports realdir as the id.
+    store = RunStore.create("realdir")
+    store.write_manifest(
+        RunManifest(
+            run_id="ghost",
+            created_at="2026-06-07T10:00:00Z",
+            overall="done",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID),
+        )
+    )
+    store.write_review(
+        ReviewResult(
+            id=_REVIEW_ID, reviewer="default", harness="claude-code", model="m", status="done"
+        )
+    )
+    data = json.loads(runner.invoke(app, ["status", "realdir", "--json"]).output)
+    assert data["run_id"] == "realdir"  # not the manifest's "ghost"
+    assert data["counts"] == {"done": 1}  # reviews read from realdir, not "ghost"
+
+
+def test_status_rejects_traversal_run_id(aeview_home):
+    res = runner.invoke(app, ["status", "../escape"])
+    assert res.exit_code == 2
+    assert "not found" in res.output
+
+
 def _custom_roster(*ids: str) -> list[RosterEntry]:
     return [
         RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids
@@ -272,3 +301,29 @@ def test_list_json(aeview_home):
     assert data[0]["run_id"] == "r"
     assert data[0]["verdict"] == "approve"
     assert data[0]["coverage"] == {"contributed": 1, "failed": 0}
+
+
+def test_list_uses_directory_not_manifest_run_id(aeview_home):
+    # list reads each run's report via the enumerated dir, not the manifest's self-declared id.
+    store = RunStore.create("realdir2")
+    store.write_manifest(
+        RunManifest(
+            run_id="ghost2",
+            created_at="2026-06-07T10:00:00Z",
+            overall="done",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID),
+        )
+    )
+    store.write_report(
+        Report(
+            verdict="approve",
+            summary="s",
+            coverage=Coverage(contributed=1, failed=0),
+            dedup=Dedup(status="skipped"),
+            usage=UsageBreakdown(),
+        )
+    )
+    row = json.loads(runner.invoke(app, ["list", "--json"]).output)[0]
+    assert row["run_id"] == "realdir2"  # not "ghost2"
+    assert row["verdict"] == "approve"  # report read from realdir2, not the absent "ghost2"
