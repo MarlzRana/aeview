@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -34,16 +35,19 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
-def list_manifests() -> list[RunManifest]:
-    """Every run's manifest, newest-first by created_at (ISO Z, so lexical == chronological).
+def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
+    """Yield (run dir, manifest) for each readable run, in filesystem order.
 
-    A run dir without a readable/valid run.json is skipped, not an error: a run killed before
-    its first manifest write, or a hand-corrupted dir, shouldn't break `list`/`status`/prune.
+    The enumerated *directory* is a run's authoritative identity — callers act on this exact
+    path, never on a path rebuilt from the manifest's self-declared `run_id` (a corrupt or
+    hostile run.json could point at another dir, or an absolute path, and redirect a delete
+    outside ~/.aeview/runs). A dir without a readable/valid run.json is skipped, not an error:
+    a run killed before its first manifest write, or a hand-corrupted dir, shouldn't break
+    `list`/`status`/prune.
     """
     root = runs_dir()
     if not root.is_dir():
-        return []
-    manifests: list[RunManifest] = []
+        return
     for child in root.iterdir():
         if not child.is_dir():
             continue
@@ -52,41 +56,53 @@ def list_manifests() -> list[RunManifest]:
         except OSError:
             continue
         try:
-            manifests.append(RunManifest.model_validate_json(text))
+            yield child, RunManifest.model_validate_json(text)
         except ValueError:
             continue
-    manifests.sort(key=lambda m: m.created_at, reverse=True)
-    return manifests
+
+
+def _runs_newest_first() -> list[tuple[Path, RunManifest]]:
+    # created_at is ISO Z (lexical == chronological); tie-break equal second-resolution stamps
+    # by run id so ordering is deterministic (filesystem iteration order is not). Sub-second
+    # creation order is not tracked — same-second runs order by id, not by true arrival.
+    return sorted(_iter_run_dirs(), key=lambda e: (e[1].created_at, e[1].run_id), reverse=True)
+
+
+def list_manifests() -> list[RunManifest]:
+    """Every run's manifest, newest-first (deterministic tie-break on run id)."""
+    return [manifest for _, manifest in _runs_newest_first()]
 
 
 def latest_run_id() -> str | None:
-    manifests = list_manifests()
-    return manifests[0].run_id if manifests else None
+    runs = _runs_newest_first()
+    return runs[0][1].run_id if runs else None
 
 
 def prune_runs(retention: Retention) -> list[str]:
     """Delete terminal runs outside the newest keepLast OR older than ttlDays; return their ids.
 
-    Never deletes a non-terminal ('running') run — it may still be writing, and I6a has no
-    liveness check to tell a live run from a crashed one. Best-effort: a deletion error is
-    skipped rather than aborting the caller (this runs at the start of every `run`).
+    Deletes the *enumerated* run dir, never a path rebuilt from the manifest's run_id, so a
+    corrupt run.json can't redirect the delete outside ~/.aeview/runs. Never deletes a
+    non-terminal ('running') run — it may still be writing, and I6a has no liveness check to
+    tell a live run from a crashed one. Best-effort: a deletion error is skipped rather than
+    aborting the caller (this runs at the start of every `run`).
     """
-    manifests = list_manifests()  # newest-first
-    protected = {m.run_id for m in manifests[: max(retention.keep_last, 0)]}
+    runs = _runs_newest_first()
+    protected = {child for child, _ in runs[: retention.keep_last]}
     cutoff = datetime.now(UTC) - timedelta(days=retention.ttl_days)
     removed: list[str] = []
-    for m in manifests:
-        if m.overall == "running":
+    for child, manifest in runs:
+        if manifest.overall == "running":
             continue
-        ts = _parse_ts(m.created_at)
+        ts = _parse_ts(manifest.created_at)
         too_old = ts is not None and ts < cutoff
-        if m.run_id in protected and not too_old:
+        if child in protected and not too_old:
             continue
         try:
-            shutil.rmtree(runs_dir() / m.run_id)
+            shutil.rmtree(child)
         except OSError:
             continue
-        removed.append(m.run_id)
+        removed.append(manifest.run_id)
     return removed
 
 
@@ -179,10 +195,19 @@ class RunStore:
         return self._review_dir(reviewer, review_id) / "review.log"
 
     def read_reviews(self) -> list[ReviewResult]:
-        results = [
-            ReviewResult.model_validate_json(path.read_text("utf-8"))
-            for path in self.reviewers_dir.glob("*/*/review.json")
-        ]
+        results: list[ReviewResult] = []
+        for path in self.reviewers_dir.glob("*/*/review.json"):
+            # Skip a corrupt/incompatible review.json rather than crash every caller (status,
+            # resume): mirrors list_manifests' run.json tolerance. extra="forbid" means even
+            # cross-version schema drift in a stray file would otherwise raise here.
+            try:
+                text = path.read_text("utf-8")
+            except OSError:
+                continue
+            try:
+                results.append(ReviewResult.model_validate_json(text))
+            except ValueError:
+                continue
         # Sort by the canonical review id, not the glob path: "<reviewer>/<instance>" orders on
         # "/" while the id orders on "__", so a path sort can reorder prefix-named reviewers.
         results.sort(key=lambda r: r.id)

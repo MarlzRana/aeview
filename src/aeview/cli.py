@@ -597,12 +597,16 @@ def init(
         typer.echo(f"aeview: reviewer '{name}' already exists at {target}", err=True)
         raise typer.Exit(EXIT_ERROR)
     target.mkdir(parents=True, exist_ok=True)
-    reviewer_md.write_text(_starter_reviewer(name), encoding="utf-8")
-    created = [reviewer_md]
+    created: list[Path] = []
     if with_harness:
         harness_json = target / "harness.json"
         harness_json.write_text(_STARTER_HARNESS, encoding="utf-8")
         created.append(harness_json)
+    # REVIEWER.md is the visibility marker — discovery and the existing-reviewer guard both key
+    # on it — so write it last. A crash mid-init then leaves a dir that's invisible to discovery
+    # and safe to re-init, never a reviewer published without its intended harness.json.
+    reviewer_md.write_text(_starter_reviewer(name), encoding="utf-8")
+    created.append(reviewer_md)
     typer.echo(f"created reviewer '{name}':")
     for path in created:
         typer.echo(f"  {path}")

@@ -24,10 +24,15 @@ def test_reviewers_lists_discovered_with_source_and_harnesses(aeview_home, tmp_p
 
 def test_reviewers_flags_shadowed(aeview_home, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    make_reviewer(tmp_path, "dup", harnesses=_HARNESS)  # nearer rung wins
+    make_reviewer(tmp_path, "dup", harnesses=_HARNESS)  # nearer (repo) rung wins
     make_reviewer(aeview_home.parent, "dup", harnesses=_HARNESS)  # ~/.aeview copy is shadowed
-    res = runner.invoke(app, ["reviewers"])
-    assert "shadows:" in res.output
+    rows = json.loads(runner.invoke(app, ["reviewers", "--json"]).output)
+    dup = next(r for r in rows if r["name"] == "dup")
+    # Assert the *direction*: the repo dir wins (shown absolute) and the home copy is shadowed.
+    # A winner/shadowed inversion (home overriding repo) would still print "shadows:" but fail here.
+    assert dup["source"].endswith("/.aeview/reviewers/dup")
+    assert not dup["source"].startswith("~")
+    assert dup["shadows"] == ["~/.aeview/reviewers/dup"]
 
 
 def test_reviewers_invalid_config_shown_not_fatal(aeview_home, tmp_path, monkeypatch):

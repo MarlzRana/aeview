@@ -73,3 +73,25 @@ def test_prune_never_deletes_a_running_run(aeview_home):
     _write_run("live", "2000-01-01T00:00:00Z", overall="running")
     assert prune_runs(Retention(keep_last=0, ttl_days=1)) == []
     assert _ids() == {"live"}
+
+
+def test_prune_deletes_enumerated_dir_not_manifest_run_id(aeview_home):
+    # Security guard: prune must delete the dir it scanned, never a path rebuilt from the
+    # manifest's self-declared run_id. A stale run whose run.json *lies* (run_id names another,
+    # protected run) must not redirect the delete onto that other run.
+    from aeview.config import runs_dir
+
+    _write_run("keep", now_iso())  # recent -> protected by keepLast, must survive
+    liar = RunStore.create("liar")
+    liar.write_manifest(
+        RunManifest(
+            run_id="keep",  # if prune trusted this, runs_dir()/"keep" would be deleted
+            created_at="2000-01-01T00:00:00Z",
+            overall="done",
+            invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+            roster=[],
+        )
+    )
+    prune_runs(Retention(keep_last=1, ttl_days=14))
+    assert (runs_dir() / "keep").exists()  # the lie did not redirect the delete
+    assert not (runs_dir() / "liar").exists()  # the enumerated stale dir was removed

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 from aeview import __version__
-from aeview.cli import _dedup_plan, _resolve_all_lenient, _split_reviewers, app
+from aeview.bundle import Bundle
+from aeview.cli import (
+    _dedup_plan,
+    _display_path,
+    _Plan,
+    _render_dry_run,
+    _resolve_all_lenient,
+    _split_reviewers,
+    app,
+)
 from aeview.config import HarnessInstance, Settings, runs_dir
 from aeview.resolve import ResolveError
 from aeview.runstore import RunStore
@@ -152,19 +163,70 @@ def test_dry_run_persists_nothing(aeview_home, git_repo, monkeypatch):
     assert not any(runs_dir().iterdir())  # zero model calls AND no run dir written
 
 
-def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monkeypatch):
-    # A real `run` triggers retention prune: an old terminal run (past ttlDays) is removed.
-    monkeypatch.chdir(git_repo)
-    old = RunStore.create("stale-run")
-    old.write_manifest(
+def _stale_run(run_id: str = "stale-run") -> None:
+    RunStore.create(run_id).write_manifest(
         RunManifest(
-            run_id="stale-run",
+            run_id=run_id,
             created_at="2000-01-01T00:00:00Z",
             overall="done",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
             roster=[],
         )
     )
+
+
+def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monkeypatch):
+    # A real `run` triggers retention prune: an old terminal run (past ttlDays) is removed.
+    monkeypatch.chdir(git_repo)
+    _stale_run()
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     CliRunner().invoke(app, ["run", "--scope", "working-tree"])
     assert "stale-run" not in {p.name for p in runs_dir().iterdir()}
+
+
+def test_dry_run_does_not_prune_existing_runs(aeview_home, git_repo, monkeypatch):
+    # --dry-run persists nothing AND has no side effects: an old terminal run is NOT pruned.
+    monkeypatch.chdir(git_repo)
+    _stale_run()
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--dry-run"])
+    assert result.exit_code == 0
+    assert (runs_dir() / "stale-run").exists()  # preview must not delete history
+
+
+def _dry_plan(n_reviews: int) -> _Plan:
+    roster = [
+        RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}")
+        for i in range(n_reviews)
+    ]
+    bundle = Bundle(
+        mode="inline", scope=ScopeSpec(type="branch", base="main"),
+        diff="x", summary="s", diff_bytes=123,
+    )
+    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle)
+
+
+def test_dry_run_render_single_review_skips_dedup():
+    out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None))
+    assert "scope: branch (base main)" in out
+    assert "bundle: inline, 123 bytes" in out
+    assert "dedup: skipped (single review)" in out
+
+
+def test_dry_run_render_multi_with_dedup_harness():
+    out = _render_dry_run(_dry_plan(2), _settings_with_dedup())
+    assert "dedup: claude-code opus" in out
+
+
+def test_dry_run_render_multi_without_dedup_harness():
+    out = _render_dry_run(_dry_plan(2), Settings(deduplication_harness=None))
+    assert "dedup: not configured" in out
+
+
+def test_display_path_collapses_home_with_boundary_guard(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert _display_path(home / ".aeview" / "x") == "~/.aeview/x"
+    assert _display_path(home) == "~"
+    # a sibling that merely shares the home string as a prefix must NOT be collapsed
+    assert _display_path(tmp_path / "homework") == str(tmp_path / "homework")

@@ -119,6 +119,70 @@ def test_status_no_runs_exits_error(aeview_home):
     assert "no runs" in res.output
 
 
+def _custom_roster(*ids: str) -> list[RosterEntry]:
+    return [
+        RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids
+    ]
+
+
+def test_status_mixed_review_states_counts_and_order(aeview_home):
+    roster = _custom_roster("default__a", "default__b", "default__c", "default__d")
+    store = RunStore.create("mixed")
+    store.write_manifest(
+        RunManifest(
+            run_id="mixed",
+            created_at="2026-06-07T10:00:00Z",
+            overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=roster,
+        )
+    )
+    for rid, st in [("default__a", "done"), ("default__b", "failed"), ("default__c", "running")]:
+        store.write_review(
+            ReviewResult(id=rid, reviewer="default", harness="claude-code", model="m", status=st)
+        )
+    # default__d has no review.json -> pending
+    res = runner.invoke(app, ["status", "mixed"])
+    assert res.exit_code == 0
+    assert "1 done, 1 running, 1 pending, 1 failed (of 4)" in res.output  # _REVIEW_STATUS_ORDER
+    assert "[failed] default__b" in res.output
+    assert "[running] default__c" in res.output
+
+
+def test_status_empty_roster_fallback(aeview_home):
+    store = RunStore.create("empty")
+    store.write_manifest(
+        RunManifest(
+            run_id="empty",
+            created_at="2026-06-07T10:00:00Z",
+            overall="done",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=[],
+        )
+    )
+    res = runner.invoke(app, ["status", "empty"])
+    assert "reviews: 0 (of 0)" in res.output
+
+
+def test_status_survives_corrupt_review_json(aeview_home):
+    store = RunStore.create("r")
+    store.write_manifest(
+        RunManifest(
+            run_id="r",
+            created_at="2026-06-07T10:00:00Z",
+            overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID),
+        )
+    )
+    bad_dir = store.reviewers_dir / "default" / "claude-code-opus"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "review.json").write_text("{not valid json")
+    res = runner.invoke(app, ["status", "r"])
+    assert res.exit_code == 0  # a corrupt review.json is skipped, not fatal
+    assert f"[pending] {_REVIEW_ID}" in res.output
+
+
 # --- result ---
 
 
@@ -180,6 +244,25 @@ def test_list_running_run_shows_state_not_verdict(aeview_home):
     _write_run("r", overall="running", with_report=False)
     res = runner.invoke(app, ["list"])
     assert "running" in res.output
+
+
+def test_list_all_failed_run_shows_error_not_stored_verdict(aeview_home):
+    # report verdict says "approve" but zero reviews contributed -> the row must show "error".
+    _write_run("r", verdict="approve", contributed=0, failed=1)
+    res = runner.invoke(app, ["list"])
+    assert "error" in res.output
+    assert "approve" not in res.output  # the false-green is overridden
+    data = json.loads(runner.invoke(app, ["list", "--json"]).output)
+    assert data[0]["verdict"] == "error"
+
+
+def test_list_terminal_run_without_report_falls_back_to_state(aeview_home):
+    # A terminal run whose report.json is missing falls back to the manifest state; coverage "-".
+    _write_run("r", overall="failed", with_report=False)
+    res = runner.invoke(app, ["list"])
+    line = next(ln for ln in res.output.splitlines() if ln.startswith("r "))
+    assert "failed" in line
+    assert line.rstrip().endswith("-")
 
 
 def test_list_json(aeview_home):
