@@ -18,8 +18,8 @@ revisit when it does — see the implementation log's deferred item.)
 
 from __future__ import annotations
 
-import asyncio
 import json
+from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -99,9 +99,7 @@ class CopilotAdapter:
                     f"copilot exited {res.returncode}: {detail}", transient=looks_transient(detail)
                 )
             output_tokens += _output_tokens(res.stdout)
-            # Parsing is synchronous CPU work; run it off the event loop so a large/pathological
-            # response can't stall sibling reviews sharing the loop during a fan-out.
-            payload = await asyncio.to_thread(_extract_json, res.stdout, schema)
+            payload = _extract_json(res.stdout, schema)
             if payload is None:
                 last_error = "copilot did not return a JSON object matching the schema"
                 continue
@@ -160,38 +158,36 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
     properties = set(schema.get("properties", {}))
     content = _final_assistant_content(stdout)
     sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
-    parsed: list[dict] = []
+    # A top-level match wins. Failing that, a prompt-only model may have wrapped the answer
+    # (e.g. {"output": {...}}); keep the first nested match as a fallback. We don't retain every
+    # parsed object — only one candidate — so a many-object response can't spike memory.
+    nested_fallback: dict | None = None
     for text in sources:
         for obj in _json_objects(text):
             if _matches(obj, required, properties):
                 return obj
-            parsed.append(obj)
-    # No top-level match: a prompt-only model may have wrapped the answer (e.g.
-    # {"output": {...}}). Descend into the already-parsed objects (no text rescan) to recover it.
-    for obj in parsed:
-        nested = _find_nested_match(obj, required, properties)
-        if nested is not None:
-            return nested
-    return None
+            if nested_fallback is None:
+                nested_fallback = _find_nested_match(obj, required, properties)
+    return nested_fallback
 
 
 def _find_nested_match(value: object, required: set[str], properties: set[str]) -> dict | None:
-    """Search a parsed value's nested dicts/lists for the first schema-matching object (shallow
-    first). Bounded by the parsed structure's depth, which raw_decode already kept under the
-    recursion limit — so this never rescans text."""
-    if isinstance(value, dict):
-        children: list = list(value.values())
-    elif isinstance(value, list):
-        children = value
-    else:
-        return None
-    for child in children:
-        if isinstance(child, dict) and _matches(child, required, properties):
-            return child
-    for child in children:
-        found = _find_nested_match(child, required, properties)
-        if found is not None:
-            return found
+    """Breadth-first search of a parsed value's nested dicts/lists for the first schema-matching
+    object. Iterative (not recursive) so a deeply nested parsed object can't hit Python's
+    recursion limit and crash extraction."""
+    queue: deque[object] = deque([value])
+    while queue:
+        current = queue.popleft()
+        if isinstance(current, dict):
+            children: list[object] = list(current.values())
+        elif isinstance(current, list):
+            children = current
+        else:
+            continue
+        for child in children:
+            if isinstance(child, dict) and _matches(child, required, properties):
+                return child
+        queue.extend(c for c in children if isinstance(c, (dict, list)))
     return None
 
 
