@@ -18,6 +18,7 @@ revisit when it does — see the implementation log's deferred item.)
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -98,7 +99,9 @@ class CopilotAdapter:
                     f"copilot exited {res.returncode}: {detail}", transient=looks_transient(detail)
                 )
             output_tokens += _output_tokens(res.stdout)
-            payload = _extract_json(res.stdout, schema)
+            # Parsing is synchronous CPU work; run it off the event loop so a large/pathological
+            # response can't stall sibling reviews sharing the loop during a fan-out.
+            payload = await asyncio.to_thread(_extract_json, res.stdout, schema)
             if payload is None:
                 last_error = "copilot did not return a JSON object matching the schema"
                 continue
@@ -157,10 +160,38 @@ def _extract_json(stdout: str, schema: dict) -> dict | None:
     properties = set(schema.get("properties", {}))
     content = _final_assistant_content(stdout)
     sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
+    parsed: list[dict] = []
     for text in sources:
         for obj in _json_objects(text):
             if _matches(obj, required, properties):
                 return obj
+            parsed.append(obj)
+    # No top-level match: a prompt-only model may have wrapped the answer (e.g.
+    # {"output": {...}}). Descend into the already-parsed objects (no text rescan) to recover it.
+    for obj in parsed:
+        nested = _find_nested_match(obj, required, properties)
+        if nested is not None:
+            return nested
+    return None
+
+
+def _find_nested_match(value: object, required: set[str], properties: set[str]) -> dict | None:
+    """Search a parsed value's nested dicts/lists for the first schema-matching object (shallow
+    first). Bounded by the parsed structure's depth, which raw_decode already kept under the
+    recursion limit — so this never rescans text."""
+    if isinstance(value, dict):
+        children: list = list(value.values())
+    elif isinstance(value, list):
+        children = value
+    else:
+        return None
+    for child in children:
+        if isinstance(child, dict) and _matches(child, required, properties):
+            return child
+    for child in children:
+        found = _find_nested_match(child, required, properties)
+        if found is not None:
+            return found
     return None
 
 
@@ -187,11 +218,12 @@ def _json_objects(text: str) -> Iterator[dict]:
 
 
 def _decode(window: str) -> tuple[dict, int] | None:
-    # raw_decode at a `{` yields an object (dict) or raises; RecursionError comes from a deeply
-    # nested prefix and must be caught too, else it escapes run_dedup and aborts orchestration.
+    # raw_decode at a `{` yields an object (dict) or raises JSONDecodeError. The C scanner does
+    # not raise RecursionError even on very deep nesting (it reports a JSONDecodeError at the
+    # unterminated end instead), so JSONDecodeError is the only failure to handle here.
     try:
         obj, end = _DECODER.raw_decode(window, 0)
-    except (json.JSONDecodeError, RecursionError):
+    except json.JSONDecodeError:
         return None
     return obj, end
 
