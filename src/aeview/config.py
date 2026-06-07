@@ -56,8 +56,10 @@ class HarnessInstance(BaseModel):
 class Retention(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
-    # Validate the non-negativity invariant once, at the settings.json boundary, so prune never
-    # has to clamp: keepLast 0 = no count floor; ttlDays >= 1 (0 would prune every terminal run).
+    # Validated once at the settings.json boundary so prune never clamps. keepLast and ttlDays
+    # are independent prune triggers, not guaranteed minimums: a run is pruned if it's outside
+    # the newest keepLast OR older than ttlDays (see prune_runs). ttlDays >= 1 (0 would expire
+    # every terminal run); keepLast 0 disables the count trigger.
     keep_last: int = Field(default=20, ge=0)
     ttl_days: int = Field(default=14, ge=1)
 

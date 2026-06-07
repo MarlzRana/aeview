@@ -116,8 +116,7 @@ class DiscoveredReviewer:
 
 def discover_reviewer_sources(cwd: Path) -> list[DiscoveredReviewer]:
     """Every reviewer name visible here, nearest-first, with its winning dir + shadowed dirs."""
-    found: dict[str, DiscoveredReviewer] = {}
-    order: list[str] = []
+    found: dict[str, DiscoveredReviewer] = {}  # insertion order = nearest-first discovery order
     for rung in _candidate_rungs(cwd):
         parent = rung / _AEVIEW_DIR / _REVIEWERS
         if not parent.is_dir():
@@ -128,10 +127,9 @@ def discover_reviewer_sources(cwd: Path) -> list[DiscoveredReviewer]:
             existing = found.get(child.name)
             if existing is None:
                 found[child.name] = DiscoveredReviewer(child.name, child, [])
-                order.append(child.name)
             else:
                 existing.shadowed.append(child)  # a farther rung shadowed by the nearer one
-    return [found[name] for name in order]
+    return list(found.values())
 
 
 def discover_reviewers(cwd: Path) -> list[str]:

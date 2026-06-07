@@ -105,6 +105,10 @@ def test_status_json_shape(aeview_home):
     assert data["overall"] == "done"
     assert data["counts"] == {"done": 1}
     assert data["reviews"][0]["id"] == _REVIEW_ID
+    # scope + timestamp keys are part of the JSON contract automation consumes.
+    assert data["scope"] == {"type": "working-tree", "base": None}
+    assert data["created_at"] == "2026-06-07T10:00:00Z"
+    assert "started_at" in data and "finished_at" in data
 
 
 def test_status_unknown_run_exits_error(aeview_home):
@@ -153,6 +157,12 @@ def test_status_rejects_bare_dot_run_id(aeview_home):
     res = runner.invoke(app, ["status", "."])
     assert res.exit_code == 2
     assert "not found" in res.output
+
+
+def test_status_rejects_dotdot_and_backslash_run_ids(aeview_home):
+    # bare '..' (set-membership only) and a backslash (the Windows-path-sep half of the guard).
+    assert runner.invoke(app, ["status", ".."]).exit_code == 2
+    assert runner.invoke(app, ["status", "a\\b"]).exit_code == 2
 
 
 def _custom_roster(*ids: str) -> list[RosterEntry]:
@@ -314,6 +324,16 @@ def test_list_terminal_run_without_report_falls_back_to_state(aeview_home):
     res = runner.invoke(app, ["list"])
     line = next(ln for ln in res.output.splitlines() if ln.startswith("r "))
     assert "failed" in line
+    assert line.rstrip().endswith("-")
+
+
+def test_list_terminal_run_with_corrupt_report_falls_back(aeview_home):
+    # A corrupt report.json (ValueError, not OSError) must fall back, not crash `list`.
+    _write_run("r", overall="done", with_report=False)
+    (RunStore("r").dir / "report.json").write_text("{not valid json")
+    res = runner.invoke(app, ["list"])
+    line = next(ln for ln in res.output.splitlines() if ln.startswith("r "))
+    assert "done" in line
     assert line.rstrip().endswith("-")
 
 

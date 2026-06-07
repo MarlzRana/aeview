@@ -127,6 +127,30 @@ def test_prune_never_deletes_a_running_run(aeview_home):
     assert _ids() == {"live"}
 
 
+def test_prune_running_run_does_not_consume_keep_last_slot(aeview_home):
+    # A newer 'running' run must not occupy a keepLast protection slot and evict a fresh terminal
+    # run. Protection is counted over terminal runs only, so `term` (the only terminal) survives.
+    _write_run("term", "2026-06-07T10:00:00Z", overall="done")
+    _write_run("live", "2026-06-07T11:00:00Z", overall="running")  # newer, but not terminal
+    assert prune_runs(Retention(keep_last=1, ttl_days=36500)) == []
+    assert _ids() == {"term", "live"}
+
+
+def test_atomic_write_text_cleans_tmp_and_reraises_on_failure(aeview_home, tmp_path, monkeypatch):
+    import aeview.runstore as rs
+
+    target = tmp_path / "out.json"
+
+    def boom(*_a):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(rs.os, "replace", boom)  # tmp gets written, then the rename fails
+    with pytest.raises(OSError):
+        rs.atomic_write_text(target, "data")
+    assert list(tmp_path.glob(".out.json.*.tmp")) == []  # partial tmp cleaned up
+    assert not target.exists()  # failed write did not leave a stale/partial target
+
+
 def test_prune_deletes_enumerated_dir_not_manifest_run_id(aeview_home):
     # Security guard: prune must delete the dir it scanned, never a path rebuilt from the
     # manifest's self-declared run_id. A stale run whose run.json *lies* (run_id names another,

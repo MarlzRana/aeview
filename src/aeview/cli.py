@@ -570,7 +570,9 @@ def reviewers(
 
 # --- init (scaffold a repo reviewer) ---
 
-_SAFE_REVIEWER_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+# fullmatch (not match): re's `$` also matches before a trailing newline, so `match` would let
+# a name like "foo\n" through and create a newline-bearing reviewer dir.
+_SAFE_REVIEWER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _STARTER_HARNESS = (
     '{\n  "harnesses": [\n    { "harness": "claude-code", "model": "claude-opus-4-8" }\n  ]\n}\n'
 )
@@ -579,7 +581,9 @@ _STARTER_HARNESS = (
 def _starter_reviewer(name: str) -> str:
     return (
         f"---\n"
-        f"name: {name}\n"
+        # Quote the name: an unquoted YAML 1.1 scalar like `yes`/`no`/`null` parses as a
+        # bool/None, so `init yes` would scaffold a reviewer whose frontmatter name isn't "yes".
+        f'name: "{name}"\n'
         f"description: TODO one-line summary of what this reviewer checks.\n"
         f"---\n\n"
         f"You are a focused code reviewer. TODO: describe the specific class of problems this\n"
@@ -607,7 +611,7 @@ def init(
     if name in RESERVED_REVIEWER_NAMES:
         typer.echo(f"aeview: '{name}' is reserved (it's a --reviewers keyword)", err=True)
         raise typer.Exit(EXIT_ERROR)
-    if not _SAFE_REVIEWER_NAME.match(name):
+    if not _SAFE_REVIEWER_NAME.fullmatch(name):
         typer.echo(
             f"aeview: invalid reviewer name '{name}' (use letters, digits, '-' or '_')", err=True
         )

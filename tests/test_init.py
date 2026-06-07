@@ -19,7 +19,7 @@ def test_init_creates_reviewer_without_harness(aeview_home, tmp_path, monkeypatc
     assert res.exit_code == 0
     md = _reviewer_dir(tmp_path, "myrev") / "REVIEWER.md"
     assert md.exists()
-    assert "name: myrev" in md.read_text()
+    assert 'name: "myrev"' in md.read_text()  # quoted so YAML-1.1 keywords stay strings
     assert not (md.parent / "harness.json").exists()  # optional → omitted by default
 
 
@@ -39,6 +39,16 @@ def test_init_scaffold_resolves(aeview_home, tmp_path, monkeypatch):
     res = runner.invoke(app, ["reviewers", "myrev"])
     assert res.exit_code == 0
     assert "claude-code-claude-opus-4-8" in res.output
+
+
+def test_init_yaml_keyword_name_resolves(aeview_home, tmp_path, monkeypatch):
+    # `yes` is a YAML-1.1 boolean; the quoted frontmatter must keep it the string name "yes" so
+    # the scaffolded reviewer resolves (dir name == frontmatter name) instead of becoming True.
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "yes", "--with-harness"]).exit_code == 0
+    res = runner.invoke(app, ["reviewers", "yes"])
+    assert res.exit_code == 0
+    assert "reviewer: yes" in res.output
 
 
 def test_init_refuses_reserved_name(aeview_home, tmp_path, monkeypatch):
