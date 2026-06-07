@@ -80,6 +80,45 @@ def test_prune_ttl_removes_old_even_within_keep_last(aeview_home):
     assert _ids() == {"fresh"}
 
 
+def test_now_iso_has_microsecond_precision():
+    import re
+
+    # Pins the micro-resolution stamp that makes back-to-back runs orderable; a revert to
+    # second precision would silently reintroduce same-second ties in latest/prune ordering.
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", now_iso())
+
+
+def test_iter_skips_dir_without_run_json_and_stray_files(aeview_home):
+    from aeview.config import runs_dir
+
+    _write_run("good", now_iso())
+    (runs_dir() / "no_manifest").mkdir()  # a dir but no run.json (early-crash) -> skipped
+    (runs_dir() / "stray.txt").write_text("x")  # a non-dir entry -> skipped
+    assert _ids() == {"good"}
+
+
+def test_iter_skips_invalid_utf8_run_json(aeview_home):
+    from aeview.config import runs_dir
+
+    _write_run("good", now_iso())
+    bad = runs_dir() / "badbytes"
+    bad.mkdir()
+    (bad / "run.json").write_bytes(b"\xff\xfe not valid utf-8")  # UnicodeDecodeError, not OSError
+    assert _ids() == {"good"}  # decode error skipped, not a crash
+
+
+def test_prune_delete_failure_is_skipped(aeview_home, monkeypatch):
+    # Best-effort delete: an undeletable run is skipped, never aborts the caller (start of `run`).
+    _write_run("old", "2000-01-01T00:00:00Z")
+
+    def boom(_path):
+        raise OSError("cannot remove")
+
+    monkeypatch.setattr("aeview.runstore.shutil.rmtree", boom)
+    assert prune_runs(Retention(keep_last=0, ttl_days=1)) == []  # delete failed -> not reported
+    assert _ids() == {"old"}  # still present
+
+
 def test_prune_never_deletes_a_running_run(aeview_home):
     # keep_last=0 + tiny ttl would delete everything terminal, but a 'running' run is spared
     # (it may still be writing; I6a has no liveness check to prove otherwise).

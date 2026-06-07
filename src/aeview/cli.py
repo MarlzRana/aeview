@@ -468,10 +468,15 @@ def list_runs(
 
 def _display_path(path: Path) -> str:
     """Show a reviewer dir with the home prefix collapsed to `~` (repo paths stay absolute),
-    so the source reads as repo-vs-global at a glance."""
-    home = str(Path.home())
-    text = str(path)
-    return "~" + text[len(home) :] if text == home or text.startswith(home + "/") else text
+    so the source reads as repo-vs-global at a glance. Uses path semantics (not a string prefix)
+    so a sibling like /home/foobar isn't mis-collapsed under home /home/foo."""
+    home = Path.home()
+    if path == home:
+        return "~"
+    try:
+        return f"~/{path.relative_to(home).as_posix()}"
+    except ValueError:
+        return str(path)
 
 
 def _reviewer_row(discovered: DiscoveredReviewer, cwd: Path, settings: Settings) -> dict:

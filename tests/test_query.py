@@ -148,6 +148,13 @@ def test_status_rejects_traversal_run_id(aeview_home):
     assert "not found" in res.output
 
 
+def test_status_rejects_bare_dot_run_id(aeview_home):
+    # A bare '.' / '..' has no slash, so it must be caught by the set-membership guard.
+    res = runner.invoke(app, ["status", "."])
+    assert res.exit_code == 2
+    assert "not found" in res.output
+
+
 def _custom_roster(*ids: str) -> list[RosterEntry]:
     return [
         RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids

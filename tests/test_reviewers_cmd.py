@@ -33,6 +33,9 @@ def test_reviewers_flags_shadowed(aeview_home, tmp_path, monkeypatch):
     assert dup["source"].endswith("/.aeview/reviewers/dup")
     assert not dup["source"].startswith("~")
     assert dup["shadows"] == ["~/.aeview/reviewers/dup"]
+    # The human-mode rendering of the shadows line is a distinct branch — assert it too.
+    human = runner.invoke(app, ["reviewers"]).output
+    assert "shadows: ~/.aeview/reviewers/dup" in human
 
 
 def test_reviewers_invalid_config_shown_not_fatal(aeview_home, tmp_path, monkeypatch):

@@ -60,12 +60,10 @@ def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
         if not child.is_dir():
             continue
         try:
-            text = (child / "run.json").read_text("utf-8")
-        except OSError:
-            continue
-        try:
-            manifest = RunManifest.model_validate_json(text)
-        except ValueError:
+            # read + parse in one guard: OSError (missing/unreadable run.json) and ValueError —
+            # which covers both bad JSON and invalid UTF-8 (UnicodeDecodeError is a ValueError).
+            manifest = RunManifest.model_validate_json((child / "run.json").read_text("utf-8"))
+        except (OSError, ValueError):
             continue
         manifest.run_id = child.name  # the directory wins over the self-declared field
         yield child, manifest
@@ -96,18 +94,18 @@ def prune_runs(retention: Retention) -> list[str]:
     """Delete terminal runs outside the newest keepLast OR older than ttlDays; return their ids.
 
     Deletes the *enumerated* run dir, never a path rebuilt from the manifest's run_id, so a
-    corrupt run.json can't redirect the delete outside ~/.aeview/runs. Never deletes a
-    non-terminal ('running') run — it may still be writing, and I6a has no liveness check to
-    tell a live run from a crashed one. Best-effort: a deletion error is skipped rather than
-    aborting the caller (this runs at the start of every `run`).
+    corrupt run.json can't redirect the delete outside ~/.aeview/runs. Only terminal runs are
+    candidates — a non-terminal ('running') run may still be writing, and I6a has no liveness
+    check to tell a live run from a crashed one. Protection is counted over terminal runs only,
+    so accumulated crashed-but-'running' dirs can't silently shrink the keepLast floor for real
+    history. Best-effort: a deletion error is skipped rather than aborting the caller (this runs
+    at the start of every `run`).
     """
-    runs = _runs_newest_first()
-    protected = {child for child, _ in runs[: retention.keep_last]}
+    terminal = [(child, m) for child, m in _runs_newest_first() if m.overall != "running"]
+    protected = {child for child, _ in terminal[: retention.keep_last]}
     cutoff = datetime.now(UTC) - timedelta(days=retention.ttl_days)
     removed: list[str] = []
-    for child, manifest in runs:
-        if manifest.overall == "running":
-            continue
+    for child, manifest in terminal:
         ts = _parse_ts(manifest.created_at)
         too_old = ts is not None and ts < cutoff
         if child in protected and not too_old:
@@ -137,8 +135,12 @@ def atomic_write_text(path: Path, text: str) -> None:
     SIGKILL mid-write leaves either the old file or the complete new one — never a truncated JSON
     a reader would trust. The package's single atomic-write primitive (reused by the CLI)."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)  # don't leave a partial .tmp behind on a failed write
+        raise
 
 
 def _self_collect_md(bundle: Bundle, full_diff: Path) -> str:
@@ -216,15 +218,11 @@ class RunStore:
         results: list[ReviewResult] = []
         for path in self.reviewers_dir.glob("*/*/review.json"):
             # Skip a corrupt/incompatible review.json rather than crash every caller (status,
-            # resume): mirrors list_manifests' run.json tolerance. extra="forbid" means even
-            # cross-version schema drift in a stray file would otherwise raise here.
+            # resume): mirrors list_manifests' run.json tolerance. OSError + ValueError covers an
+            # unreadable file, bad JSON, invalid UTF-8, and (extra="forbid") cross-version drift.
             try:
-                text = path.read_text("utf-8")
-            except OSError:
-                continue
-            try:
-                results.append(ReviewResult.model_validate_json(text))
-            except ValueError:
+                results.append(ReviewResult.model_validate_json(path.read_text("utf-8")))
+            except (OSError, ValueError):
                 continue
         # Sort by the canonical review id, not the glob path: "<reviewer>/<instance>" orders on
         # "/" while the id orders on "__", so a path sort can reorder prefix-named reviewers.

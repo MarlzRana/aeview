@@ -61,3 +61,16 @@ def test_init_refuses_existing(aeview_home, tmp_path, monkeypatch):
     res = runner.invoke(app, ["init", "myrev"])
     assert res.exit_code == 2
     assert "already exists" in res.output
+
+
+def test_init_refuses_partial_leftover_dir(aeview_home, tmp_path, monkeypatch):
+    # A crashed `init --with-harness` can leave a dir with harness.json but no REVIEWER.md.
+    # The exclusive-mkdir claim must refuse it, never publish a marker over the stale harness.
+    monkeypatch.chdir(tmp_path)
+    d = _reviewer_dir(tmp_path, "foo")
+    d.mkdir(parents=True)
+    (d / "harness.json").write_text('{"harnesses": []}')
+    res = runner.invoke(app, ["init", "foo"])
+    assert res.exit_code == 2
+    assert "already exists" in res.output
+    assert not (d / "REVIEWER.md").exists()  # the stale dir was not adopted

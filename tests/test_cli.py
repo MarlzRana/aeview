@@ -223,11 +223,13 @@ def test_dry_run_render_single_review_skips_dedup():
     out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None))
     assert "scope: branch (base main)" in out
     assert "bundle: inline, 123 bytes" in out
+    assert "roster (1 review):" in out  # singular
     assert "dedup: skipped (single review)" in out
 
 
 def test_dry_run_render_multi_with_dedup_harness():
     out = _render_dry_run(_dry_plan(2), _settings_with_dedup())
+    assert "roster (2 reviews):" in out  # plural
     assert "dedup: claude-code opus" in out
 
 
