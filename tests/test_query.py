@@ -249,6 +249,9 @@ def test_result_all_failed_exits_error(aeview_home):
     _write_run("r", verdict="approve", contributed=0, failed=1)
     res = runner.invoke(app, ["result", "r"])
     assert res.exit_code == 2  # no contributing review -> error, not a green approve
+    # the human render must also show error, not the stored (false-green) "approve"
+    assert "error" in res.output
+    assert "approve" not in res.output
 
 
 def test_result_no_report_yet_exits_error(aeview_home):

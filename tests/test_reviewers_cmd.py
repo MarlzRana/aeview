@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 
+import pytest
 from typer.testing import CliRunner
 
 from aeview.cli import app
@@ -71,3 +73,19 @@ def test_reviewers_unknown_name_exits_error(aeview_home, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     res = runner.invoke(app, ["reviewers", "does-not-exist"])
     assert res.exit_code == 2
+
+
+def test_reviewers_tolerates_unreadable_reviewer(aeview_home, tmp_path, monkeypatch):
+    # A REVIEWER.md that passes discovery's is_file() but is unreadable at resolve time must be
+    # shown as INVALID, not crash the listing (OSError -> ResolveError in the resolve layer).
+    monkeypatch.chdir(tmp_path)
+    d = make_reviewer(tmp_path, "broken", harnesses=_HARNESS)
+    (d / "REVIEWER.md").chmod(0o000)
+    if os.access(d / "REVIEWER.md", os.R_OK):
+        pytest.skip("cannot make the file unreadable (running as root?)")
+    try:
+        res = runner.invoke(app, ["reviewers"])
+        assert res.exit_code == 0
+        assert "INVALID" in res.output
+    finally:
+        (d / "REVIEWER.md").chmod(0o644)  # restore so pytest can clean up the temp dir

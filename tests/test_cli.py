@@ -200,6 +200,18 @@ def test_dry_run_does_not_prune_existing_runs(aeview_home, git_repo, monkeypatch
     assert (runs_dir() / "stale-run").exists()  # preview must not delete history
 
 
+def test_run_writes_output_file(aeview_home, git_repo, stub_claude, tmp_path, monkeypatch):
+    # Positive half of the --output contract (the dry-run test covers the negative half).
+    import json
+
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    out = tmp_path / "report.json"
+    CliRunner().invoke(app, ["run", "--scope", "working-tree", "--output", str(out)])
+    assert out.exists()
+    assert "verdict" in json.loads(out.read_text())
+
+
 def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
     # "persist nothing" includes --output: the preview exits before any report write.
     monkeypatch.chdir(git_repo)

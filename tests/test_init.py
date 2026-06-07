@@ -65,6 +65,15 @@ def test_init_refuses_unsafe_name(aeview_home, tmp_path, monkeypatch):
     assert not (tmp_path.parent / "escape").exists()  # never wrote outside .aeview/reviewers
 
 
+def test_init_refuses_embedded_slash_name(aeview_home, tmp_path, monkeypatch):
+    # Valid prefix + a slash: pins the fullmatch invariant (a `.match` regression would accept
+    # the "a" prefix and let mkdir/REVIEWER.md escape .aeview/reviewers).
+    monkeypatch.chdir(tmp_path)
+    res = runner.invoke(app, ["init", "a/../../escape"])
+    assert res.exit_code == 2
+    assert not (tmp_path.parent / "escape").exists()
+
+
 def test_init_refuses_existing(aeview_home, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["init", "myrev"])

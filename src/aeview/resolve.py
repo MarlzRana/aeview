@@ -55,7 +55,13 @@ class Reviewer:
 
 def parse_reviewer(path: Path) -> tuple[str, str, str]:
     """Split a REVIEWER.md into (name, description, body) using YAML frontmatter."""
-    front, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # Discovery passed is_file(), but the file can be unreadable at read time (mode 000, or
+        # removed in the gap). Normalize to ResolveError so the sweep + `reviewers` stay resilient.
+        raise ResolveError(f"{path} could not be read: {exc}") from exc
+    front, body = split_frontmatter(text)
     if front is None:
         raise ResolveError(f"{path} is missing or has malformed YAML frontmatter")
     try:
@@ -161,7 +167,7 @@ def _resolve_harnesses(reviewer_dir: Path, settings: Settings) -> list[HarnessRe
         try:
             raw = json.loads(harness_file.read_text(encoding="utf-8"))
             instances = [HarnessInstance.model_validate(h) for h in raw.get("harnesses", [])]
-        except (json.JSONDecodeError, ValidationError, AttributeError) as exc:
+        except (OSError, json.JSONDecodeError, ValidationError, AttributeError) as exc:
             raise ResolveError(f"{harness_file} is invalid: {exc}") from exc
         if not instances:
             raise ResolveError(f"{harness_file} lists no harnesses")
