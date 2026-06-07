@@ -304,6 +304,26 @@ def test_json_objects_does_not_raise_on_deep_nesting():
     assert list(copilot._json_objects('{"a":' * 6000)) == []
 
 
+async def test_closed_deeply_nested_object_does_not_crash_descent(fake_copilot, tmp_path):
+    # A CLOSED 2000-deep object parses fine (raw_decode), doesn't match, and the nested-descent
+    # fallback must traverse it WITHOUT a RecursionError (iterative, not recursive), then
+    # re-prompt. Recursive descent would crash the parse here.
+    deep = '{"a":' * 2000 + "1" + "}" * 2000  # valid, 2000 levels, no verdict/summary
+    fake_copilot.queue(_stream(deep))  # attempt 1: deep non-matching
+    fake_copilot.queue(_stream(json.dumps(_VALID)))  # attempt 2: clean
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(fake_copilot.calls) == 2
+
+
+def test_find_nested_match_is_iterative_on_deep_input():
+    # Direct guard: descent over a deeply nested parsed dict returns without RecursionError.
+    deep: dict = {"x": 1}
+    for _ in range(3000):
+        deep = {"a": deep}
+    assert copilot._find_nested_match(deep, {"verdict", "summary"}, set()) is None
+
+
 async def test_two_non_matching_objects_before_answer(fake_copilot, tmp_path):
     # Two non-matching objects precede the answer; the SECOND is at a non-zero offset, so the
     # cursor re-base (i = start + length, not the slice-relative length) must be correct or the
