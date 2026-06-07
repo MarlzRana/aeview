@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import pytest
+
 from aeview import doctor
 from aeview.config import HarnessInstance, Settings
 from aeview.process import ProcResult
 from conftest import make_reviewer
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(aeview_home):
+    # discover_reviewers climbs to ~/.aeview, so isolate HOME to a temp dir — otherwise these
+    # tests pick up the developer's real global reviewers (and their harnesses).
+    return aeview_home
 
 
 def _settings():
