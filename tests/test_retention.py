@@ -53,6 +53,16 @@ def test_latest_run_id_none_when_empty(aeview_home):
     assert latest_run_id() is None
 
 
+def test_identical_timestamps_order_deterministically_by_run_id(aeview_home):
+    # Identical created_at -> deterministic run_id tiebreak (reverse), never filesystem order.
+    # Dropping the secondary run_id key would make same-instant ordering flaky.
+    ts = "2026-06-07T10:00:00.000000Z"
+    for rid in ("aaa", "ccc", "bbb"):
+        _write_run(rid, ts)
+    assert [m.run_id for m in list_manifests()] == ["ccc", "bbb", "aaa"]
+    assert latest_run_id() == "ccc"
+
+
 def test_prune_keeps_newest_keep_last(aeview_home):
     # ttl far in the future so only the count cap applies.
     for i in range(5):

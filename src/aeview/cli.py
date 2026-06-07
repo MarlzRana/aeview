@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import sys
 from collections import Counter
@@ -39,6 +38,7 @@ from .resolve import (
 )
 from .runstore import (
     RunStore,
+    atomic_write_text,
     latest_run_id,
     list_manifests,
     new_run_id,
@@ -334,10 +334,16 @@ def _load_manifest_or_exit(run_id: str | None) -> tuple[str, RunManifest]:
     point elsewhere). A user-supplied id is rejected if it isn't a plain run-dir name, so a read
     command can't escape ~/.aeview/runs — the same dir-is-authoritative invariant prune relies on.
     """
-    rid = run_id or latest_run_id()
-    if rid is None:
-        typer.echo("aeview: no runs found", err=True)
-        raise typer.Exit(EXIT_ERROR)
+    # Distinguish "omitted" (None -> latest) from "given but empty" ('' -> a mistake, not the
+    # latest run): otherwise `aeview result "$RUN_ID"` with an empty var silently reads the
+    # latest run and returns its verdict, which automation would trust.
+    if run_id is None:
+        rid = latest_run_id()
+        if rid is None:
+            typer.echo("aeview: no runs found", err=True)
+            raise typer.Exit(EXIT_ERROR)
+    else:
+        rid = run_id
     if rid in {"", ".", ".."} or "/" in rid or "\\" in rid:
         typer.echo(f"aeview: run '{rid}' not found", err=True)
         raise typer.Exit(EXIT_ERROR)
@@ -565,14 +571,6 @@ _STARTER_HARNESS = (
 )
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    # Publish all-or-nothing (tmp -> os.replace), mirroring runstore: a reader never sees a
-    # half-written file, and a crash leaves either nothing or the complete file.
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def _starter_reviewer(name: str) -> str:
     return (
         f"---\n"
@@ -610,21 +608,25 @@ def init(
         )
         raise typer.Exit(EXIT_ERROR)
     target = Path.cwd() / ".aeview" / "reviewers" / name
-    reviewer_md = target / "REVIEWER.md"
-    if reviewer_md.exists():
+    # Claim the reviewer dir atomically (exclusive create). This is the real guard against a
+    # concurrent init and against adopting a crashed init's leftover files — a marker-only
+    # `REVIEWER.md` check would let two inits race, or a later harness-less init publish a stale
+    # harness.json left behind by an earlier crashed `--with-harness` run.
+    try:
+        target.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
         typer.echo(f"aeview: reviewer '{name}' already exists at {target}", err=True)
-        raise typer.Exit(EXIT_ERROR)
-    target.mkdir(parents=True, exist_ok=True)
+        raise typer.Exit(EXIT_ERROR) from exc
+    reviewer_md = target / "REVIEWER.md"
     created: list[Path] = []
     if with_harness:
         harness_json = target / "harness.json"
-        _atomic_write_text(harness_json, _STARTER_HARNESS)
+        atomic_write_text(harness_json, _STARTER_HARNESS)
         created.append(harness_json)
-    # REVIEWER.md is the visibility marker — discovery and the existing-reviewer guard both key
-    # on it — so write it last, and atomically: a concurrent reader never sees a half-written
-    # marker, and a crash leaves a dir that's invisible to discovery and safe to re-init, never
-    # a reviewer published without (or with a partial) harness.json.
-    _atomic_write_text(reviewer_md, _starter_reviewer(name))
+    # REVIEWER.md is the visibility marker — discovery keys on it — so write it last, and
+    # atomically, so a concurrent reader never sees a half-written marker or a reviewer without
+    # its harness.json.
+    atomic_write_text(reviewer_md, _starter_reviewer(name))
     created.append(reviewer_md)
     typer.echo(f"created reviewer '{name}':")
     for path in created:

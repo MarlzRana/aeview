@@ -248,6 +248,22 @@ def test_result_json(aeview_home):
     assert data["verdict"] == "needs-attention"
 
 
+def test_result_defaults_to_latest_run(aeview_home):
+    _write_run("older", created_at="2026-06-07T09:00:00Z", verdict="approve", contributed=1)
+    _write_run("newer", created_at="2026-06-07T12:00:00Z", verdict="needs-attention", contributed=1)
+    res = runner.invoke(app, ["result"])
+    assert res.exit_code == 1  # latest ("newer") is needs-attention
+    assert "needs-attention" in res.output
+
+
+def test_result_empty_run_id_errors_not_latest(aeview_home):
+    # An explicit empty id (e.g. an empty shell var) must error, not silently read the latest run.
+    _write_run("r", verdict="approve", contributed=1)
+    res = runner.invoke(app, ["result", ""])
+    assert res.exit_code == 2
+    assert "not found" in res.output
+
+
 # --- list ---
 
 

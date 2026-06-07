@@ -21,7 +21,12 @@ from .bundle import Bundle
 from .config import Retention, runs_dir
 from .schema import DedupResult, PooledFinding, Report, ReviewResult, RunManifest
 
-_RUN_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+# Microsecond resolution so back-to-back/parallel runs get distinct, correctly-orderable stamps
+# (a whole-second stamp made same-second runs tie, leaving `latest`/prune to an arbitrary
+# UUID order). _LEGACY_TS_FMT parses runs written before micro resolution.
+_RUN_TS_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_LEGACY_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+_DT_MIN = datetime.min.replace(tzinfo=UTC)
 
 
 def now_iso() -> str:
@@ -29,10 +34,12 @@ def now_iso() -> str:
 
 
 def _parse_ts(ts: str) -> datetime | None:
-    try:
-        return datetime.strptime(ts, _RUN_TS_FMT).replace(tzinfo=UTC)
-    except ValueError:
-        return None
+    for fmt in (_RUN_TS_FMT, _LEGACY_TS_FMT):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
@@ -65,10 +72,14 @@ def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
 
 
 def _runs_newest_first() -> list[tuple[Path, RunManifest]]:
-    # created_at is ISO Z (lexical == chronological); tie-break equal second-resolution stamps
-    # by run id so ordering is deterministic (filesystem iteration order is not). Sub-second
-    # creation order is not tracked — same-second runs order by id, not by true arrival.
-    return sorted(_iter_run_dirs(), key=lambda e: (e[1].created_at, e[1].run_id), reverse=True)
+    # Order by the parsed timestamp so back-to-back runs sort by true creation time (micro
+    # resolution); an unparseable stamp sorts oldest. run_id is a final deterministic tiebreak
+    # for the astronomically-rare identical-microsecond case (filesystem order is not stable).
+    return sorted(
+        _iter_run_dirs(),
+        key=lambda e: (_parse_ts(e[1].created_at) or _DT_MIN, e[1].run_id),
+        reverse=True,
+    )
 
 
 def list_manifests() -> list[RunManifest]:
@@ -121,7 +132,10 @@ def new_run_id() -> str:
     return str(uuid.uuid4())
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str) -> None:
+    """Publish all-or-nothing (tmp -> os.replace): a reader never sees a half-written file, and a
+    SIGKILL mid-write leaves either the old file or the complete new one — never a truncated JSON
+    a reader would trust. The package's single atomic-write primitive (reused by the CLI)."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
@@ -155,7 +169,7 @@ class RunStore:
 
     # --- run.json (orchestrator-owned) ---
     def write_manifest(self, manifest: RunManifest) -> None:
-        _atomic_write(self.dir / "run.json", manifest.model_dump_json(indent=2))
+        atomic_write_text(self.dir / "run.json", manifest.model_dump_json(indent=2))
 
     def read_manifest(self) -> RunManifest:
         return RunManifest.model_validate_json((self.dir / "run.json").read_text("utf-8"))
@@ -163,20 +177,21 @@ class RunStore:
     # --- bundle/ ---
     def write_bundle(self, bundle: Bundle) -> Path | None:
         """Persist bundle artifacts. Returns the full-diff path in self-collect mode."""
-        _atomic_write(self.bundle_dir / "bundle.json", json.dumps(bundle.manifest(), indent=2))
+        atomic_write_text(self.bundle_dir / "bundle.json", json.dumps(bundle.manifest(), indent=2))
         if bundle.is_inline:
-            _atomic_write(self.bundle_dir / "inline_bundle.diff", bundle.diff)
+            atomic_write_text(self.bundle_dir / "inline_bundle.diff", bundle.diff)
             return None
         full = self.bundle_dir / "self_collect.diff"
-        _atomic_write(full, bundle.diff)
-        _atomic_write(self.bundle_dir / "self_collect_bundle.md", _self_collect_md(bundle, full))
+        atomic_write_text(full, bundle.diff)
+        summary_md = _self_collect_md(bundle, full)
+        atomic_write_text(self.bundle_dir / "self_collect_bundle.md", summary_md)
         return full
 
     # --- reviewers/<reviewer>/ (prompt shared across that reviewer's harness instances) ---
     def write_prompt(self, reviewer: str, prompt: str) -> None:
         reviewer_dir = self.reviewers_dir / reviewer
         reviewer_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(reviewer_dir / "prompt.md", prompt)
+        atomic_write_text(reviewer_dir / "prompt.md", prompt)
 
     # --- reviewers/<reviewer>/<instance>/ (one review = reviewer x harness instance) ---
     def _review_dir(self, reviewer: str, review_id: str) -> Path:
@@ -190,7 +205,7 @@ class RunStore:
     def write_review(self, result: ReviewResult) -> None:
         review_dir = self._review_dir(result.reviewer, result.id)
         review_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(review_dir / "review.json", result.model_dump_json(indent=2))
+        atomic_write_text(review_dir / "review.json", result.model_dump_json(indent=2))
 
     def log_path(self, reviewer: str, review_id: str) -> Path:
         # A pure path accessor: the review dir already exists because the worker writes the
@@ -223,21 +238,21 @@ class RunStore:
         return d
 
     def write_dedup_prompt(self, instance_id: str, prompt: str) -> None:
-        _atomic_write(self._dedup_dir(instance_id) / "prompt.md", prompt)
+        atomic_write_text(self._dedup_dir(instance_id) / "prompt.md", prompt)
 
     def write_dedup_input(self, instance_id: str, pool: list[PooledFinding]) -> None:
-        _atomic_write(self._dedup_dir(instance_id) / "input.json", pool_to_json(pool) + "\n")
+        atomic_write_text(self._dedup_dir(instance_id) / "input.json", pool_to_json(pool) + "\n")
 
     def write_dedup_result(self, instance_id: str, result: DedupResult) -> None:
         path = self._dedup_dir(instance_id) / "result.json"
-        _atomic_write(path, result.model_dump_json(indent=2))
+        atomic_write_text(path, result.model_dump_json(indent=2))
 
     def dedup_log_path(self, instance_id: str) -> Path:
         return self._dedup_dir(instance_id) / "dedup.log"
 
     # --- report.json (written last) ---
     def write_report(self, report: Report) -> None:
-        _atomic_write(self.dir / "report.json", report.model_dump_json(indent=2))
+        atomic_write_text(self.dir / "report.json", report.model_dump_json(indent=2))
 
     def read_report(self) -> Report:
         return Report.model_validate_json((self.dir / "report.json").read_text("utf-8"))

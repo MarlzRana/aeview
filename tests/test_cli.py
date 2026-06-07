@@ -206,13 +206,14 @@ def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypa
     assert not out.exists()
 
 
-def _dry_plan(n_reviews: int) -> _Plan:
+def _dry_plan(n_reviews: int = 1, *, mode: str = "inline", thinking: str | None = None) -> _Plan:
     roster = [
-        RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}")
+        RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}",
+                    thinking=thinking)
         for i in range(n_reviews)
     ]
     bundle = Bundle(
-        mode="inline", scope=ScopeSpec(type="branch", base="main"),
+        mode=mode, scope=ScopeSpec(type="branch", base="main"),
         diff="x", summary="s", diff_bytes=123,
     )
     return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle)
@@ -233,6 +234,26 @@ def test_dry_run_render_multi_with_dedup_harness():
 def test_dry_run_render_multi_without_dedup_harness():
     out = _render_dry_run(_dry_plan(2), Settings(deduplication_harness=None))
     assert "dedup: not configured" in out
+
+
+def test_dry_run_render_lists_roster_entries():
+    # The per-entry roster preview is the point of --dry-run; pin one entry line + thinking suffix.
+    out = _render_dry_run(_dry_plan(1, thinking="high"), Settings(deduplication_harness=None))
+    assert "  - r__h0  (claude-code m0 thinking=high)" in out
+
+
+def test_dry_run_render_self_collect_mode_label():
+    out = _render_dry_run(_dry_plan(1, mode="self-collect"), Settings(deduplication_harness=None))
+    assert "bundle: self-collect, 123 bytes" in out
+
+
+def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
+    # prune runs only after planning succeeds: an erroring command must not delete history.
+    monkeypatch.chdir(tmp_path)
+    _stale_run()
+    result = CliRunner().invoke(app, ["run", "--reviewers", "nope", "--scope", "working-tree"])
+    assert result.exit_code == 2  # unknown reviewer -> planning fails before prune
+    assert (runs_dir() / "stale-run").exists()
 
 
 def test_display_path_collapses_home_with_boundary_guard(tmp_path, monkeypatch):
