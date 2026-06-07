@@ -91,15 +91,17 @@ def latest_run_id() -> str | None:
 
 
 def prune_runs(retention: Retention) -> list[str]:
-    """Delete terminal runs outside the newest keepLast OR older than ttlDays; return their ids.
+    """Delete a terminal run only if it's BOTH outside the newest keepLast AND older than ttlDays;
+    return the deleted ids. keepLast is a guaranteed floor — the newest keepLast terminal runs are
+    always kept regardless of age — and ttlDays only evicts runs beyond that floor, so an
+    infrequent user never loses their last keepLast runs to age.
 
     Deletes the *enumerated* run dir, never a path rebuilt from the manifest's run_id, so a
     corrupt run.json can't redirect the delete outside ~/.aeview/runs. Only terminal runs are
     candidates — a non-terminal ('running') run may still be writing, and I6a has no liveness
-    check to tell a live run from a crashed one. Protection is counted over terminal runs only,
-    so accumulated crashed-but-'running' dirs can't silently shrink the keepLast floor for real
-    history. Best-effort: a deletion error is skipped rather than aborting the caller (this runs
-    at the start of every `run`).
+    check to tell a live run from a crashed one. Protection counts terminal runs only, so
+    accumulated crashed-but-'running' dirs can't shrink the floor for real history. Best-effort:
+    a deletion error is skipped rather than aborting the caller (this runs at the start of `run`).
     """
     terminal = [(child, m) for child, m in _runs_newest_first() if m.overall != "running"]
     protected = {child for child, _ in terminal[: retention.keep_last]}
@@ -108,7 +110,7 @@ def prune_runs(retention: Retention) -> list[str]:
     for child, manifest in terminal:
         ts = _parse_ts(manifest.created_at)
         too_old = ts is not None and ts < cutoff
-        if child in protected and not too_old:
+        if child in protected or not too_old:  # keep within the keepLast floor OR within ttlDays
             continue
         try:
             shutil.rmtree(child)

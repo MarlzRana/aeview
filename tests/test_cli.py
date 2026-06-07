@@ -176,8 +176,14 @@ def _stale_run(run_id: str = "stale-run") -> None:
 
 
 def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monkeypatch):
-    # A real `run` triggers retention prune: an old terminal run (past ttlDays) is removed.
+    # A real `run` triggers retention prune. keepLast=0 (no floor) so the aged stale run is the
+    # outside-floor-AND-too-old case the pruner deletes.
+    import json
+
     monkeypatch.chdir(git_repo)
+    aeview_home.mkdir(parents=True, exist_ok=True)
+    settings = {"retention": {"keepLast": 0, "ttlDays": 14}}
+    (aeview_home / "settings.json").write_text(json.dumps(settings))
     _stale_run()
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     CliRunner().invoke(app, ["run", "--scope", "working-tree"])

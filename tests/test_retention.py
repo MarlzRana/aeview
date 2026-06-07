@@ -64,20 +64,22 @@ def test_identical_timestamps_order_deterministically_by_run_id(aeview_home):
 
 
 def test_prune_keeps_newest_keep_last(aeview_home):
-    # ttl far in the future so only the count cap applies.
+    # All runs are aged out (past ttl); keepLast=2 floors the newest two, the rest are pruned
+    # (a run is deleted only when it's BOTH outside the floor AND older than ttlDays).
     for i in range(5):
-        _write_run(f"r{i}", f"2026-06-0{i + 1}T10:00:00Z")
-    removed = prune_runs(Retention(keep_last=2, ttl_days=36500))
-    assert set(removed) == {"r0", "r1", "r2"}  # newest two (r4, r3) kept
+        _write_run(f"r{i}", f"2000-01-0{i + 1}T10:00:00Z")  # ancient -> all past ttl
+    removed = prune_runs(Retention(keep_last=2, ttl_days=14))
+    assert set(removed) == {"r0", "r1", "r2"}  # newest two (r4, r3) floored
     assert _ids() == {"r3", "r4"}
 
 
-def test_prune_ttl_removes_old_even_within_keep_last(aeview_home):
+def test_prune_keep_last_floor_protects_old_runs(aeview_home):
+    # keepLast is a floor: a run within the newest keepLast is NOT evicted by ttl, even if ancient.
     _write_run("old", "2000-01-01T00:00:00Z")
     _write_run("fresh", now_iso())
     removed = prune_runs(Retention(keep_last=20, ttl_days=14))
-    assert removed == ["old"]  # within the count cap but older than ttlDays
-    assert _ids() == {"fresh"}
+    assert removed == []  # both within the keepLast floor -> kept despite "old" being ancient
+    assert _ids() == {"old", "fresh"}
 
 
 def test_now_iso_has_microsecond_precision():
@@ -128,11 +130,11 @@ def test_prune_never_deletes_a_running_run(aeview_home):
 
 
 def test_prune_running_run_does_not_consume_keep_last_slot(aeview_home):
-    # A newer 'running' run must not occupy a keepLast protection slot and evict a fresh terminal
-    # run. Protection is counted over terminal runs only, so `term` (the only terminal) survives.
-    _write_run("term", "2026-06-07T10:00:00Z", overall="done")
-    _write_run("live", "2026-06-07T11:00:00Z", overall="running")  # newer, but not terminal
-    assert prune_runs(Retention(keep_last=1, ttl_days=36500)) == []
+    # A newer 'running' run must not occupy a keepLast slot and evict the (older) terminal run.
+    # Protection counts terminal runs only, so `term` is floored even though `live` is newer.
+    _write_run("term", "2000-01-01T00:00:00Z", overall="done")  # old terminal, past ttl
+    _write_run("live", now_iso(), overall="running")  # newer, but not terminal
+    assert prune_runs(Retention(keep_last=1, ttl_days=14)) == []
     assert _ids() == {"term", "live"}
 
 
@@ -174,20 +176,21 @@ def test_prune_deletes_enumerated_dir_not_manifest_run_id(aeview_home):
 
 
 def test_prune_keep_last_zero_protects_nothing(aeview_home):
-    # The destructive boundary: keepLast=0 must protect *no* run, even a fresh terminal one.
+    # keepLast=0 disables the count floor, so an aged-out run is pruned (nothing protects it).
     # A `runs[: keep_last or None]` regression (0 -> "unlimited") would keep it and fail here.
-    _write_run("term", now_iso())  # recent + terminal
-    removed = prune_runs(Retention(keep_last=0, ttl_days=36500))
+    _write_run("term", "2000-01-01T00:00:00Z")  # terminal + past ttl
+    removed = prune_runs(Retention(keep_last=0, ttl_days=14))
     assert removed == ["term"]
     assert _ids() == set()
 
 
-def test_prune_unparseable_created_at_survives_ttl(aeview_home):
-    # A syntactically-valid-but-unparseable timestamp -> _parse_ts None -> never "too old", so
-    # ttl can't evict it (only the count cap can). Guards the `ts is not None` branch in prune.
+def test_prune_unparseable_created_at_is_not_too_old(aeview_home):
+    # keepLast=0 (no floor): an unparseable timestamp -> _parse_ts None -> treated as "not too
+    # old" -> kept, while a parseable aged-out run is pruned. Guards the `ts is not None` branch.
     _write_run("bad", "not-a-timestamp")
-    removed = prune_runs(Retention(keep_last=20, ttl_days=1))  # within count, ancient ttl
-    assert removed == []
+    _write_run("aged", "2000-01-01T00:00:00Z")
+    removed = prune_runs(Retention(keep_last=0, ttl_days=14))
+    assert removed == ["aged"]
     assert _ids() == {"bad"}
 
 
