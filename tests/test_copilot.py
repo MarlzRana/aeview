@@ -407,6 +407,21 @@ async def test_nonzero_exit_classifies_transient(fake_copilot, tmp_path):
     assert ei.value.transient is True
 
 
+async def test_timeout_exit_is_non_transient(fake_copilot, tmp_path):
+    # A per-review timeout (exit 124) is fail-fast even though "timed out" reads transient —
+    # copilot uses classify_transient like claude/codex.
+    fake_copilot.queue("", returncode=124, stderr="copilot: timed out after 1s")
+    with pytest.raises(AdapterError) as ei:
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
+    assert len(fake_copilot.calls) == 1  # not retried
+
+
+async def test_forwards_timeout_to_run_async(fake_copilot, tmp_path):
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 90.0)
+    assert fake_copilot.calls[0]["timeout"] == 90.0
+
+
 def _bad_enum() -> str:
     # Parseable JSON with the required keys, but verdict isn't a valid enum value.
     return json.dumps({"verdict": "maybe", "summary": "x", "findings": [], "next_steps": []})

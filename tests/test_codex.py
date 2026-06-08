@@ -79,6 +79,11 @@ async def test_run_structured_delivers_strict_form_of_given_schema(capture_codex
     assert capture_codex["timeout"] == 5.0  # timeout propagates to run_async
 
 
+async def test_codex_forwards_timeout_to_run_async(capture_codex, tmp_path):
+    await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log", None, 90.0)
+    assert capture_codex["timeout"] == 90.0
+
+
 async def test_codex_maps_thinking_to_reasoning_effort(capture_codex, tmp_path):
     await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log", "xhigh")
     assert 'model_reasoning_effort="xhigh"' in capture_codex["args"]

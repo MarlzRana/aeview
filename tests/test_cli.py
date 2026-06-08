@@ -238,6 +238,27 @@ def test_run_writes_output_file(aeview_home, git_repo, stub_claude, tmp_path, mo
     assert "verdict" in json.loads(out.read_text())
 
 
+def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_claude, monkeypatch):
+    # The `run` path threads settings.reviewTimeoutSeconds into fan_out (resume has its own test).
+    import json
+
+    from aeview import cli
+
+    monkeypatch.chdir(git_repo)
+    aeview_home.mkdir(parents=True, exist_ok=True)
+    (aeview_home / "settings.json").write_text(json.dumps({"reviewTimeoutSeconds": 555}))
+    captured: dict = {}
+
+    async def fake_fan_out(store, roster, prompts, cwd, timeout=None):
+        captured["timeout"] = timeout
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    CliRunner().invoke(app, ["run", "--scope", "working-tree"])
+    assert captured["timeout"] == 555
+
+
 def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
     # "persist nothing" includes --output: the preview exits before any report write.
     monkeypatch.chdir(git_repo)

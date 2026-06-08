@@ -667,3 +667,24 @@ def test_resume_missing_prompt_exits_error(aeview_home):
     res = runner.invoke(app, ["resume", "noprompt"])
     assert res.exit_code == 2
     assert "cannot resume" in res.output
+
+
+def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
+    # A crash mid-resume must not leave the old verdict readable: report.json is dropped before
+    # the pending reviews are re-run (so result / status --wait can't serve the stale report).
+    import aeview.cli as cli
+
+    store = _resume_run("stale", {"default__a": "done", "default__b": "failed"})
+    store.write_report(
+        Report(verdict="approve", summary="stale", coverage=Coverage(contributed=2, failed=0),
+               dedup=Dedup(status="skipped"), usage=UsageBreakdown())
+    )
+    seen: dict = {}
+
+    async def fake_fan_out(s, roster, prompts, cwd, timeout=None):
+        seen["report_existed"] = (s.dir / "report.json").exists()
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
+    runner.invoke(app, ["resume", "stale"])
+    assert seen["report_existed"] is False  # cleared before the re-run started

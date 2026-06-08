@@ -278,6 +278,30 @@ def test_claim_run_steals_a_stale_lock(aeview_home):
         assert (store.dir / ".lock").read_text() == str(os.getpid())
 
 
+def test_claim_run_steals_a_corrupt_lock(aeview_home):
+    # A corrupt/empty lock parses to holder 0; pid_alive(0) is False, so it's stolen rather than
+    # wedging resume forever (os.kill(0, 0) would otherwise read as the caller's live group).
+    store = RunStore.create("corrupt")
+    (store.dir / ".lock").write_text("not-a-pid")
+    with claim_run(store):
+        assert (store.dir / ".lock").read_text() == str(os.getpid())
+
+
+def test_pid_alive_non_positive_is_dead(aeview_home):
+    assert pid_alive(0) is False  # os.kill(0,0) signals the caller's group — must not read alive
+    assert pid_alive(-1) is False
+
+
+def test_pid_alive_permission_error_is_alive(aeview_home, monkeypatch):
+    import aeview.runstore as rs
+
+    def perm(_pid, _sig):
+        raise PermissionError  # pid exists but is owned by another uid
+
+    monkeypatch.setattr(rs.os, "kill", perm)
+    assert pid_alive(12345) is True
+
+
 def test_retention_rejects_nonpositive_bounds_at_the_config_boundary():
     # The validation IS the only guard between a settings.json typo and total history loss.
     with pytest.raises(ValidationError):

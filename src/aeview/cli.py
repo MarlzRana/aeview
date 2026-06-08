@@ -301,11 +301,9 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
 def _merge_settings(dedup: DedupPlan | None) -> Settings:
     """Settings carrying only the run's *pinned* dedup harness, so a re-merge (run or resume) uses
     the harness frozen in run.json — never whatever settings.json says now."""
-    instance = (
-        HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
-        if dedup is not None
-        else None
-    )
+    if dedup is None:
+        return Settings(deduplication_harness=None)
+    instance = HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
     return Settings(deduplication_harness=instance)
 
 
@@ -538,7 +536,9 @@ def _resume_locked(rid: str, store: RunStore, manifest: RunManifest, json_out: b
 
     # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
     try:
-        prompts = {entry.reviewer: store.read_prompt(entry.reviewer) for entry in pending}
+        prompts = {
+            r: store.read_prompt(r) for r in dict.fromkeys(e.reviewer for e in pending)
+        }
     except OSError as exc:
         typer.echo(f"aeview: cannot resume run '{rid}': {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc

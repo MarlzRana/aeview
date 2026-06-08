@@ -116,6 +116,13 @@ def prune_runs(retention: Retention) -> list[str]:
         too_old = ts is not None and ts < cutoff
         if child in protected or not too_old:  # keep within the keepLast floor OR within ttlDays
             continue
+        # A concurrent `resume` may have taken this (old, terminal) run live since the snapshot;
+        # re-read and skip if it's now running, so we never rmtree a run being actively resumed.
+        try:
+            if effective_overall(RunStore(child.name).read_manifest()) == _NON_TERMINAL:
+                continue
+        except (OSError, ValueError):
+            continue
         try:
             shutil.rmtree(child)
         except OSError:
@@ -126,8 +133,10 @@ def prune_runs(retention: Retention) -> list[str]:
 
 def pid_alive(pid: int | None) -> bool:
     """Whether a recorded run pid is still alive (os.kill(pid, 0)). No recorded pid (or a pid
-    that's gone) reads as not-alive — a crashed or pre-liveness run, safe to reconcile."""
-    if pid is None:
+    that's gone) reads as not-alive — a crashed or pre-liveness run, safe to reconcile. A
+    non-positive pid is never alive: os.kill(0, 0) would signal the *caller's* process group
+    (always succeeds), so a corrupt/empty lock holder (parsed as 0) must not read as live."""
+    if pid is None or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -164,7 +173,9 @@ def reconcile_interrupted() -> list[str]:
             fresh = store.read_manifest()
         except (OSError, ValueError):
             continue
-        if fresh.overall != _NON_TERMINAL:
+        # Skip if it finished (terminal) OR a concurrent resume took it over (fresh live pid) —
+        # don't overwrite a now-active writer's manifest with 'interrupted'.
+        if fresh.overall != _NON_TERMINAL or pid_alive(fresh.pid):
             continue
         fresh.run_id = child.name
         fresh.overall = "interrupted"
@@ -181,32 +192,42 @@ class RunBusy(Exception):
     """Another live process holds a run's lock (a concurrent resume, or the detached worker)."""
 
 
+def _lock_holder(lock: Path) -> int:
+    """The pid recorded in a lock file; 0 if unreadable/empty/non-numeric (a corrupt lock, which
+    pid_alive treats as dead so it gets stolen rather than wedging resume forever)."""
+    try:
+        return int(lock.read_text("utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
 @contextlib.contextmanager
 def claim_run(store: RunStore) -> Iterator[None]:
     """Hold an exclusive claim on a run dir so two processes can't fan out the same reviews and
-    clobber each other's review.json/report.json. Atomic O_EXCL create of a pid-stamped `.lock`;
-    a stale lock (holder pid dead) is stolen; a live holder raises RunBusy. Released on exit."""
+    clobber each other's review.json/report.json. The pid is written to a temp file first, then
+    `os.link`ed into place — atomic *and* exclusive, so the `.lock` is never observed empty (no
+    create-then-write window in which a racer could mis-read it as stale). A stale lock (holder
+    dead) is stolen; a live holder raises RunBusy. Released on exit."""
     lock = store.dir / ".lock"
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
+    tmp = store.dir / f".lock.{os.getpid()}.tmp"
+    tmp.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        while True:
             try:
-                holder = int((lock.read_text("utf-8") or "0").strip() or "0")
-            except (OSError, ValueError):
-                holder = 0
-            if pid_alive(holder):
-                raise RunBusy(
-                    f"run {store.run_id} is already being processed by pid {holder}"
-                ) from None
-            with contextlib.suppress(OSError):
-                lock.unlink()  # the holder crashed — steal the stale lock and retry
-            continue
-        try:
-            os.write(fd, str(os.getpid()).encode())
-        finally:
-            os.close(fd)
-        break
+                os.link(tmp, lock)  # atomic: lock springs into existence already holding our pid
+            except FileExistsError:
+                holder = _lock_holder(lock)
+                if pid_alive(holder):
+                    raise RunBusy(
+                        f"run {store.run_id} is already being processed by pid {holder}"
+                    ) from None
+                with contextlib.suppress(OSError):
+                    lock.unlink()  # the holder is dead — steal the stale lock and retry
+                continue
+            break
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
     try:
         yield
     finally:
