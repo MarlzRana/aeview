@@ -9,6 +9,7 @@ mid-write can never leave a half-written JSON that a reader would trust.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -158,8 +159,9 @@ def reconcile_interrupted() -> list[str]:
         # Re-read right before clobbering: the worker writes its terminal manifest *then* exits,
         # so a now-dead pid means a 'done'/'failed' may already be on disk that our cached read
         # (taken while it was still 'running') missed. Don't overwrite a finished run.
+        store = RunStore(child.name)
         try:
-            fresh = RunStore(child.name).read_manifest()
+            fresh = store.read_manifest()
         except (OSError, ValueError):
             continue
         if fresh.overall != _NON_TERMINAL:
@@ -168,11 +170,48 @@ def reconcile_interrupted() -> list[str]:
         fresh.overall = "interrupted"
         fresh.finished_at = now_iso()
         try:
-            atomic_write_text(child / "run.json", fresh.model_dump_json(indent=2))
+            store.write_manifest(fresh)
         except OSError:
             continue
         reconciled.append(child.name)
     return reconciled
+
+
+class RunBusy(Exception):
+    """Another live process holds a run's lock (a concurrent resume, or the detached worker)."""
+
+
+@contextlib.contextmanager
+def claim_run(store: RunStore) -> Iterator[None]:
+    """Hold an exclusive claim on a run dir so two processes can't fan out the same reviews and
+    clobber each other's review.json/report.json. Atomic O_EXCL create of a pid-stamped `.lock`;
+    a stale lock (holder pid dead) is stolen; a live holder raises RunBusy. Released on exit."""
+    lock = store.dir / ".lock"
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                holder = int((lock.read_text("utf-8") or "0").strip() or "0")
+            except (OSError, ValueError):
+                holder = 0
+            if pid_alive(holder):
+                raise RunBusy(
+                    f"run {store.run_id} is already being processed by pid {holder}"
+                ) from None
+            with contextlib.suppress(OSError):
+                lock.unlink()  # the holder crashed — steal the stale lock and retry
+            continue
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
+        break
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock.unlink()
 
 
 def pool_to_json(pool: list[PooledFinding]) -> str:
@@ -316,3 +355,8 @@ class RunStore:
 
     def read_report(self) -> Report:
         return Report.model_validate_json((self.dir / "report.json").read_text("utf-8"))
+
+    def clear_report(self) -> None:
+        # resume drops the stale report before re-running, so a crash mid-resume can't leave a
+        # readable-but-outdated verdict for result / status --wait.
+        (self.dir / "report.json").unlink(missing_ok=True)

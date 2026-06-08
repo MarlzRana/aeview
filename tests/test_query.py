@@ -12,7 +12,10 @@ from aeview.runstore import RunStore
 from aeview.schema import (
     Coverage,
     Dedup,
+    DedupPlan,
+    Finding,
     Invocation,
+    Location,
     Report,
     ReviewOutput,
     ReviewResult,
@@ -190,6 +193,10 @@ def _custom_roster(*ids: str) -> list[RosterEntry]:
     return [
         RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids
     ]
+
+
+def _review(rid: str, status: str) -> ReviewResult:
+    return ReviewResult(id=rid, reviewer="default", harness="claude-code", model="m", status=status)
 
 
 def test_status_mixed_review_states_counts_and_order(aeview_home):
@@ -533,3 +540,130 @@ def test_resume_already_complete_is_a_noop(aeview_home):
     res = runner.invoke(app, ["resume", "done1"])
     assert res.exit_code == 0
     assert "already complete" in res.output
+
+
+# --- resume: cwd / frozen prompt / pinned dedup / timeout / lock (I6b-1 dogfood r2) ---
+
+
+class _RecordingAdapter:
+    """Records the cwd + prompt each review is run with (and approves)."""
+
+    def __init__(self):
+        self.seen: list[dict] = []
+
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+        self.seen.append({"prompt": prompt, "cwd": str(cwd)})
+        return HarnessOutput(
+            review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
+            usage=Usage(), raw="{}",
+        )
+
+
+def test_resume_uses_manifest_cwd_and_frozen_prompt(aeview_home, tmp_path, monkeypatch):
+    adapter = _RecordingAdapter()
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    repo = tmp_path / "original-repo"
+    repo.mkdir()
+    store = RunStore.create("rc")
+    store.write_prompt("default", "FROZEN PROMPT BODY")
+    store.write_manifest(
+        RunManifest(
+            run_id="rc", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster("default__a"), dedup=None, cwd=str(repo), pid=_DEAD_PID,
+        )
+    )
+    store.write_review(_review("default__a", "running"))
+    res = runner.invoke(app, ["resume", "rc"])
+    assert res.exit_code == 0
+    assert adapter.seen[0]["cwd"] == str(repo)  # the recorded repo, not the caller's cwd
+    assert adapter.seen[0]["prompt"] == "FROZEN PROMPT BODY"  # the persisted prompt, re-used
+
+
+class _DedupStubAdapter:
+    """Each review returns one finding; the dedup call returns no groups."""
+
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+        finding = Finding(
+            title="t", body="b", severity="low", category="bug", confidence=0.5,
+            location=Location(file="f.py", line_start=1, line_end=1), recommendation="r",
+        )
+        return HarnessOutput(
+            review=ReviewOutput(verdict="needs-attention", summary="s", findings=[finding],
+                                next_steps=[]),
+            usage=Usage(), raw="{}",
+        )
+
+    async def run_structured(self, prompt, schema, model, cwd, log_path, thinking=None,
+                             timeout=None, validate=None):
+        from aeview.harness.base import StructuredOutput
+
+        return StructuredOutput(payload={"duplicate_groups": []}, usage=Usage(), raw="{}")
+
+
+def test_resume_remerges_via_pinned_dedup_harness(aeview_home, monkeypatch):
+    import aeview.dedup as dedup_mod
+
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: _DedupStubAdapter())
+    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: _DedupStubAdapter())
+    store = RunStore.create("pin")
+    store.write_prompt("default", "P")
+    roster = [
+        RosterEntry(id="default__a", reviewer="default", harness="claude-code", model="a"),
+        RosterEntry(id="default__b", reviewer="default", harness="claude-code", model="b"),
+    ]
+    store.write_manifest(
+        RunManifest(
+            run_id="pin", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=roster,
+            dedup=DedupPlan(id="codex-gpt-5.5", harness="codex", model="gpt-5.5", thinking=None),
+            pid=_DEAD_PID,
+        )
+    )
+    runner.invoke(app, ["resume", "pin"])
+    report = store.read_report()
+    # Dedup fired (2 reviews, 2 findings) using the run.json-PINNED harness, not settings.json's.
+    assert report.dedup.status == "ok"
+    assert report.dedup.harness == "codex-gpt-5.5"
+
+
+def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
+    import aeview.cli as cli
+
+    aeview_home.mkdir(parents=True, exist_ok=True)
+    (aeview_home / "settings.json").write_text(json.dumps({"reviewTimeoutSeconds": 777}))
+    captured: dict = {}
+
+    async def fake_fan_out(store, roster, prompts, cwd, timeout=None):
+        captured["timeout"] = timeout
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
+    store = RunStore.create("t")
+    store.write_prompt("default", "P")
+    store.write_manifest(
+        RunManifest(
+            run_id="t", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+        )
+    )
+    store.write_review(_review("default__a", "running"))
+    runner.invoke(app, ["resume", "t"])
+    assert captured["timeout"] == 777  # the configured per-review timeout reaches the fan-out
+
+
+def test_resume_missing_prompt_exits_error(aeview_home):
+    store = RunStore.create("noprompt")
+    store.write_manifest(
+        RunManifest(
+            run_id="noprompt", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+        )
+    )
+    store.write_review(_review("default__a", "failed"))  # pending, but no prompt.md was written
+    res = runner.invoke(app, ["resume", "noprompt"])
+    assert res.exit_code == 2
+    assert "cannot resume" in res.output

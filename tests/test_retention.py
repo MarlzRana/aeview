@@ -7,7 +7,9 @@ from pydantic import ValidationError
 
 from aeview.config import Retention, Settings
 from aeview.runstore import (
+    RunBusy,
     RunStore,
+    claim_run,
     effective_overall,
     latest_run_id,
     list_manifests,
@@ -234,6 +236,46 @@ def test_reconcile_interrupted_persists_only_crashed_running(aeview_home):
     assert states["crashed"] == "interrupted"  # persisted
     assert states["alive"] == "running"  # a live run is left alone
     assert states["finished"] == "done"  # terminal unaffected
+
+
+def test_reconcile_skips_run_that_finished_after_the_cached_read(aeview_home, monkeypatch):
+    import aeview.runstore as rs
+
+    # On disk the run already finished ('done'); simulate a stale cached read from _iter_run_dirs
+    # (still 'running', dead pid). The re-read guard must see 'done' and NOT clobber it.
+    store = RunStore.create("finished")
+    store.write_manifest(
+        RunManifest(
+            run_id="finished", created_at=now_iso(), overall="done",
+            invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+            roster=[], pid=_DEAD_PID,
+        )
+    )
+    stale = RunManifest(
+        run_id="finished", created_at=now_iso(), overall="running",
+        invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+        roster=[], pid=_DEAD_PID,
+    )
+    monkeypatch.setattr(rs, "_iter_run_dirs", lambda: iter([(store.dir, stale)]))
+    assert reconcile_interrupted() == []  # re-read saw 'done' -> not reconciled
+    assert store.read_manifest().overall == "done"  # preserved
+
+
+def test_claim_run_refuses_a_live_holder_and_releases(aeview_home):
+    store = RunStore.create("locked")
+    with claim_run(store):  # noqa: SIM117 - the outer claim must be held while the inner is tried
+        # our own (live) pid holds it -> a second claim is refused
+        with pytest.raises(RunBusy), claim_run(store):
+            pass
+    with claim_run(store):  # released on exit -> claimable again
+        pass
+
+
+def test_claim_run_steals_a_stale_lock(aeview_home):
+    store = RunStore.create("stale")
+    (store.dir / ".lock").write_text(str(_DEAD_PID))  # holder pid is dead
+    with claim_run(store):  # stale lock stolen, no RunBusy
+        assert (store.dir / ".lock").read_text() == str(os.getpid())
 
 
 def test_retention_rejects_nonpositive_bounds_at_the_config_boundary():

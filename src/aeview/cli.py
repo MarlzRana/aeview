@@ -39,8 +39,10 @@ from .resolve import (
     resolve_reviewer,
 )
 from .runstore import (
+    RunBusy,
     RunStore,
     atomic_write_text,
+    claim_run,
     effective_overall,
     latest_run_id,
     list_manifests,
@@ -504,6 +506,15 @@ def resume(
     """Re-run a run's non-`done` reviews against its frozen bundle, then re-merge."""
     rid, manifest = _load_manifest_or_exit(run_id)
     store = RunStore(rid)
+    try:
+        with claim_run(store):  # exclusive: a second `resume` of the same run is refused
+            _resume_locked(rid, store, manifest, json_out)
+    except RunBusy as exc:
+        typer.echo(f"aeview: {exc}", err=True)
+        raise typer.Exit(EXIT_ERROR) from exc
+
+
+def _resume_locked(rid: str, store: RunStore, manifest: RunManifest, json_out: bool) -> None:
     # Refuse to double-run a live run (a detached run still going): only a finished or crashed
     # run is safe to take over. effective_overall is "running" only when the pid is alive.
     if effective_overall(manifest) == "running":
@@ -525,6 +536,7 @@ def resume(
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
             _emit_report(report, json_out)
 
+    # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
     try:
         prompts = {entry.reviewer: store.read_prompt(entry.reviewer) for entry in pending}
     except OSError as exc:
@@ -532,9 +544,11 @@ def resume(
         raise typer.Exit(EXIT_ERROR) from exc
 
     # Take ownership: mark running under this process so liveness tracks it; clear the old finish.
-    # Re-run from the original repo (manifest.cwd), not the caller's cwd, so a self-collect
-    # harness inspects the right tree.
+    # Drop the stale report so a crash mid-resume can't leave `result`/`status --wait` returning
+    # the old run's verdict — a fresh report is written when the re-merge completes. Re-run from
+    # the original repo (manifest.cwd) so a self-collect harness inspects the right tree.
     cwd = Path(manifest.cwd) if manifest.cwd else Path.cwd()
+    store.clear_report()
     manifest.overall = "running"
     manifest.finished_at = None
     manifest.pid = os.getpid()

@@ -71,9 +71,10 @@ class Settings(BaseModel):
     fallback_reviewer_harnesses: list[HarnessInstance] = Field(default_factory=list)
     deduplication_harness: HarnessInstance | None = None
     retention: Retention = Field(default_factory=Retention)
-    # Per-review wall-clock bound. On expiry the harness child is killed and that review is
-    # marked failed (fail-fast, no retry); `resume` can re-run it. Generous by default — model
-    # reviews of a large diff are slow.
+    # Bounds each harness invocation. On expiry the harness child is killed and the review is
+    # marked failed (fail-fast — a timeout is not retried; `resume` can re-run it). A review that
+    # keeps hitting transient errors can still span a few invocations, each bounded by this.
+    # Generous by default — model reviews of a large diff are slow.
     review_timeout_seconds: int = Field(default=1200, ge=1)
 
 

@@ -32,6 +32,7 @@ def capture_run_async(monkeypatch):
         captured["args"] = args
         captured["cwd"] = cwd
         captured["input_text"] = input_text
+        captured["timeout"] = timeout
         return ProcResult(0, _VALID_CLAUDE_JSON, "")
 
     monkeypatch.setattr(claude_code, "run_async", fake)
@@ -72,6 +73,13 @@ async def test_run_structured_delivers_the_given_schema(capture_run_async, tmp_p
     delivered = json.loads(_flag_value(capture_run_async["args"], "--json-schema"))
     assert "duplicate_groups" in delivered["properties"]
     assert "verdict" not in delivered.get("properties", {})  # not the review schema
+
+
+async def test_adapter_forwards_timeout_to_run_async(capture_run_async, tmp_path):
+    # The per-review timeout must reach run_async (where the child is killed on expiry) — the
+    # fan_out->adapter hop is tested elsewhere, this pins adapter.run->run_structured->run_async.
+    await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log", None, 90.0)
+    assert capture_run_async["timeout"] == 90.0
 
 
 async def test_adapter_maps_thinking_to_effort(capture_run_async, tmp_path):

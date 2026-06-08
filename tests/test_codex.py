@@ -121,6 +121,14 @@ def test_interpret_nonzero_fails_even_with_a_final_message():
         codex.CodexAdapter()._interpret(_VALID_FINAL, "", "boom", 1)
 
 
+def test_interpret_timeout_is_non_transient():
+    # A per-review timeout (exit 124) is fail-fast even though "timed out" reads transient to the
+    # text classifier — pins codex's switch to classify_transient (not looks_transient).
+    with pytest.raises(AdapterError) as ei:
+        codex.CodexAdapter()._interpret("", "", "codex: timed out after 1s", 124)
+    assert ei.value.transient is False
+
+
 def test_interpret_error_detail_comes_from_jsonl():
     jsonl = json.dumps({"type": "turn.failed", "error": {"message": "rate limit hit"}})
     with pytest.raises(AdapterError) as ei:

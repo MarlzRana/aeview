@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from pathlib import Path
 
 from .harness import AdapterError, HarnessOutput, get_adapter
 from .runstore import RunStore, now_iso
@@ -28,7 +29,7 @@ def _backoff_delay(attempt: int) -> float:
 
 
 async def _run_review(
-    store: RunStore, entry: RosterEntry, prompt: str, cwd, timeout: float | None
+    store: RunStore, entry: RosterEntry, prompt: str, cwd: Path, timeout: float | None
 ) -> ReviewResult:
     result = ReviewResult(
         id=entry.id,
@@ -50,7 +51,7 @@ async def _run_review(
 
 
 async def _attempt_review(
-    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd,
+    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd: Path,
     timeout: float | None,
 ) -> ReviewResult:
     adapter = get_adapter(entry.harness)
@@ -95,7 +96,7 @@ async def fan_out(
     store: RunStore,
     roster: list[RosterEntry],
     prompt_by_reviewer: dict[str, str],
-    cwd,
+    cwd: Path,
     timeout: float | None = None,
 ) -> list[ReviewResult]:
     tasks = [
