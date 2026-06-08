@@ -39,10 +39,8 @@ from .resolve import (
     resolve_reviewer,
 )
 from .runstore import (
-    RunBusy,
     RunStore,
     atomic_write_text,
-    claim_run,
     effective_overall,
     latest_run_id,
     list_manifests,
@@ -281,7 +279,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         invocation=Invocation(reviewers=plan.names, scope=plan.bundle.scope),
         roster=plan.roster,
         dedup=_dedup_plan(plan.roster, settings),
-        cwd=str(cwd),  # resume re-runs from here, not the caller's cwd
+        cwd=cwd,  # resume re-runs from here, not the caller's cwd
         pid=os.getpid(),  # pgid is recorded in I6b-2, where cancel's killpg needs it
     )
     store.write_manifest(manifest)
@@ -392,12 +390,6 @@ def _load_manifest_or_exit(run_id: str | None) -> tuple[str, RunManifest]:
 _WAIT_POLL_S = 1.0
 
 
-def _is_terminal(manifest: RunManifest) -> bool:
-    # effective_overall folds in liveness, so a crashed 'running' run (dead pid) reads terminal
-    # and --wait stops instead of polling a dead run forever.
-    return effective_overall(manifest) != "running"
-
-
 def _terminal_exit_code(rid: str) -> int:
     # A finished run carries its verdict in report.json; a run that ended without one
     # (interrupted/failed before merge) is an error.
@@ -460,9 +452,16 @@ def status(
     if not wait:
         _render_status(rid, manifest, json_out)
         return
-    while not _is_terminal(manifest):
+    # Poll to a terminal state. effective_overall folds in liveness, so a crashed 'running' run
+    # (dead pid) reads terminal and we stop instead of polling forever.
+    while effective_overall(manifest) == "running":
         time.sleep(_WAIT_POLL_S)
-        manifest = RunStore(rid).read_manifest()
+        try:
+            manifest = RunStore(rid).read_manifest()
+        except (OSError, ValueError) as exc:
+            # The run dir vanished mid-wait (a concurrent prune, or the user deleted it).
+            typer.echo(f"aeview: run '{rid}' is gone", err=True)
+            raise typer.Exit(EXIT_ERROR) from exc
     _render_status(rid, manifest, json_out)
     raise typer.Exit(_terminal_exit_code(rid))
 
@@ -504,17 +503,9 @@ def resume(
     """Re-run a run's non-`done` reviews against its frozen bundle, then re-merge."""
     rid, manifest = _load_manifest_or_exit(run_id)
     store = RunStore(rid)
-    try:
-        with claim_run(store):  # exclusive: a second `resume` of the same run is refused
-            _resume_locked(rid, store, manifest, json_out)
-    except RunBusy as exc:
-        typer.echo(f"aeview: {exc}", err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
-
-
-def _resume_locked(rid: str, store: RunStore, manifest: RunManifest, json_out: bool) -> None:
     # Refuse to double-run a live run (a detached run still going): only a finished or crashed
-    # run is safe to take over. effective_overall is "running" only when the pid is alive.
+    # run is safe to take over. effective_overall is "running" only when the pid is alive. (Two
+    # *simultaneous* resumes of the same crashed run is a narrow gap deferred to I6b-2's locking.)
     if effective_overall(manifest) == "running":
         typer.echo(
             f"aeview: run '{rid}' is still running; cancel it or wait before resuming", err=True
@@ -547,7 +538,7 @@ def _resume_locked(rid: str, store: RunStore, manifest: RunManifest, json_out: b
     # Drop the stale report so a crash mid-resume can't leave `result`/`status --wait` returning
     # the old run's verdict — a fresh report is written when the re-merge completes. Re-run from
     # the original repo (manifest.cwd) so a self-collect harness inspects the right tree.
-    cwd = Path(manifest.cwd) if manifest.cwd else Path.cwd()
+    cwd = manifest.cwd or Path.cwd()
     store.clear_report()
     manifest.overall = "running"
     manifest.finished_at = None

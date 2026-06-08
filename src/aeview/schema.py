@@ -13,6 +13,7 @@ only camelCase surface; see `config.py`).
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -238,8 +239,9 @@ class RunManifest(BaseModel):
     roster: list[RosterEntry]
     dedup: DedupPlan | None = None
     # The dir the run was launched from (its git repo). resume/the detached worker re-run from
-    # here, not the caller's cwd, so a self-collect harness inspects the right repo.
-    cwd: str | None = None
+    # here, not the caller's cwd, so a self-collect harness inspects the right repo. (Pydantic
+    # serializes Path to the same JSON string, so run.json is unchanged.)
+    cwd: Path | None = None
     pid: int | None = None
     pgid: int | None = None
 

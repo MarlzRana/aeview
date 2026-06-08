@@ -7,9 +7,7 @@ from pydantic import ValidationError
 
 from aeview.config import Retention, Settings
 from aeview.runstore import (
-    RunBusy,
     RunStore,
-    claim_run,
     effective_overall,
     latest_run_id,
     list_manifests,
@@ -261,30 +259,42 @@ def test_reconcile_skips_run_that_finished_after_the_cached_read(aeview_home, mo
     assert store.read_manifest().overall == "done"  # preserved
 
 
-def test_claim_run_refuses_a_live_holder_and_releases(aeview_home):
-    store = RunStore.create("locked")
-    with claim_run(store):  # noqa: SIM117 - the outer claim must be held while the inner is tried
-        # our own (live) pid holds it -> a second claim is refused
-        with pytest.raises(RunBusy), claim_run(store):
-            pass
-    with claim_run(store):  # released on exit -> claimable again
-        pass
+def _manifest(run_id: str, *, overall: str, pid: int | None) -> RunManifest:
+    return RunManifest(
+        run_id=run_id, created_at=now_iso(), overall=overall,
+        invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+        roster=[], pid=pid,
+    )
 
 
-def test_claim_run_steals_a_stale_lock(aeview_home):
-    store = RunStore.create("stale")
-    (store.dir / ".lock").write_text(str(_DEAD_PID))  # holder pid is dead
-    with claim_run(store):  # stale lock stolen, no RunBusy
-        assert (store.dir / ".lock").read_text() == str(os.getpid())
+def test_reconcile_skips_a_run_a_resume_took_live(aeview_home, monkeypatch):
+    import aeview.runstore as rs
+
+    # On disk a concurrent resume took the run live (running + our live pid); the cached snapshot
+    # still shows the old crashed state (running + dead pid). The pid sub-guard must skip it.
+    store = RunStore.create("taken")
+    store.write_manifest(_manifest("taken", overall="running", pid=os.getpid()))
+    stale = _manifest("taken", overall="running", pid=_DEAD_PID)
+    monkeypatch.setattr(rs, "_iter_run_dirs", lambda: iter([(store.dir, stale)]))
+    assert reconcile_interrupted() == []  # fresh pid is live -> not clobbered to 'interrupted'
+    assert store.read_manifest().overall == "running"
 
 
-def test_claim_run_steals_a_corrupt_lock(aeview_home):
-    # A corrupt/empty lock parses to holder 0; pid_alive(0) is False, so it's stolen rather than
-    # wedging resume forever (os.kill(0, 0) would otherwise read as the caller's live group).
-    store = RunStore.create("corrupt")
-    (store.dir / ".lock").write_text("not-a-pid")
-    with claim_run(store):
-        assert (store.dir / ".lock").read_text() == str(os.getpid())
+def test_prune_skips_a_candidate_a_resume_took_live(aeview_home, monkeypatch):
+    import aeview.runstore as rs
+
+    # The snapshot makes it a terminal+old prune candidate, but on disk a resume took it live;
+    # prune's re-read must skip the rmtree so it never deletes a run being actively resumed.
+    store = RunStore.create("resumed")
+    store.write_manifest(_manifest("resumed", overall="running", pid=os.getpid()))  # live on disk
+    stale = RunManifest(
+        run_id="resumed", created_at="2000-01-01T00:00:00Z", overall="done",
+        invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+        roster=[], pid=_DEAD_PID,
+    )
+    monkeypatch.setattr(rs, "_iter_run_dirs", lambda: iter([(store.dir, stale)]))
+    assert prune_runs(Retention(keep_last=0, ttl_days=14)) == []
+    assert store.dir.exists()  # not rmtree'd
 
 
 def test_pid_alive_non_positive_is_dead(aeview_home):

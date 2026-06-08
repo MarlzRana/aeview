@@ -9,7 +9,6 @@ mid-write can never leave a half-written JSON that a reader would trust.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
@@ -186,53 +185,6 @@ def reconcile_interrupted() -> list[str]:
             continue
         reconciled.append(child.name)
     return reconciled
-
-
-class RunBusy(Exception):
-    """Another live process holds a run's lock (a concurrent resume, or the detached worker)."""
-
-
-def _lock_holder(lock: Path) -> int:
-    """The pid recorded in a lock file; 0 if unreadable/empty/non-numeric (a corrupt lock, which
-    pid_alive treats as dead so it gets stolen rather than wedging resume forever)."""
-    try:
-        return int(lock.read_text("utf-8").strip() or "0")
-    except (OSError, ValueError):
-        return 0
-
-
-@contextlib.contextmanager
-def claim_run(store: RunStore) -> Iterator[None]:
-    """Hold an exclusive claim on a run dir so two processes can't fan out the same reviews and
-    clobber each other's review.json/report.json. The pid is written to a temp file first, then
-    `os.link`ed into place — atomic *and* exclusive, so the `.lock` is never observed empty (no
-    create-then-write window in which a racer could mis-read it as stale). A stale lock (holder
-    dead) is stolen; a live holder raises RunBusy. Released on exit."""
-    lock = store.dir / ".lock"
-    tmp = store.dir / f".lock.{os.getpid()}.tmp"
-    tmp.write_text(str(os.getpid()), encoding="utf-8")
-    try:
-        while True:
-            try:
-                os.link(tmp, lock)  # atomic: lock springs into existence already holding our pid
-            except FileExistsError:
-                holder = _lock_holder(lock)
-                if pid_alive(holder):
-                    raise RunBusy(
-                        f"run {store.run_id} is already being processed by pid {holder}"
-                    ) from None
-                with contextlib.suppress(OSError):
-                    lock.unlink()  # the holder is dead — steal the stale lock and retry
-                continue
-            break
-    finally:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-    try:
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            lock.unlink()
 
 
 def pool_to_json(pool: list[PooledFinding]) -> str:

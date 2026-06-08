@@ -334,9 +334,17 @@ def test_list_newest_first_with_verdict_and_coverage(aeview_home):
 
 
 def test_list_running_run_shows_state_not_verdict(aeview_home):
-    _write_run("r", overall="running", with_report=False)
+    _write_run("r", overall="running", with_report=False)  # live pid (default)
     res = runner.invoke(app, ["list"])
     assert "running" in res.output
+
+
+def test_list_crashed_run_shows_interrupted(aeview_home):
+    # A 'running' run whose recorded pid is dead is a crash -> liveness shows it as interrupted
+    # in `list`, not stuck 'running' forever.
+    _write_run("r", overall="running", with_report=False, pid=_DEAD_PID)
+    res = runner.invoke(app, ["list"])
+    assert "interrupted" in res.output
 
 
 def test_list_all_failed_run_shows_error_not_stored_verdict(aeview_home):
