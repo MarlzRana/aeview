@@ -211,18 +211,19 @@ def test_pid_alive(aeview_home):
     assert pid_alive(_DEAD_PID) is False
 
 
-def test_effective_overall_folds_in_liveness(aeview_home):
-    def m(overall: str, pid: int | None) -> RunManifest:
-        return RunManifest(
-            run_id="x", created_at=now_iso(), overall=overall,
-            invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
-            roster=[], pid=pid,
-        )
+def _manifest(run_id: str, *, overall: str, pid: int | None) -> RunManifest:
+    return RunManifest(
+        run_id=run_id, created_at=now_iso(), overall=overall,
+        invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
+        roster=[], pid=pid,
+    )
 
-    assert effective_overall(m("running", os.getpid())) == "running"  # live
-    assert effective_overall(m("running", _DEAD_PID)) == "interrupted"  # crashed
-    assert effective_overall(m("running", None)) == "interrupted"  # no pid -> crashed
-    assert effective_overall(m("done", _DEAD_PID)) == "done"  # terminal unaffected
+
+def test_effective_overall_folds_in_liveness(aeview_home):
+    assert effective_overall(_manifest("x", overall="running", pid=os.getpid())) == "running"
+    assert effective_overall(_manifest("x", overall="running", pid=_DEAD_PID)) == "interrupted"
+    assert effective_overall(_manifest("x", overall="running", pid=None)) == "interrupted"
+    assert effective_overall(_manifest("x", overall="done", pid=_DEAD_PID)) == "done"
 
 
 def test_reconcile_interrupted_persists_only_crashed_running(aeview_home):
@@ -257,14 +258,6 @@ def test_reconcile_skips_run_that_finished_after_the_cached_read(aeview_home, mo
     monkeypatch.setattr(rs, "_iter_run_dirs", lambda: iter([(store.dir, stale)]))
     assert reconcile_interrupted() == []  # re-read saw 'done' -> not reconciled
     assert store.read_manifest().overall == "done"  # preserved
-
-
-def _manifest(run_id: str, *, overall: str, pid: int | None) -> RunManifest:
-    return RunManifest(
-        run_id=run_id, created_at=now_iso(), overall=overall,
-        invocation=Invocation(reviewers=["d"], scope=ScopeSpec(type="working-tree")),
-        roster=[], pid=pid,
-    )
 
 
 def test_reconcile_skips_a_run_a_resume_took_live(aeview_home, monkeypatch):

@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from aeview import fanout
 from aeview.cli import app
-from aeview.harness.base import HarnessOutput
+from aeview.harness.base import AdapterError, HarnessOutput
 from aeview.runstore import RunStore
 from aeview.schema import (
     Coverage,
@@ -472,6 +472,8 @@ def test_resume_reruns_only_non_done_and_remerges(aeview_home, monkeypatch):
     store = _resume_run("rerun", {"default__a": "done", "default__b": "failed"})
     res = runner.invoke(app, ["resume", "rerun"])
     assert res.exit_code == 0  # both approve now -> merged approve
+    manifest = store.read_manifest()
+    assert manifest.overall == "done" and manifest.finished_at is not None  # terminal manifest
     reviews = {r.id: r for r in store.read_reviews()}
     assert reviews["default__a"].status == "done" and reviews["default__b"].status == "done"
     # The already-done review must NOT be re-run (re-billing it): its original "s" summary
@@ -696,3 +698,50 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     runner.invoke(app, ["resume", "stale"])
     assert seen["report_existed"] is False  # cleared before the re-run started
+
+
+class _FailAdapter:
+    """A stub harness that always fails non-transiently — drives resume's all-failed path."""
+
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+        raise AdapterError("boom", transient=False)
+
+
+def test_resume_all_failed_exits_error(aeview_home, monkeypatch):
+    # Every re-run review fails -> contributed 0 -> overall 'failed' -> exit 2 (the failed branch
+    # of the shared completion path, which the happy-path resume tests never reach).
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: _FailAdapter())
+    store = RunStore.create("allfail")
+    store.write_prompt("default", "P")
+    store.write_manifest(
+        RunManifest(
+            run_id="allfail", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+        )
+    )
+    store.write_review(_review("default__a", "running"))
+    res = runner.invoke(app, ["resume", "allfail"])
+    assert res.exit_code == 2
+    assert store.read_manifest().overall == "failed"
+
+
+def test_status_wait_run_pruned_mid_wait_exits_error(aeview_home, monkeypatch):
+    # The run dir vanishes between polls (a concurrent prune / manual delete): --wait must exit
+    # cleanly with an error, not crash with a traceback.
+    import shutil
+
+    import aeview.cli as cli
+
+    store = RunStore.create("vanish")
+    store.write_manifest(
+        RunManifest(
+            run_id="vanish", created_at="2026-06-07T10:00:00Z", overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID), pid=os.getpid(),  # live -> enters the poll loop
+        )
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: shutil.rmtree(store.dir))
+    res = runner.invoke(app, ["status", "vanish", "--wait"])
+    assert res.exit_code == 2
+    assert "gone" in res.output

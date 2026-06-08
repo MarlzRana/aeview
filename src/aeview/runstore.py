@@ -146,13 +146,16 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def _is_crashed(manifest: RunManifest) -> bool:
+    """A run that's still marked 'running' but whose recorded pid is dead — i.e. interrupted."""
+    return manifest.overall == _NON_TERMINAL and not pid_alive(manifest.pid)
+
+
 def effective_overall(manifest: RunManifest) -> RunState:
-    """The run's state accounting for liveness: a 'running' manifest whose recorded pid is dead is
-    a crashed run, reported as 'interrupted'. Read-only — display callers (status/list/--wait) use
-    this; prune/resume make it durable via reconcile_interrupted or their own terminal write."""
-    if manifest.overall == _NON_TERMINAL and not pid_alive(manifest.pid):
-        return "interrupted"
-    return manifest.overall
+    """The run's state accounting for liveness: a crashed 'running' run is reported as
+    'interrupted'. Read-only — display callers (status/list/--wait) use this; prune/resume make it
+    durable via reconcile_interrupted or their own terminal write."""
+    return "interrupted" if _is_crashed(manifest) else manifest.overall
 
 
 def reconcile_interrupted() -> list[str]:
@@ -162,19 +165,18 @@ def reconcile_interrupted() -> list[str]:
     `run` (before prune) so a Ctrl-C'd/killed run doesn't linger 'running' or leak forever."""
     reconciled: list[str] = []
     for child, manifest in _iter_run_dirs():
-        if manifest.overall != _NON_TERMINAL or pid_alive(manifest.pid):
+        if not _is_crashed(manifest):
             continue
         # Re-read right before clobbering: the worker writes its terminal manifest *then* exits,
         # so a now-dead pid means a 'done'/'failed' may already be on disk that our cached read
-        # (taken while it was still 'running') missed. Don't overwrite a finished run.
+        # (taken while it was still 'running') missed; and a concurrent resume may have taken it
+        # over (fresh live pid). Either way, don't overwrite a finished/active run.
         store = RunStore(child.name)
         try:
             fresh = store.read_manifest()
         except (OSError, ValueError):
             continue
-        # Skip if it finished (terminal) OR a concurrent resume took it over (fresh live pid) —
-        # don't overwrite a now-active writer's manifest with 'interrupted'.
-        if fresh.overall != _NON_TERMINAL or pid_alive(fresh.pid):
+        if not _is_crashed(fresh):
             continue
         fresh.run_id = child.name
         fresh.overall = "interrupted"
