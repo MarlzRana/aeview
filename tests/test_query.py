@@ -457,9 +457,58 @@ def test_resume_reruns_only_non_done_and_remerges(aeview_home, monkeypatch):
     store = _resume_run("rerun", {"default__a": "done", "default__b": "failed"})
     res = runner.invoke(app, ["resume", "rerun"])
     assert res.exit_code == 0  # both approve now -> merged approve
-    statuses = {r.id: r.status for r in store.read_reviews()}
-    assert statuses == {"default__a": "done", "default__b": "done"}  # b was re-run
+    reviews = {r.id: r for r in store.read_reviews()}
+    assert reviews["default__a"].status == "done" and reviews["default__b"].status == "done"
+    # The already-done review must NOT be re-run (re-billing it): its original "s" summary
+    # survives, while the re-run b carries the stub's "ok". A regression that re-ran the whole
+    # roster would overwrite a's summary with "ok".
+    assert reviews["default__a"].summary == "s"
+    assert reviews["default__b"].summary == "ok"
     assert store.read_report().coverage.contributed == 2
+
+
+def test_resume_merge_only_when_crashed_before_merge(aeview_home, monkeypatch):
+    # All reviews done but no report (crashed after the reviews, before merge): resume merges
+    # the on-disk reviews without re-running anything.
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: _ApproveAdapter())  # must NOT be called
+    store = _resume_run("premerge", {"default__a": "done", "default__b": "done"})
+    assert not (store.dir / "report.json").exists()
+    res = runner.invoke(app, ["resume", "premerge"])
+    assert res.exit_code == 0
+    assert store.read_report().coverage.contributed == 2  # merged from disk
+    assert {r.summary for r in store.read_reviews()} == {"s"}  # neither was re-run
+
+
+def test_status_wait_polls_until_terminal(aeview_home, monkeypatch):
+    import aeview.cli as cli
+
+    # Start live (running + our pid) so --wait enters the loop; the first poll's sleep flips the
+    # manifest to done on disk, so the loop re-reads, sees terminal, and exits with the verdict.
+    store = RunStore.create("r")
+    store.write_manifest(
+        RunManifest(
+            run_id="r", created_at="2026-06-07T10:00:00Z", overall="running",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
+            roster=_custom_roster(_REVIEW_ID), pid=os.getpid(),
+        )
+    )
+    store.write_review(
+        ReviewResult(id=_REVIEW_ID, reviewer="default", harness="claude-code", model="opus",
+                     status="done")
+    )
+    store.write_report(
+        Report(verdict="approve", summary="s", coverage=Coverage(contributed=1, failed=0),
+               dedup=Dedup(status="skipped"), usage=UsageBreakdown())
+    )
+
+    def flip_to_done(_seconds):
+        m = store.read_manifest()
+        m.overall = "done"
+        store.write_manifest(m)
+
+    monkeypatch.setattr(cli.time, "sleep", flip_to_done)  # one poll -> terminal (no real wait)
+    res = runner.invoke(app, ["status", "r", "--wait"])
+    assert res.exit_code == 0  # looped once, re-read terminal, adopted the approve verdict
 
 
 def test_resume_refuses_a_live_run(aeview_home):

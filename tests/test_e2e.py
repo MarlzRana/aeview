@@ -50,6 +50,10 @@ def test_e2e_needs_attention(aeview_home, git_repo, stub_claude):
     assert review["id"] == "default__claude-code-claude-opus-4-8"
     assert (run / "bundle" / "inline_bundle.diff").exists()
     assert (run / "reviewers" / "default" / "prompt.md").exists()
+    # The run records its pid (foreground too) so liveness can tell a live run from a crash.
+    manifest = json.loads((run / "run.json").read_text())
+    assert isinstance(manifest["pid"], int)
+    assert manifest["cwd"] == str(git_repo)  # recorded so resume re-runs from the right repo
     instance_dir = run / "reviewers" / "default" / "claude-code-claude-opus-4-8"
     assert (instance_dir / "review.json").exists()
     assert (instance_dir / "review.log").exists()

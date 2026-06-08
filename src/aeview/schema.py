@@ -237,6 +237,9 @@ class RunManifest(BaseModel):
     invocation: Invocation
     roster: list[RosterEntry]
     dedup: DedupPlan | None = None
+    # The dir the run was launched from (its git repo). resume/the detached worker re-run from
+    # here, not the caller's cwd, so a self-collect harness inspects the right repo.
+    cwd: str | None = None
     pid: int | None = None
     pgid: int | None = None
 

@@ -59,7 +59,7 @@ async def _attempt_review(
         try:
             out = await adapter.run(
                 prompt, entry.model, cwd, store.log_path(entry.reviewer, entry.id),
-                entry.thinking, timeout,
+                thinking=entry.thinking, timeout=timeout,
             )
         except AdapterError as exc:
             last_error = str(exc)

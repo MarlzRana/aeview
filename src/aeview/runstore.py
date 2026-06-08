@@ -155,13 +155,23 @@ def reconcile_interrupted() -> list[str]:
     for child, manifest in _iter_run_dirs():
         if manifest.overall != _NON_TERMINAL or pid_alive(manifest.pid):
             continue
-        manifest.overall = "interrupted"
-        manifest.finished_at = now_iso()
+        # Re-read right before clobbering: the worker writes its terminal manifest *then* exits,
+        # so a now-dead pid means a 'done'/'failed' may already be on disk that our cached read
+        # (taken while it was still 'running') missed. Don't overwrite a finished run.
         try:
-            atomic_write_text(child / "run.json", manifest.model_dump_json(indent=2))
+            fresh = RunStore(child.name).read_manifest()
+        except (OSError, ValueError):
+            continue
+        if fresh.overall != _NON_TERMINAL:
+            continue
+        fresh.run_id = child.name
+        fresh.overall = "interrupted"
+        fresh.finished_at = now_iso()
+        try:
+            atomic_write_text(child / "run.json", fresh.model_dump_json(indent=2))
         except OSError:
             continue
-        reconciled.append(manifest.run_id)
+        reconciled.append(child.name)
     return reconciled
 
 

@@ -302,6 +302,18 @@ def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
     assert (runs_dir() / "stale-run").exists()
 
 
+def test_merge_settings_carries_the_pinned_dedup_plan():
+    # run/resume re-merge with the harness frozen in run.json, never current settings.json.
+    from aeview.cli import _merge_settings
+    from aeview.schema import DedupPlan
+
+    settings = _merge_settings(DedupPlan(id="x", harness="codex", model="gpt-5.5", thinking="high"))
+    pinned = settings.deduplication_harness
+    assert pinned is not None
+    assert (pinned.harness, pinned.model, pinned.thinking) == ("codex", "gpt-5.5", "high")
+    assert _merge_settings(None).deduplication_harness is None
+
+
 def test_display_path_collapses_home_with_boundary_guard(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))

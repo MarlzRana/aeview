@@ -95,6 +95,25 @@ async def test_unknown_harness_marks_failed(aeview_home, monkeypatch):
     assert "not supported" in (result.error or "")
 
 
+class _CaptureTimeoutAdapter:
+    def __init__(self):
+        self.timeout: float | None | str = "unset"
+
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+        self.timeout = timeout
+        return _ok_output()
+
+
+async def test_fan_out_threads_timeout_to_adapter(aeview_home, monkeypatch):
+    # The configured per-review timeout must actually reach adapter.run (the stubs elsewhere
+    # accept-and-ignore it, so nothing else pins this link end-to-end).
+    adapter = _CaptureTimeoutAdapter()
+    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    store = RunStore.create(new_run_id())
+    await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home, timeout=42.0)
+    assert adapter.timeout == 42.0
+
+
 async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
     monkeypatch.setattr(fanout, "get_adapter", lambda h: _AuthFailAdapter())
     store = RunStore.create(new_run_id())

@@ -1,6 +1,26 @@
 from __future__ import annotations
 
-from aeview.config import HarnessInstance, ensure_seeded, load_dedup_prompt, load_settings
+import pytest
+from pydantic import ValidationError
+
+from aeview.config import (
+    HarnessInstance,
+    Settings,
+    ensure_seeded,
+    load_dedup_prompt,
+    load_settings,
+)
+
+
+def test_review_timeout_seconds_loads_from_camel_case(aeview_home):
+    # The seed ships reviewTimeoutSeconds=1200; the camelCase alias must map to the field.
+    assert load_settings().review_timeout_seconds == 1200
+
+
+def test_review_timeout_seconds_rejects_nonpositive(aeview_home):
+    # ge=1: 0 would kill every review instantly; reject it at the settings boundary.
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"reviewTimeoutSeconds": 0})
 
 
 def test_ensure_seeded_writes_defaults(aeview_home):

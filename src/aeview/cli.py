@@ -46,7 +46,6 @@ from .runstore import (
     list_manifests,
     new_run_id,
     now_iso,
-    pid_alive,
     prune_runs,
     reconcile_interrupted,
 )
@@ -280,8 +279,8 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         invocation=Invocation(reviewers=plan.names, scope=plan.bundle.scope),
         roster=plan.roster,
         dedup=_dedup_plan(plan.roster, settings),
-        pid=os.getpid(),
-        pgid=os.getpgrp(),
+        cwd=str(cwd),  # resume re-runs from here, not the caller's cwd
+        pid=os.getpid(),  # pgid is recorded in I6b-2, where cancel's killpg needs it
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
@@ -503,12 +502,11 @@ def resume(
     json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")] = False,
 ) -> None:
     """Re-run a run's non-`done` reviews against its frozen bundle, then re-merge."""
-    cwd = Path.cwd()
     rid, manifest = _load_manifest_or_exit(run_id)
     store = RunStore(rid)
     # Refuse to double-run a live run (a detached run still going): only a finished or crashed
-    # (dead-pid) run is safe to take over.
-    if manifest.overall == "running" and pid_alive(manifest.pid):
+    # run is safe to take over. effective_overall is "running" only when the pid is alive.
+    if effective_overall(manifest) == "running":
         typer.echo(
             f"aeview: run '{rid}' is still running; cancel it or wait before resuming", err=True
         )
@@ -517,14 +515,15 @@ def resume(
     done_ids = {r.id for r in store.read_reviews() if r.status == "done"}
     pending = [e for e in manifest.roster if e.id not in done_ids]
     if not pending:
+        # All reviews are done. If the run already merged, it's complete — show it and stop;
+        # otherwise (crashed before merge) fall through to a merge-only resume.
         try:
-            existing = store.read_report()
+            report = store.read_report()
         except (OSError, ValueError):
-            existing = None
-        if existing is not None:
+            pass
+        else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
-            _emit_report(existing, json_out)
-        # else: every review is done but the run crashed before merge — fall through to merge-only.
+            _emit_report(report, json_out)
 
     try:
         prompts = {entry.reviewer: store.read_prompt(entry.reviewer) for entry in pending}
@@ -533,10 +532,12 @@ def resume(
         raise typer.Exit(EXIT_ERROR) from exc
 
     # Take ownership: mark running under this process so liveness tracks it; clear the old finish.
+    # Re-run from the original repo (manifest.cwd), not the caller's cwd, so a self-collect
+    # harness inspects the right tree.
+    cwd = Path(manifest.cwd) if manifest.cwd else Path.cwd()
     manifest.overall = "running"
     manifest.finished_at = None
     manifest.pid = os.getpid()
-    manifest.pgid = os.getpgrp()
     store.write_manifest(manifest)
 
     timeout = load_settings().review_timeout_seconds
