@@ -68,6 +68,16 @@ def test_changed_paths_returns_destinations():
     assert changed_paths(diff) == ["src/app.py", "uv.lock"]
 
 
+def test_changed_paths_skips_combined_merge_block():
+    # A `diff --cc` combined block (a merge commit via `git show`) isn't a `diff --git` block, so
+    # it's skipped — the documented limitation that merge commits don't auto-activate reviewers.
+    cc = (
+        "diff --cc src/merged.py\nindex 1,2..3 100644\n--- a/src/merged.py\n"
+        "+++ b/src/merged.py\n@@@ -1 -1 +1 @@@\n- a\n -b\n++c\n"
+    )
+    assert changed_paths(cc) == []
+
+
 def test_changed_paths_uses_new_side_of_rename():
     block = (
         "diff --git a/old/name.py b/new/name.py\nsimilarity index 100%\n"

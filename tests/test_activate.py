@@ -147,10 +147,11 @@ def test_bang_glob_is_literal_not_negation(aeview_home, tmp_path):
 
 
 def test_malformed_glob_does_not_crash(aeview_home, tmp_path):
-    # On the supported runtime (Python >=3.14) PurePath.full_match returns False for a malformed
-    # pattern rather than raising, so a typo'd glob just never matches — it must not abort the run.
+    # On the supported runtime (Python >=3.14) PurePath.full_match returns False for a malformed or
+    # empty pattern rather than raising (it raised pre-3.14), so a typo'd / blank glob just never
+    # matches — it must not abort the run.
     repo = tmp_path / "repo"
     repo.mkdir()
-    make_reviewer(repo, "r", harnesses=HARNESS, auto_activate_paths=["[", "*.py"])
+    make_reviewer(repo, "r", harnesses=HARNESS, auto_activate_paths=["[", "", "*.py"])
     assert select_auto_reviewers(repo, repo, _diff("app.py")) == ["r"]  # *.py still wins
-    assert select_auto_reviewers(repo, repo, _diff("data.json")) == []  # bad glob alone -> no crash
+    assert select_auto_reviewers(repo, repo, _diff("data.json")) == []  # bad/empty only -> no crash

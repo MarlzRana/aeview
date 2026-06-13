@@ -287,6 +287,24 @@ def test_auto_patch_scope_runs_default_only(aeview_home, git_repo):
     assert plan.auto_activated == []
 
 
+def test_auto_mode_full_run_activated_reviewer_contributes(aeview_home, git_repo, stub_claude):
+    # End-to-end: a bare run actually executes the path-activated reviewer (not just announces it).
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    report = asyncio.run(_orchestrate(None, "working-tree", None, git_repo, False, False, None))
+    assert report.coverage.contributed == 2  # default + the path-activated py
+    run = next(iter(runs_dir().iterdir()))
+    manifest = json.loads((run / "run.json").read_text())
+    assert "py" in {e["reviewer"] for e in manifest["roster"]}
+
+
+def test_scope_error_precedes_unknown_reviewer_error(aeview_home, git_repo):
+    # The reordering contract: scope is resolved before reviewers, so an empty diff surfaces a
+    # ScopeError even when the named reviewer is also unknown.
+    with pytest.raises(ScopeError):
+        _plan_run(["nope"], "working-tree", None, git_repo, False, False, None, load_settings())
+
+
 def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     with pytest.raises(ResolveError):

@@ -322,11 +322,11 @@ def _select_auto(
     skip-with-warning, like `all`). Returns (reviewers, auto-activated names) — the names are only
     the path-matched extras that actually resolved and run."""
     default = resolve_reviewer("default", cwd, settings)
-    # patch-scope paths aren't repo-root-relative (the same reason .aeviewignore skips it), and a
-    # non-git cwd has no root to anchor against — either way only the default baseline runs.
-    root = None if resolved.spec.type == "patch" else repo_root(cwd)
+    if resolved.spec.type == "patch":
+        return [default], []  # patch paths aren't repo-root-relative; nothing to anchor against
+    root = repo_root(cwd)
     if root is None:
-        return [default], []
+        return [default], []  # not a git work tree; no root to anchor the changed paths against
     # Drop `default` from the matches: it's already resolved unconditionally, and resolving it a
     # second time would build a duplicate roster entry with the same id -> clobbered review files.
     matched = [n for n in select_auto_reviewers(cwd, root, resolved.diff) if n != "default"]

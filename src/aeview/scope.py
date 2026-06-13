@@ -123,13 +123,13 @@ def _is_repo(cwd: Path) -> bool:
 def repo_root(cwd: Path) -> Path | None:
     """The repository top-level for `cwd`, or None when `cwd` isn't inside a git work tree.
     Tracked/untracked diff paths are repo-root-relative, so `.aeviewignore` filtering and
-    auto-activation anchor those paths against this root before matching. Resolved to the canonical
-    (symlink-free) form so `is_relative_to` comparisons line up with the already-resolved walk-up
-    rungs/reviewer scope paths instead of silently missing across a symlinked path."""
+    auto-activation anchor those paths against this root before matching. `git rev-parse
+    --show-toplevel` already returns the canonical (symlink-resolved) path — the same form as the
+    resolved walk-up rungs/reviewer scope paths it's compared against — so no extra `.resolve()`."""
     res = run_sync(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
     if res.returncode != 0:
         return None
-    return Path(res.stdout.strip()).resolve()
+    return Path(res.stdout.strip())
 
 
 def _has_head(cwd: Path) -> bool:

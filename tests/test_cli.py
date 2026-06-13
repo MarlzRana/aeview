@@ -23,6 +23,8 @@ from aeview.runstore import RunStore
 from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
 from conftest import commit, make_reviewer
 
+_HARNESS = [{"harness": "claude-code", "model": "opus"}]
+
 
 def _roster(n: int) -> list[RosterEntry]:
     return [
@@ -286,8 +288,7 @@ def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude
 def test_run_surfaces_auto_activated_on_stderr(aeview_home, git_repo, stub_claude, monkeypatch):
     # The "never silently" contract for auto mode: a bare run reports which reviewers its changed
     # paths pulled in, on stderr (mirrors the .aeviewignore notice).
-    make_reviewer(git_repo, "py", harnesses=[{"harness": "claude-code", "model": "opus"}],
-                  auto_activate_paths=["*.py"])
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
     (git_repo / "feature.py").write_text("x = 1\n")
     monkeypatch.chdir(git_repo)
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])  # no --reviewers = auto
@@ -312,8 +313,7 @@ def test_run_json_stdout_unpolluted_by_auto_activated_notice(
     aeview_home, git_repo, stub_claude, monkeypatch
 ):
     # The auto-activated notice must also stay on stderr so `run --json` stdout is valid JSON.
-    make_reviewer(git_repo, "py", harnesses=[{"harness": "claude-code", "model": "opus"}],
-                  auto_activate_paths=["*.py"])
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
     (git_repo / "feature.py").write_text("x = 1\n")
     monkeypatch.chdir(git_repo)
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
