@@ -283,6 +283,8 @@ def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])
     # On stderr specifically, so it never pollutes the report/--json on stdout.
     assert "excluded 1 file(s) via .aeviewignore" in result.stderr
+    # The inverse half of "never silently": no reviewer matched, so no auto-activated notice fires.
+    assert "auto-activated" not in result.stderr
 
 
 def test_run_surfaces_auto_activated_on_stderr(aeview_home, git_repo, stub_claude, monkeypatch):
@@ -306,6 +308,10 @@ def test_bare_run_uses_auto_scope_and_auto_reviewers(
     result = CliRunner().invoke(app, ["run"])
     assert "auto-activated 1 reviewer(s): py" in result.stderr
     assert result.exit_code in (0, 1)  # a real review verdict, not a resolution/scope error (2)
+    # ...and the activated reviewer actually executed via the true default path (scope=auto).
+    run = next(iter(runs_dir().iterdir()))
+    manifest = json.loads((run / "run.json").read_text())
+    assert "py" in {e["reviewer"] for e in manifest["roster"]}
 
 
 def test_run_json_stdout_unpolluted_by_ignore_notice(

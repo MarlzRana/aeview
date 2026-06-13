@@ -121,7 +121,11 @@ def changed_paths(diff: str) -> list[str]:
     """The destination (new) path of every file block in a unified diff, in order. Reuses the
     same block-splitting + destination-path logic as filtering, so auto-activation matches against
     exactly the files that survived `.aeviewignore` (and ignores a spoofed `+++` content line the
-    same way). Blocks whose path can't be parsed (e.g. a `diff --cc` merge block) are skipped."""
+    same way). Blocks whose path can't be parsed (e.g. a `diff --cc` merge block) are skipped.
+
+    Destination-only, matching `.aeviewignore`'s rename rule: a file renamed out of a reviewer's
+    tree activates the destination reviewer, not the source one — the change is still covered by
+    `default` plus the destination's reviewer."""
     _, blocks = _split_blocks(diff)
     return [p for block in blocks if (p := _block_path(block)) is not None]
 

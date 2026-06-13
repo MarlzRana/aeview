@@ -221,9 +221,9 @@ def test_auto_fails_fast_on_broken_default(aeview_home, git_repo):
         _auto_plan(git_repo)
 
 
-def test_auto_lenient_skips_broken_activated(aeview_home, git_repo):
-    # A path-matched reviewer with broken config (dir name != frontmatter name) is skipped, while a
-    # valid matched sibling still runs and default is unaffected.
+def test_auto_lenient_skips_broken_activated(aeview_home, git_repo, capsys):
+    # A path-matched reviewer with broken config (dir name != frontmatter name) is skipped — with a
+    # loud warning, not silently — while a valid matched sibling runs and default is unaffected.
     paths = ["*.py"]
     make_reviewer(git_repo, "good", harnesses=_HARNESS, auto_activate_paths=paths)
     make_reviewer(git_repo, "bad", fm_name="WRONG", harnesses=_HARNESS, auto_activate_paths=paths)
@@ -232,6 +232,7 @@ def test_auto_lenient_skips_broken_activated(aeview_home, git_repo):
     assert "good" in plan.names and "default" in plan.names
     assert "bad" not in plan.names
     assert plan.auto_activated == ["good"]
+    assert "skipping reviewer 'bad'" in capsys.readouterr().err
 
 
 def test_auto_activation_respects_aeviewignore(aeview_home, git_repo):

@@ -53,8 +53,8 @@ class ReviewerFrontMatter(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     harnesses: list[HarnessInstance] | None = None
-    # Part of the frontmatter contract, accepted + validated now; nothing consumes it yet — a
-    # later increment adds the path-matching that auto-selects reviewers from these globs.
+    # Globs that opt this reviewer into auto mode: a bare `aeview run` activates it when a changed
+    # file matches (consumed by activate.select_auto_reviewers). Validated here; kebab-case alias.
     auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
 
     @model_validator(mode="after")
