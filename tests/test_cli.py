@@ -279,7 +279,7 @@ def _dry_plan(n_reviews: int = 1, *, mode: str = "inline", thinking: str | None 
         mode=mode, scope=ScopeSpec(type="branch", base="main"),
         diff="x", summary="s", diff_bytes=123,
     )
-    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle)
+    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle, ignored=[])
 
 
 def test_dry_run_render_single_review_skips_dedup():

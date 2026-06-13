@@ -25,6 +25,7 @@ from .bundle import Bundle, build_bundle
 from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
 from .fanout import fan_out
+from .ignore import filter_resolved
 from .merge import merge_reviews
 from .prompt import compose_prompt
 from .report import EXIT_APPROVE, EXIT_ERROR, exit_code, render_human, report_verdict_label
@@ -157,6 +158,9 @@ def run(
         typer.echo(_render_dry_run(plan, settings))
         raise typer.Exit(EXIT_APPROVE)
 
+    if plan.ignored:  # surface what .aeviewignore dropped — never silently
+        typer.echo(f"aeview: excluded {len(plan.ignored)} file(s) via .aeviewignore", err=True)
+
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
     report = asyncio.run(_execute(plan, settings, cwd))
@@ -230,6 +234,7 @@ class _Plan:
     reviewers: list[Reviewer]
     roster: list[RosterEntry]
     bundle: Bundle
+    ignored: list[str]  # paths excluded by .aeviewignore (surfaced; never silently dropped)
 
 
 def _plan_run(
@@ -266,7 +271,20 @@ def _plan_run(
     resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
     if resolved.is_empty:
         raise ScopeError(f"nothing to review for scope '{stype}'")
-    return _Plan(names=names, reviewers=reviewers, roster=roster, bundle=build_bundle(resolved))
+    # Drop .aeviewignore'd files before measuring/bundling, so the byte count and the prompt only
+    # see what's actually under review.
+    resolved, ignored = filter_resolved(resolved, cwd)
+    if resolved.is_empty:
+        raise ScopeError(
+            f"nothing to review for scope '{stype}' (all changes matched .aeviewignore)"
+        )
+    return _Plan(
+        names=names,
+        reviewers=reviewers,
+        roster=roster,
+        bundle=build_bundle(resolved),
+        ignored=ignored,
+    )
 
 
 async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
@@ -336,6 +354,7 @@ def _render_dry_run(plan: _Plan, settings: Settings) -> str:
         "dry run — no model calls, nothing persisted",
         f"scope: {_scope_label(bundle.scope)}",
         f"bundle: {mode}, {bundle.diff_bytes} bytes",
+        f"ignored ({len(plan.ignored)} via .aeviewignore): {', '.join(plan.ignored) or '—'}",
         f"reviewers: {', '.join(plan.names)}",
         f"roster ({len(plan.roster)} review{'' if len(plan.roster) == 1 else 's'}):",
     ]

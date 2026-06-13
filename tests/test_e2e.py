@@ -11,7 +11,7 @@ from aeview.report import EXIT_APPROVE, EXIT_ERROR, EXIT_NEEDS_ATTENTION, exit_c
 from aeview.resolve import ResolveError
 from aeview.schema import Report
 from aeview.scope import ScopeError
-from conftest import make_reviewer
+from conftest import commit, make_reviewer
 
 
 async def _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text):
@@ -88,6 +88,15 @@ def test_e2e_malformed_output_marks_failed(aeview_home, git_repo, stub_claude):
 
 def test_empty_diff_raises(aeview_home, git_repo, stub_claude):
     with pytest.raises(ScopeError):
+        _run(git_repo)
+
+
+def test_all_changes_ignored_raises(aeview_home, git_repo, stub_claude):
+    # .aeviewignore (committed, so it isn't itself in the diff) excludes the only changed file ->
+    # the run has nothing left to review and says so, rather than fanning out over an empty diff.
+    commit(git_repo, ".aeviewignore", "*.py\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    with pytest.raises(ScopeError, match="matched .aeviewignore"):
         _run(git_repo)
 
 

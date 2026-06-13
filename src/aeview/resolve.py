@@ -109,8 +109,9 @@ def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
     return front_matter, body  # body already had its leading newlines stripped
 
 
-def _candidate_rungs(cwd: Path) -> list[Path]:
-    """Directories to check, nearest-first: CWD up to home (or root), then home."""
+def candidate_rungs(cwd: Path) -> list[Path]:
+    """The aeview config walk-up rungs, nearest-first: CWD up to home (or root), then home.
+    Shared by reviewer resolution and `.aeviewignore` discovery."""
     home = Path.home().resolve()
     rungs: list[Path] = []
     d = cwd.resolve()
@@ -129,7 +130,7 @@ def _reviewer_dir(rung: Path, name: str) -> Path:
 
 
 def resolve_reviewer(name: str, cwd: Path, settings: Settings) -> Reviewer:
-    for rung in _candidate_rungs(cwd):
+    for rung in candidate_rungs(cwd):
         reviewer_file = _reviewer_dir(rung, name) / REVIEWER_FILE
         if reviewer_file.is_file():
             return _load_reviewer(reviewer_file.parent, name, settings)
@@ -152,7 +153,7 @@ class DiscoveredReviewer:
 def discover_reviewer_sources(cwd: Path) -> list[DiscoveredReviewer]:
     """Every reviewer name visible here, nearest-first, with its winning dir + shadowed dirs."""
     found: dict[str, DiscoveredReviewer] = {}  # insertion order = nearest-first discovery order
-    for rung in _candidate_rungs(cwd):
+    for rung in candidate_rungs(cwd):
         parent = rung / _AEVIEW_DIR / _REVIEWERS
         if not parent.is_dir():
             continue
