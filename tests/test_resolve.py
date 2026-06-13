@@ -24,6 +24,15 @@ def _settings(fallback_model: str = "fallbackmodel") -> Settings:
     )
 
 
+def _write_reviewer_md(base: Path, name: str, frontmatter: str) -> Path:
+    """Write a reviewer with raw frontmatter (for shapes make_reviewer can't express)."""
+    d = base / ".aeview" / "reviewers" / name
+    d.mkdir(parents=True)
+    path = d / "REVIEWER.md"
+    path.write_text(f"---\n{frontmatter}\n---\nbody\n")
+    return path
+
+
 # --- walk-up ---------------------------------------------------------------------------
 
 
@@ -167,9 +176,7 @@ def test_malformed_frontmatter_harnesses_raises_resolve_error(tmp_path):
 
 def test_unknown_frontmatter_key_raises_resolve_error(tmp_path):
     # extra="forbid" turns a typo'd key into a clear error instead of silently ignoring it.
-    d = tmp_path / ".aeview" / "reviewers" / "python"
-    d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text("---\nname: python\ndescription: d\nharneses: []\n---\nbody\n")
+    _write_reviewer_md(tmp_path, "python", "name: python\ndescription: d\nharneses: []")
     with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("python", tmp_path, _settings())
 
@@ -182,36 +189,39 @@ def test_empty_harnesses_block_raises(tmp_path):
 
 def test_blank_harnesses_block_raises(tmp_path):
     # A present-but-null `harnesses:` is a likely mistake; it must error, not select the fallback.
-    d = tmp_path / ".aeview" / "reviewers" / "python"
-    d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text("---\nname: python\ndescription: d\nharnesses:\n---\nbody\n")
+    _write_reviewer_md(tmp_path, "python", "name: python\ndescription: d\nharnesses:")
     with pytest.raises(ResolveError, match="no entries"):
         resolve_reviewer("python", tmp_path, _settings())
 
 
+def test_omitted_harnesses_with_empty_fallback_raises(tmp_path):
+    # No frontmatter harnesses AND no global fallback -> a clear error, never an empty roster.
+    make_reviewer(tmp_path, "python")  # no harnesses: block
+    with pytest.raises(ResolveError, match="fallbackReviewerHarnesses is empty"):
+        resolve_reviewer("python", tmp_path, Settings(fallback_reviewer_harnesses=[]))
+
+
 def test_auto_activate_paths_parsed_from_frontmatter(tmp_path):
-    # Parsed + validated as frontmatter (the path-matching that consumes it lives elsewhere);
-    # pins the kebab-case alias so a regression there is caught.
-    d = tmp_path / ".aeview" / "reviewers" / "py"
-    d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text(
-        "---\nname: py\ndescription: d\n"
+    # Parsed + validated now; nothing consumes it yet (a later increment adds the path-matching).
+    # Pins the kebab-case alias so a regression there is caught.
+    path = _write_reviewer_md(
+        tmp_path, "py",
+        "name: py\ndescription: d\n"
         'harnesses: [{"harness": "codex", "model": "gpt-5.5"}]\n'
-        'auto-activate-paths: ["src/**", "docs/*.md"]\n---\nbody\n'
+        'auto-activate-paths: ["src/**", "docs/*.md"]',
     )
-    front, _ = parse_reviewer(d / "REVIEWER.md")
+    front, _ = parse_reviewer(path)
     assert front.auto_activate_paths == ["src/**", "docs/*.md"]
 
 
 def test_underscore_auto_activate_paths_key_rejected(tmp_path):
     # populate_by_name is off, so only the kebab `auto-activate-paths` is accepted; the underscore
     # spelling is an unknown key under extra="forbid". Pins the "one spelling per key" contract.
-    d = tmp_path / ".aeview" / "reviewers" / "py"
-    d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text(
-        "---\nname: py\ndescription: d\n"
+    _write_reviewer_md(
+        tmp_path, "py",
+        "name: py\ndescription: d\n"
         'harnesses: [{"harness": "codex", "model": "gpt-5.5"}]\n'
-        'auto_activate_paths: ["src/**"]\n---\nbody\n'
+        'auto_activate_paths: ["src/**"]',
     )
     with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("py", tmp_path, _settings())
@@ -220,9 +230,7 @@ def test_underscore_auto_activate_paths_key_rejected(tmp_path):
 @pytest.mark.parametrize("frontmatter", ['name: ""\ndescription: d', "description: d"])
 def test_invalid_name_raises_resolve_error(tmp_path, frontmatter):
     # Empty (min_length=1) and absent (required) both surface via the "invalid frontmatter" path.
-    d = tmp_path / ".aeview" / "reviewers" / "python"
-    d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text(f"---\n{frontmatter}\n---\nbody\n")
+    _write_reviewer_md(tmp_path, "python", frontmatter)
     with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("python", tmp_path, _settings())
 
@@ -265,6 +273,13 @@ def test_bundled_repo_reviewers_resolve(tmp_path):
         assert reviewer.harnesses
         for ref in reviewer.harnesses:
             get_adapter(ref.instance.harness)  # raises AdapterError on an unsupported harness
+        # If the reviewer declares its own harnesses, the resolved set must be exactly those —
+        # not the test fallback, which would mask a dropped/typo'd frontmatter harnesses block.
+        front, _ = parse_reviewer(reviewer.source / "REVIEWER.md")
+        if front.harnesses is not None:
+            assert [(r.instance.harness, r.instance.model) for r in reviewer.harnesses] == [
+                (h.harness, h.model) for h in front.harnesses
+            ]
 
 
 def test_build_roster_is_cross_product(tmp_path):

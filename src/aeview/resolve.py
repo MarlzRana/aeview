@@ -53,8 +53,8 @@ class ReviewerFrontMatter(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     harnesses: list[HarnessInstance] | None = None
-    # Validated here so the frontmatter contract is fixed in one place; the path-matching that
-    # consumes it lives in the activation layer.
+    # Part of the frontmatter contract, accepted + validated now; nothing consumes it yet — a
+    # later increment adds the path-matching that auto-selects reviewers from these globs.
     auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
 
 
@@ -95,8 +95,9 @@ def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
         raise ResolveError(f"{path} has invalid frontmatter: {exc}") from exc
     # A present-but-empty `harnesses:` (YAML null) is almost always a mistake — the author meant
     # to configure harnesses. Reject it loudly rather than silently using the global fallback
-    # (which only an *omitted* key should select).
-    if "harnesses" in meta and meta["harnesses"] is None:
+    # (which only an *omitted* key should select). model_fields_set distinguishes a provided-null
+    # key from an absent one, off the validated model rather than the raw input.
+    if "harnesses" in front_matter.model_fields_set and front_matter.harnesses is None:
         raise ResolveError(
             f"{path} has a `harnesses:` key with no entries; list at least one harness "
             f"or remove the key to use the global fallback"

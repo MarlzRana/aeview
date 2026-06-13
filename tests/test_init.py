@@ -40,6 +40,16 @@ def test_init_scaffold_resolves(aeview_home, tmp_path, monkeypatch):
     assert "claude-code-claude-opus-4-8" in res.output
 
 
+def test_init_no_harness_scaffold_resolves_via_fallback(aeview_home, tmp_path, monkeypatch):
+    # A plain (no --with-harness) scaffold must also round-trip: it has no harnesses: block, so it
+    # resolves via the seeded fallbackReviewerHarnesses.
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init", "myrev"])
+    res = runner.invoke(app, ["reviewers", "myrev"])
+    assert res.exit_code == 0
+    assert "claude-code-claude-opus-4-8" in res.output  # the seeded fallback
+
+
 def test_init_yaml_keyword_name_resolves(aeview_home, tmp_path, monkeypatch):
     # `yes` is a YAML-1.1 boolean; the quoted frontmatter must keep it the string name "yes" so
     # the scaffolded reviewer resolves (dir name == frontmatter name) instead of becoming True.
