@@ -280,7 +280,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         roster=plan.roster,
         dedup=_dedup_plan(plan.roster, settings),
         cwd=cwd,  # resume re-runs from here, not the caller's cwd
-        pid=os.getpid(),  # pgid is recorded in I6b-2, where cancel's killpg needs it
+        pid=os.getpid(),  # recorded so liveness can tell a live run from a crash
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
@@ -314,9 +314,9 @@ async def _run_reviews_and_merge(
     timeout: float | None,
 ) -> Report:
     """Run the given roster entries (fresh run = all; resume = the non-done subset), then merge
-    *all* on-disk reviews. The shared core of `run` and `resume` (and the I6b-2 detached worker):
-    it reads the persisted prompts + frozen bundle and re-merges via the run.json-pinned dedup
-    plan, so completion truth comes from the run dir, not the in-memory plan."""
+    *all* on-disk reviews. The shared core of `run` and `resume`: it reads the persisted prompts
+    + frozen bundle and re-merges via the run.json-pinned dedup plan, so completion truth comes
+    from the run dir, not the in-memory plan."""
     if entries:
         await fan_out(store, entries, prompt_by_reviewer, cwd, timeout)
     report = await merge_reviews(store.read_reviews(), _merge_settings(manifest.dedup), store, cwd)
@@ -503,12 +503,14 @@ def resume(
     """Re-run a run's non-`done` reviews against its frozen bundle, then re-merge."""
     rid, manifest = _load_manifest_or_exit(run_id)
     store = RunStore(rid)
-    # Refuse to double-run a live run (a detached run still going): only a finished or crashed
-    # run is safe to take over. effective_overall is "running" only when the pid is alive. (Two
-    # *simultaneous* resumes of the same crashed run is a narrow gap deferred to I6b-2's locking.)
+    # Refuse to double-run a live run (e.g. a foreground run going in another terminal): only a
+    # finished or crashed run is safe to take over. effective_overall is "running" only when the
+    # pid is alive. (Two *simultaneous* resumes of the same crashed run is a narrow unguarded gap
+    # — a run-dir lock is a deferred stretch item; see the roadmap.)
     if effective_overall(manifest) == "running":
         typer.echo(
-            f"aeview: run '{rid}' is still running; cancel it or wait before resuming", err=True
+            f"aeview: run '{rid}' is still running; wait for it or kill it before resuming",
+            err=True,
         )
         raise typer.Exit(EXIT_ERROR)
 

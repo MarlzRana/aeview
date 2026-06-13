@@ -68,7 +68,8 @@ async def run_async(
 
     `timeout` (seconds) bounds the call: on expiry the child is killed and a 124 result is
     returned, which the adapter turns into a failure. (Killing only the direct child, not its
-    process group — full group-kill on cancel is I6's lifecycle work.)
+    process group — a SIGTERM-deaf harness can orphan tool grandchildren; full process-group
+    kill is a deferred stretch item, see the roadmap.)
     """
     try:
         proc = await asyncio.create_subprocess_exec(
