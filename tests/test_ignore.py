@@ -100,6 +100,25 @@ def test_rename_from_ignored_path_is_dropped(tmp_path):
     assert out == ""
 
 
+def test_copy_from_ignored_path_is_dropped(tmp_path):
+    # Symmetric to renames: a copy from an ignored path also leaks the ignored content -> drop.
+    block = (
+        "diff --git a/secret.lock b/public.txt\nsimilarity index 80%\n"
+        "copy from secret.lock\ncopy to public.txt\n"
+        "--- a/secret.lock\n+++ b/public.txt\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["*.lock"])))
+    assert ignored == ["secret.lock"] and out == ""
+
+
+def test_all_ignored_drops_preamble(tmp_path):
+    # Every block ignored -> the preamble (e.g. git show's commit header) is dropped too, so the
+    # result is genuinely empty and "nothing to review" can fire for an all-ignored commit.
+    diff = "commit abc123\nAuthor: x\n\n    a message\n\n" + _diff("uv.lock")
+    out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
+    assert out == "" and ignored == ["uv.lock"]
+
+
 def test_rename_only_and_mode_only_blocks_match_by_header(tmp_path):
     # Blocks with no `---`/`+++` (pure rename or mode change) resolve their path from the header.
     rename_only = (
@@ -174,3 +193,15 @@ def test_load_specs_skips_unreadable(aeview_home, tmp_path):
     (tmp_path / ".aeviewignore").mkdir()  # a directory by that name -> unreadable as text
     specs = _load_specs(tmp_path)  # must not raise
     assert all(root != tmp_path for root, _ in specs)  # the unreadable one was skipped
+
+
+def test_subdir_cwd_anchors_against_repo_root(aeview_home, git_repo):
+    # Run from a subdir: a repo-root .aeviewignore still matches a repo-root file (diff paths are
+    # repo-root-relative), and a subdir .aeviewignore does NOT reach files above it.
+    sub = git_repo / "src"
+    sub.mkdir()
+    (git_repo / ".aeviewignore").write_text("*.lock\n")
+    (sub / ".aeviewignore").write_text("local.txt\n")
+    new, ignored = filter_resolved(_resolved(_diff("uv.lock", "local.txt")), sub)
+    assert ignored == ["uv.lock"]  # repo-root rule matches the repo-root file from a subdir cwd
+    assert "b/local.txt" in new.diff  # the subdir rule (local.txt) doesn't match repo/local.txt

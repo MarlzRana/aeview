@@ -25,11 +25,16 @@ from .scope import ResolvedScope, summarize_diff
 
 IGNORE_FILE = ".aeviewignore"
 
+# (rung directory, its parsed ignore spec), one per `.aeviewignore` on the walk-up, nearest-first.
+type RungSpecs = list[tuple[Path, GitIgnoreSpec]]
 
-def _load_specs(cwd: Path) -> list[tuple[Path, GitIgnoreSpec]]:
-    """Each rung's `.aeviewignore` (nearest-first), parsed into a spec anchored at the rung. An
+
+def _load_specs(cwd: Path) -> RungSpecs:
+    """Each rung's `.aeviewignore` (nearest-first), parsed into a spec anchored at the rung. The
+    walk is cwd->home (same rungs as reviewer discovery): a `.aeviewignore` in a subdir *below*
+    cwd is intentionally not consulted — discovery is upward-only, not gitignore's descend. An
     unreadable file is skipped — filtering must never abort a review."""
-    specs: list[tuple[Path, GitIgnoreSpec]] = []
+    specs: RungSpecs = []
     for rung in candidate_rungs(cwd):
         try:
             text = (rung / IGNORE_FILE).read_text(encoding="utf-8")
@@ -39,7 +44,7 @@ def _load_specs(cwd: Path) -> list[tuple[Path, GitIgnoreSpec]]:
     return specs
 
 
-def _is_ignored(abs_path: Path, specs: list[tuple[Path, GitIgnoreSpec]]) -> bool:
+def _is_ignored(abs_path: Path, specs: RungSpecs) -> bool:
     """Compose the rung specs gitignore-style: the rung nearest the file that has an opinion wins.
     `specs` is nearest-first, so the first non-None verdict is the nearest one (True = ignore,
     False = negated back in, None = this file has no matching pattern in that rung)."""
@@ -108,9 +113,7 @@ def _block_paths(block: str) -> set[str]:
     return paths
 
 
-def filter_diff(
-    diff: str, repo_root: Path, specs: list[tuple[Path, GitIgnoreSpec]]
-) -> tuple[str, list[str]]:
+def filter_diff(diff: str, repo_root: Path, specs: RungSpecs) -> tuple[str, list[str]]:
     """Drop diff blocks matching `.aeviewignore`; return (kept diff, sorted ignored paths)."""
     preamble, blocks = _split_blocks(diff)
     kept_blocks: list[str] = []
@@ -125,8 +128,7 @@ def filter_diff(
     # so the diff is genuinely empty and the "nothing to review" check fires.
     if blocks and not kept_blocks:
         return "", sorted(ignored)
-    body = preamble + "".join(kept_blocks) if kept_blocks else preamble
-    return body, sorted(ignored)
+    return preamble + "".join(kept_blocks), sorted(ignored)
 
 
 def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, list[str]]:

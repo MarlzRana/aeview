@@ -276,7 +276,8 @@ def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude
     (git_repo / "uv.lock").write_text("lock\n")
     monkeypatch.chdir(git_repo)
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])
-    assert "excluded 1 file(s) via .aeviewignore" in result.output
+    # On stderr specifically, so it never pollutes the report/--json on stdout.
+    assert "excluded 1 file(s) via .aeviewignore" in result.stderr
 
 
 def _dry_plan(
