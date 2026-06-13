@@ -10,6 +10,7 @@ from aeview.resolve import (
     ResolveError,
     build_roster,
     discover_reviewers,
+    parse_reviewer,
     resolve_reviewer,
 )
 from conftest import make_reviewer
@@ -43,6 +44,11 @@ def test_default_resolves_from_home(aeview_home, tmp_path):
     r = resolve_reviewer("default", tmp_path, _settings())
     assert r.name == "default"
     assert r.source == aeview_home / "reviewers" / "default"
+    # The seeded default's harnesses come from its frontmatter (N1), not the fallback — assert the
+    # resolved instance so a malformed/dropped seeded harnesses block is caught, not masked.
+    assert [(h.instance.harness, h.instance.model) for h in r.harnesses] == [
+        ("claude-code", "claude-opus-4-8")
+    ]
 
 
 def test_repo_overrides_default(aeview_home, tmp_path):
@@ -171,6 +177,45 @@ def test_unknown_frontmatter_key_raises_resolve_error(tmp_path):
 def test_empty_harnesses_block_raises(tmp_path):
     make_reviewer(tmp_path, "python", harnesses=[])  # explicit `harnesses: []`
     with pytest.raises(ResolveError, match="no harnesses"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_legacy_harness_json_is_rejected(tmp_path):
+    # A leftover harness.json must fail loud (not silently fall back to fallback harnesses),
+    # pointing the user at the frontmatter migration.
+    d = make_reviewer(tmp_path, "python", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
+    (d / "harness.json").write_text('{"harnesses": []}')
+    with pytest.raises(ResolveError, match="no longer supported"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_auto_activate_paths_parsed_from_frontmatter(tmp_path):
+    # Validated + parsed in N1 (activation lands in N3); pins the kebab-case alias so a regression
+    # there is caught before N3 consumes it.
+    d = tmp_path / ".aeview" / "reviewers" / "py"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text(
+        "---\nname: py\ndescription: d\n"
+        'harnesses: [{"harness": "codex", "model": "gpt-5.5"}]\n'
+        'auto-activate-paths: ["src/**", "docs/*.md"]\n---\nbody\n'
+    )
+    front, _ = parse_reviewer(d / "REVIEWER.md")
+    assert front.auto_activate_paths == ["src/**", "docs/*.md"]
+
+
+def test_empty_name_raises_resolve_error(tmp_path):
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text('---\nname: ""\ndescription: d\n---\nbody\n')
+    with pytest.raises(ResolveError, match="invalid frontmatter"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_missing_name_raises_resolve_error(tmp_path):
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\ndescription: d\n---\nbody\n")
+    with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("python", tmp_path, _settings())
 
 

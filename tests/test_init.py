@@ -17,8 +17,9 @@ def test_init_creates_reviewer_without_harness(aeview_home, tmp_path, monkeypatc
     assert res.exit_code == 0
     md = _reviewer_dir(tmp_path, "myrev") / "REVIEWER.md"
     assert md.exists()
-    assert 'name: "myrev"' in md.read_text()  # quoted so YAML-1.1 keywords stay strings
-    assert "harnesses:" not in md.read_text()  # optional → omitted by default (uses fallback)
+    text = md.read_text()
+    assert 'name: "myrev"' in text  # quoted so YAML-1.1 keywords stay strings
+    assert "harnesses:" not in text  # optional → omitted by default (uses fallback)
 
 
 def test_init_with_harness_writes_frontmatter_harnesses(aeview_home, tmp_path, monkeypatch):
