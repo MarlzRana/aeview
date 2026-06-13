@@ -14,6 +14,7 @@ the read-only sandbox allowing reads anywhere.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from pathspec import GitIgnoreSpec
@@ -40,16 +41,15 @@ def _load_specs(cwd: Path) -> list[tuple[Path, GitIgnoreSpec]]:
 
 def _is_ignored(abs_path: Path, specs: list[tuple[Path, GitIgnoreSpec]]) -> bool:
     """Compose the rung specs gitignore-style: the rung nearest the file that has an opinion wins.
-    `specs` is nearest-first, so apply farthest-first and keep the last non-None verdict
-    (True = ignore, False = negated back in, None = this file has no matching pattern)."""
-    verdict: bool | None = None
-    for rung, spec in reversed(specs):  # farthest -> nearest, so nearer overrides
+    `specs` is nearest-first, so the first non-None verdict is the nearest one (True = ignore,
+    False = negated back in, None = this file has no matching pattern in that rung)."""
+    for rung, spec in specs:
         if not abs_path.is_relative_to(rung):
             continue
         decision = spec.check_file(str(abs_path.relative_to(rung))).include
         if decision is not None:
-            verdict = decision
-    return verdict is True
+            return decision
+    return False
 
 
 def _split_blocks(diff: str) -> tuple[str, list[str]]:
@@ -78,38 +78,55 @@ def _strip_ab(token: str) -> str | None:
     return token[2:] if token.startswith(("a/", "b/")) else token
 
 
-def _block_path(block: str) -> str | None:
-    """The path a diff block concerns — the new (b/) path for adds/modifies/renames, the old (a/)
-    path for deletions, falling back to the `diff --git` header for mode/rename-only blocks."""
-    new_path: str | None = None
-    old_path: str | None = None
-    header_path: str | None = None
+def _header_paths(line: str) -> set[str]:
+    # `diff --git a/<old> b/<new>` -> {old, new} (best-effort for space-free paths).
+    rest = line[len("diff --git ") :]
+    marker = rest.rfind(" b/")
+    if marker == -1:
+        return set()
+    old, new = rest[:marker], rest[marker + 3 :].strip()
+    return {old[2:] if old.startswith("a/") else old, new}
+
+
+def _block_paths(block: str) -> set[str]:
+    """Every path a diff block touches — both sides of the `diff --git` header, the `---`/`+++`
+    lines, and rename/copy from/to. A block is dropped if ANY of these is ignored, so an ignored
+    file can't slip through a rename to an allowed path. Only the header region (before the first
+    `@@` hunk) is read, so a spoofed `+++ b/...` line in the diff *content* can't redirect the
+    match into hiding a file from review."""
+    paths: set[str] = set()
     for line in block.splitlines():
-        if line.startswith("+++ "):
-            new_path = _strip_ab(line[4:].strip())
-        elif line.startswith("--- "):
-            old_path = _strip_ab(line[4:].strip())
-        elif line.startswith("diff --git ") and header_path is None:
-            # `diff --git a/<path> b/<path>`; take the b/ side (best-effort for space-free paths).
-            marker = line.rfind(" b/")
-            header_path = line[marker + 3 :].strip() if marker != -1 else None
-    return new_path or old_path or header_path
+        if line.startswith("@@"):
+            break  # hunks begin — content lines must never be parsed as headers
+        if line.startswith(("+++ ", "--- ")):
+            if (p := _strip_ab(line[4:].strip())) is not None:
+                paths.add(p)
+        elif line.startswith("diff --git "):
+            paths |= _header_paths(line)
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            paths.add(line.split(" ", 2)[2].strip())
+    return paths
 
 
 def filter_diff(
     diff: str, repo_root: Path, specs: list[tuple[Path, GitIgnoreSpec]]
 ) -> tuple[str, list[str]]:
-    """Drop diff blocks matching `.aeviewignore`; return (kept diff, ignored paths)."""
+    """Drop diff blocks matching `.aeviewignore`; return (kept diff, sorted ignored paths)."""
     preamble, blocks = _split_blocks(diff)
-    kept: list[str] = [preamble] if preamble else []
-    ignored: list[str] = []
+    kept_blocks: list[str] = []
+    ignored: set[str] = set()
     for block in blocks:
-        rel = _block_path(block)
-        if rel is not None and _is_ignored(repo_root / rel, specs):
-            ignored.append(rel)
+        matched = {p for p in _block_paths(block) if _is_ignored(repo_root / p, specs)}
+        if matched:
+            ignored |= matched
             continue
-        kept.append(block)
-    return "".join(kept), ignored
+        kept_blocks.append(block)
+    # When every file block is ignored, drop the preamble too (e.g. `git show`'s commit header),
+    # so the diff is genuinely empty and the "nothing to review" check fires.
+    if blocks and not kept_blocks:
+        return "", sorted(ignored)
+    body = preamble + "".join(kept_blocks) if kept_blocks else preamble
+    return body, sorted(ignored)
 
 
 def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, list[str]]:
@@ -127,12 +144,5 @@ def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, 
     filtered, ignored = filter_diff(resolved.diff, Path(res.stdout.strip()), specs)
     if not ignored:
         return resolved, []
-    new_scope = ResolvedScope(
-        spec=resolved.spec,
-        diff=filtered,
-        summary=summarize_diff(filtered),
-        inspect=resolved.inspect,
-        commits=resolved.commits,
-        inline_only=resolved.inline_only,
-    )
-    return new_scope, sorted(ignored)
+    new_scope = replace(resolved, diff=filtered, summary=summarize_diff(filtered))
+    return new_scope, ignored

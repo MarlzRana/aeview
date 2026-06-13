@@ -100,6 +100,20 @@ def test_all_changes_ignored_raises(aeview_home, git_repo, stub_claude):
         _run(git_repo)
 
 
+def test_plan_excludes_ignored_from_bundle(aeview_home, git_repo):
+    # Mixed changes: an ignored uv.lock and a kept app.py. The bundle (and its byte count) must
+    # carry only the kept file; the ignored one is recorded in plan.ignored.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    (git_repo / "uv.lock").write_text("lockfile\n")
+    plan = _plan_run(
+        ["default"], "working-tree", None, git_repo, False, False, None, load_settings()
+    )
+    assert plan.ignored == ["uv.lock"]
+    assert "b/app.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
+    assert plan.bundle.diff_bytes == len(plan.bundle.diff.encode("utf-8"))
+
+
 def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     with pytest.raises(ResolveError):

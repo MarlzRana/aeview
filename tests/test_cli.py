@@ -20,7 +20,7 @@ from aeview.config import HarnessInstance, Settings, runs_dir
 from aeview.resolve import ResolveError
 from aeview.runstore import RunStore
 from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
-from conftest import make_reviewer
+from conftest import commit, make_reviewer
 
 
 def _roster(n: int) -> list[RosterEntry]:
@@ -269,7 +269,23 @@ def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypa
     assert not out.exists()
 
 
-def _dry_plan(n_reviews: int = 1, *, mode: str = "inline", thinking: str | None = None) -> _Plan:
+def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude, monkeypatch):
+    # The "never silently" contract: a real run reports what .aeviewignore excluded.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    (git_repo / "uv.lock").write_text("lock\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])
+    assert "excluded 1 file(s) via .aeviewignore" in result.output
+
+
+def _dry_plan(
+    n_reviews: int = 1,
+    *,
+    mode: str = "inline",
+    thinking: str | None = None,
+    ignored: list[str] | None = None,
+) -> _Plan:
     roster = [
         RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}",
                     thinking=thinking)
@@ -279,7 +295,7 @@ def _dry_plan(n_reviews: int = 1, *, mode: str = "inline", thinking: str | None 
         mode=mode, scope=ScopeSpec(type="branch", base="main"),
         diff="x", summary="s", diff_bytes=123,
     )
-    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle, ignored=[])
+    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle, ignored=ignored or [])
 
 
 def test_dry_run_render_single_review_skips_dedup():
@@ -288,6 +304,11 @@ def test_dry_run_render_single_review_skips_dedup():
     assert "bundle: inline, 123 bytes" in out
     assert "roster (1 review):" in out  # singular
     assert "dedup: skipped (single review)" in out
+
+
+def test_dry_run_render_lists_ignored_files():
+    out = _render_dry_run(_dry_plan(1, ignored=["dist/x.js", "uv.lock"]), Settings())
+    assert "ignored (2 via .aeviewignore): dist/x.js, uv.lock" in out
 
 
 def test_dry_run_render_multi_with_dedup_harness():
