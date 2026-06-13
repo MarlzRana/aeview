@@ -113,3 +113,44 @@ def test_home_reviewer_does_not_match_repo_outside_home(aeview_home, tmp_path):
     outside = tmp_path / "outside"  # sibling of ~, not beneath it
     outside.mkdir()
     assert select_auto_reviewers(outside, outside, _diff("x.py")) == []
+
+
+def test_home_and_repo_reviewers_both_activate(aeview_home, tmp_path):
+    # Multi-rung: a home reviewer (anchored at ~, needs **/) and a repo reviewer both match the same
+    # change. Nearest-first order puts the repo reviewer ahead of the home one.
+    home = aeview_home.parent
+    make_reviewer(home, "global", harnesses=HARNESS, auto_activate_paths=["**/*.py"])
+    repo = home / "proj"
+    repo.mkdir()
+    make_reviewer(repo, "local", harnesses=HARNESS, auto_activate_paths=["*.py"])
+    assert select_auto_reviewers(repo, repo, _diff("x.py")) == ["local", "global"]
+
+
+def test_shadowing_uses_nearest_reviewers_globs(aeview_home, tmp_path):
+    # A repo reviewer shadows a same-name home reviewer; the nearest (repo) one's globs decide
+    # activation. Home's globs would match, the repo's don't -> no activation.
+    home = aeview_home.parent
+    make_reviewer(home, "dup", harnesses=HARNESS, auto_activate_paths=["**/*.py"])  # would match
+    repo = home / "proj"
+    repo.mkdir()
+    make_reviewer(repo, "dup", harnesses=HARNESS, auto_activate_paths=["nomatch/**"])  # shadows
+    assert select_auto_reviewers(repo, repo, _diff("x.py")) == []
+
+
+def test_bang_glob_is_literal_not_negation(aeview_home, tmp_path):
+    # Deliberate divergence from .aeviewignore's gitignore engine: `!` has no special meaning, so
+    # `!*.py` is literal, never a re-include — the `*.py` match stands.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    make_reviewer(repo, "r", harnesses=HARNESS, auto_activate_paths=["*.py", "!*.py"])
+    assert select_auto_reviewers(repo, repo, _diff("app.py")) == ["r"]
+
+
+def test_malformed_glob_does_not_crash(aeview_home, tmp_path):
+    # On the supported runtime (Python >=3.14) PurePath.full_match returns False for a malformed
+    # pattern rather than raising, so a typo'd glob just never matches — it must not abort the run.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    make_reviewer(repo, "r", harnesses=HARNESS, auto_activate_paths=["[", "*.py"])
+    assert select_auto_reviewers(repo, repo, _diff("app.py")) == ["r"]  # *.py still wins
+    assert select_auto_reviewers(repo, repo, _diff("data.json")) == []  # bad glob alone -> no crash

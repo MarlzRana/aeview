@@ -258,6 +258,15 @@ def test_auto_activates_repo_reviewer_from_subdirectory(aeview_home, git_repo):
     assert plan.auto_activated == ["py"]
 
 
+def test_auto_activates_for_commit_scope(aeview_home, git_repo):
+    # Auto mode skips only patch scope; a commit-scope bare run still activates from its diff.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    sha = commit(git_repo, "added.py", "x = 1\n", "add py")
+    plan = _plan_run(None, "commit", sha, git_repo, False, False, None, load_settings())
+    assert "py" in plan.names
+    assert plan.auto_activated == ["py"]
+
+
 def test_auto_repo_default_with_matching_paths_runs_once(aeview_home, git_repo):
     # A repo-level `default` whose own auto-activate-paths match must resolve exactly once — never
     # duplicated into a second roster entry with a clashing id.

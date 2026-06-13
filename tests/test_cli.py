@@ -308,6 +308,20 @@ def test_run_json_stdout_unpolluted_by_ignore_notice(
     assert "excluded 1 file(s) via .aeviewignore" in result.stderr
 
 
+def test_run_json_stdout_unpolluted_by_auto_activated_notice(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # The auto-activated notice must also stay on stderr so `run --json` stdout is valid JSON.
+    make_reviewer(git_repo, "py", harnesses=[{"harness": "claude-code", "model": "opus"}],
+                  auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
+    json.loads(result.stdout)  # stdout parses as the report JSON
+    assert "auto-activated" not in result.stdout
+    assert "auto-activated 1 reviewer(s): py" in result.stderr
+
+
 def _dry_plan(
     n_reviews: int = 1,
     *,
