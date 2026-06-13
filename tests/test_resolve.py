@@ -183,14 +183,14 @@ def test_unknown_frontmatter_key_raises_resolve_error(tmp_path):
 
 def test_empty_harnesses_block_raises(tmp_path):
     make_reviewer(tmp_path, "python", harnesses=[])  # explicit `harnesses: []`
-    with pytest.raises(ResolveError, match="no harnesses"):
+    with pytest.raises(ResolveError, match="present but empty"):
         resolve_reviewer("python", tmp_path, _settings())
 
 
 def test_blank_harnesses_block_raises(tmp_path):
     # A present-but-null `harnesses:` is a likely mistake; it must error, not select the fallback.
     _write_reviewer_md(tmp_path, "python", "name: python\ndescription: d\nharnesses:")
-    with pytest.raises(ResolveError, match="no entries"):
+    with pytest.raises(ResolveError, match="present but empty"):
         resolve_reviewer("python", tmp_path, _settings())
 
 
@@ -277,9 +277,10 @@ def test_bundled_repo_reviewers_resolve(tmp_path):
         # not the test fallback, which would mask a dropped/typo'd frontmatter harnesses block.
         front, _ = parse_reviewer(reviewer.source / "REVIEWER.md")
         if front.harnesses is not None:
-            assert [(r.instance.harness, r.instance.model) for r in reviewer.harnesses] == [
-                (h.harness, h.model) for h in front.harnesses
-            ]
+            assert [
+                (r.instance.harness, r.instance.model, r.instance.thinking)
+                for r in reviewer.harnesses
+            ] == [(h.harness, h.model, h.thinking) for h in front.harnesses]
 
 
 def test_build_roster_is_cross_product(tmp_path):

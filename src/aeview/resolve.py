@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .config import HarnessInstance, Settings, split_frontmatter
 from .schema import RosterEntry
@@ -57,6 +57,18 @@ class ReviewerFrontMatter(BaseModel):
     # later increment adds the path-matching that auto-selects reviewers from these globs.
     auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
 
+    @model_validator(mode="after")
+    def _harnesses_present_means_nonempty(self) -> ReviewerFrontMatter:
+        # One boundary check for the whole "harnesses present ⇒ non-empty" rule: a given key
+        # (null or []) is almost always a mistake, so reject it; only an *omitted* key (absent
+        # from model_fields_set) selects the global fallback downstream.
+        if "harnesses" in self.model_fields_set and not self.harnesses:
+            raise ValueError(
+                "`harnesses:` is present but empty; list at least one harness "
+                "or remove the key to use the global fallback"
+            )
+        return self
+
 
 @dataclass(slots=True)
 class Reviewer:
@@ -90,18 +102,10 @@ def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
     try:
         front_matter = ReviewerFrontMatter.model_validate(meta)
     except ValidationError as exc:
-        # Covers a missing/empty name (required, min_length=1), a bad harness entry, and any
-        # unknown key (extra="forbid") — one uniform "invalid frontmatter" path.
+        # Covers a missing/empty name (required, min_length=1), a bad harness entry, a
+        # present-but-empty harnesses block, and any unknown key (extra="forbid") — one uniform
+        # "invalid frontmatter" path.
         raise ResolveError(f"{path} has invalid frontmatter: {exc}") from exc
-    # A present-but-empty `harnesses:` (YAML null) is almost always a mistake — the author meant
-    # to configure harnesses. Reject it loudly rather than silently using the global fallback
-    # (which only an *omitted* key should select). model_fields_set distinguishes a provided-null
-    # key from an absent one, off the validated model rather than the raw input.
-    if "harnesses" in front_matter.model_fields_set and front_matter.harnesses is None:
-        raise ResolveError(
-            f"{path} has a `harnesses:` key with no entries; list at least one harness "
-            f"or remove the key to use the global fallback"
-        )
     return front_matter, body  # body already had its leading newlines stripped
 
 
@@ -192,7 +196,7 @@ def _resolve_harnesses(
     harnesses: list[HarnessInstance] | None, reviewer_dir: Path, settings: Settings
 ) -> list[HarnessRef]:
     # An omitted `harnesses:` key selects the global fallback; a present one is the reviewer's
-    # own choice (a present-but-empty block was already rejected in parse_reviewer).
+    # own choice (the frontmatter model already rejected a present-but-empty block).
     if harnesses is None:
         if not settings.fallback_reviewer_harnesses:
             raise ResolveError(
@@ -200,8 +204,6 @@ def _resolve_harnesses(
                 f"settings.fallbackReviewerHarnesses is empty"
             )
         return _assign_ids(settings.fallback_reviewer_harnesses)
-    if not harnesses:
-        raise ResolveError(f"{reviewer_dir / REVIEWER_FILE} lists no harnesses")
     return _assign_ids(harnesses)
 
 
