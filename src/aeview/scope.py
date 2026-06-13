@@ -88,7 +88,9 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
 
 
 def _git(args: list[str], cwd: Path) -> str:
-    res = run_sync(["git", "-c", "core.pager=cat", *args], cwd=cwd)
+    # quotePath=false: emit raw UTF-8 paths (not \xxx escapes) so non-ASCII filenames stay matchable
+    # by .aeviewignore and readable in the prompt.
+    res = run_sync(["git", "-c", "core.pager=cat", "-c", "core.quotePath=false", *args], cwd=cwd)
     if res.returncode != 0:
         raise ScopeError(res.stderr.strip() or f"git {' '.join(args)} failed")
     return res.stdout
@@ -137,7 +139,9 @@ def _untracked_diff(cwd: Path) -> str:
     parts: list[str] = []
     for rel in (p for p in listing.split("\0") if p):
         res = run_sync(
-            ["git", "-c", "core.pager=cat", "diff", "--no-index", "--", "/dev/null", rel], cwd=cwd
+            ["git", "-c", "core.pager=cat", "-c", "core.quotePath=false",
+             "diff", "--no-index", "--", "/dev/null", rel],
+            cwd=cwd,
         )
         out = res.stdout
         if not out:

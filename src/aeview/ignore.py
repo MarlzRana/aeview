@@ -10,6 +10,14 @@ resolved against the repo root before matching.
 The non-git `patch` scope is left untouched (its paths aren't repo-root-relative). Self-collect's
 live `git diff` inspect commands can still surface an ignored file — a known, accepted leak, like
 the read-only sandbox allowing reads anywhere.
+
+Known limitations (this is query-cleanliness, not a security boundary):
+- Merge commits reviewed via `commit:<merge-sha>` produce a combined diff (`diff --cc`), which is
+  not split into per-file blocks here, so it passes through unfiltered.
+- Untracked files are diffed with cwd-relative paths (scope.py); from a subdirectory those won't
+  anchor against the repo root, so untracked-file filtering assumes cwd == repo root.
+- Paths git renders specially (non-ASCII is handled via `core.quotePath=false`; embedded spaces or
+  control chars in the `diff --git` header are best-effort) may not match.
 """
 
 from __future__ import annotations
@@ -89,8 +97,7 @@ def _header_paths(line: str) -> set[str]:
     marker = rest.rfind(" b/")
     if marker == -1:
         return set()
-    old, new = rest[:marker], rest[marker + 3 :].strip()
-    return {old[2:] if old.startswith("a/") else old, new}
+    return {p for p in (_strip_ab(rest[:marker]), _strip_ab(rest[marker + 1 :].strip())) if p}
 
 
 def _block_paths(block: str) -> set[str]:
@@ -126,9 +133,10 @@ def filter_diff(diff: str, repo_root: Path, specs: RungSpecs) -> tuple[str, list
         kept_blocks.append(block)
     # When every file block is ignored, drop the preamble too (e.g. `git show`'s commit header),
     # so the diff is genuinely empty and the "nothing to review" check fires.
+    ignored_paths = sorted(ignored)
     if blocks and not kept_blocks:
-        return "", sorted(ignored)
-    return preamble + "".join(kept_blocks), sorted(ignored)
+        return "", ignored_paths
+    return preamble + "".join(kept_blocks), ignored_paths
 
 
 def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, list[str]]:

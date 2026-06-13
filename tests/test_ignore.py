@@ -39,6 +39,22 @@ def test_filter_diff_negation_reincludes(tmp_path):
     assert "b/keep.lock" in out
 
 
+def test_directory_pattern_matches_only_within_dir(tmp_path):
+    # A `dist/` directory pattern ignores files under dist/ but not lookalikes at the top level.
+    diff = _diff("dist/bundle.js", "mydist.js", "dist.txt")
+    out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["dist/"])))
+    assert ignored == ["dist/bundle.js"]
+    assert "b/mydist.js" in out and "b/dist.txt" in out
+
+
+def test_anchored_pattern_matches_only_at_root(tmp_path):
+    # A leading-slash pattern is anchored to the rung; `/uv.lock` ignores root uv.lock, not nested.
+    diff = _diff("uv.lock", "sub/uv.lock")
+    out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["/uv.lock"])))
+    assert ignored == ["uv.lock"]
+    assert "b/sub/uv.lock" in out
+
+
 def test_filter_diff_no_match_is_unchanged(tmp_path):
     diff = _diff("src/app.py", "README.md")
     out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
