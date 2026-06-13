@@ -295,6 +295,19 @@ def test_run_surfaces_auto_activated_on_stderr(aeview_home, git_repo, stub_claud
     assert "auto-activated 1 reviewer(s): py" in result.stderr
 
 
+def test_bare_run_uses_auto_scope_and_auto_reviewers(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # The headline command: `aeview run` with no flags = auto scope (a dirty tree -> working-tree)
+    # + auto reviewers (default + path-activated). Nothing else exercises the fully-default path.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")  # untracked -> dirty -> auto picks working-tree
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run"])
+    assert "auto-activated 1 reviewer(s): py" in result.stderr
+    assert result.exit_code in (0, 1)  # a real review verdict, not a resolution/scope error (2)
+
+
 def test_run_json_stdout_unpolluted_by_ignore_notice(
     aeview_home, git_repo, stub_claude, monkeypatch
 ):

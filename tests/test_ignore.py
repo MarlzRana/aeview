@@ -78,6 +78,16 @@ def test_changed_paths_skips_combined_merge_block():
     assert changed_paths(cc) == []
 
 
+def test_changed_paths_includes_deleted_file():
+    # A deletion's `+++` is /dev/null, so the path falls back to the unchanged `diff --git` header
+    # — a reviewer still auto-activates when a file in its tree is removed.
+    block = (
+        "diff --git a/backend/old.py b/backend/old.py\ndeleted file mode 100644\n"
+        "--- a/backend/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    )
+    assert changed_paths(block) == ["backend/old.py"]
+
+
 def test_changed_paths_uses_new_side_of_rename():
     block = (
         "diff --git a/old/name.py b/new/name.py\nsimilarity index 100%\n"

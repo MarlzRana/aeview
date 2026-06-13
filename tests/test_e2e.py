@@ -298,6 +298,18 @@ def test_auto_mode_full_run_activated_reviewer_contributes(aeview_home, git_repo
     assert "py" in {e["reviewer"] for e in manifest["roster"]}
 
 
+def test_auto_activation_through_symlinked_repo_path(aeview_home, git_repo, tmp_path):
+    # Invoking through a symlink to the repo still anchors correctly: git's canonical top-level and
+    # the resolved walk-up rungs agree, so the lexical is_relative_to check matches (this is why the
+    # repo_root .resolve() was unnecessary — both sides are already canonical).
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    link = tmp_path / "linked_repo"
+    link.symlink_to(git_repo)
+    plan = _plan_run(None, "working-tree", None, link, False, False, None, load_settings())
+    assert plan.auto_activated == ["py"]
+
+
 def test_scope_error_precedes_unknown_reviewer_error(aeview_home, git_repo):
     # The reordering contract: scope is resolved before reviewers, so an empty diff surfaces a
     # ScopeError even when the named reviewer is also unknown.

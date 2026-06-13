@@ -12,10 +12,10 @@ def make_reviewer(
     base: Path,
     name: str,
     *,
-    body="BODY",
-    fm_name=None,
-    harnesses=None,
-    auto_activate_paths=None,
+    body: str = "BODY",
+    fm_name: str | None = None,
+    harnesses: list[dict] | None = None,
+    auto_activate_paths: list[str] | None = None,
 ) -> Path:
     """Create a reviewer at <base>/.aeview/reviewers/<name>/ with harnesses in its frontmatter.
 
