@@ -43,9 +43,9 @@ class HarnessRef:
 
 
 class ReviewerFrontMatter(BaseModel):
-    """The validated YAML frontmatter of a REVIEWER.md. `harnesses` (N1) lives here, not in a
-    separate file. `extra="forbid"` turns a typo'd key (e.g. `harneses:`) into a clear error;
-    no `populate_by_name`, so each key has exactly one accepted spelling (the alias for
+    """The validated YAML frontmatter of a REVIEWER.md: the reviewer's harnesses live here, not
+    in a separate file. `extra="forbid"` turns a typo'd key (e.g. `harneses:`) into a clear
+    error; no `populate_by_name`, so each key has exactly one accepted spelling (the alias for
     auto-activate-paths, the field name otherwise)."""
 
     model_config = ConfigDict(extra="forbid")
@@ -53,8 +53,8 @@ class ReviewerFrontMatter(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     harnesses: list[HarnessInstance] | None = None
-    # Accepted + validated here so the frontmatter contract is stable across the batch; the
-    # activation logic that consumes it is wired in N3 (I9 — auto-activate-paths).
+    # Validated here so the frontmatter contract is fixed in one place; the path-matching that
+    # consumes it lives in the activation layer.
     auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
 
 
@@ -93,6 +93,14 @@ def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
         # Covers a missing/empty name (required, min_length=1), a bad harness entry, and any
         # unknown key (extra="forbid") — one uniform "invalid frontmatter" path.
         raise ResolveError(f"{path} has invalid frontmatter: {exc}") from exc
+    # A present-but-empty `harnesses:` (YAML null) is almost always a mistake — the author meant
+    # to configure harnesses. Reject it loudly rather than silently using the global fallback
+    # (which only an *omitted* key should select).
+    if "harnesses" in meta and meta["harnesses"] is None:
+        raise ResolveError(
+            f"{path} has a `harnesses:` key with no entries; list at least one harness "
+            f"or remove the key to use the global fallback"
+        )
     return front_matter, body  # body already had its leading newlines stripped
 
 
@@ -182,26 +190,26 @@ def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Rev
 def _resolve_harnesses(
     harnesses: list[HarnessInstance] | None, reviewer_dir: Path, settings: Settings
 ) -> list[HarnessRef]:
-    # Fail loud on a stale harness.json instead of silently falling back to the global default
-    # (harnesses moved into the REVIEWER.md frontmatter in N1; the file is no longer read).
+    # Fail loud on a leftover harness.json instead of silently falling back to the global default
+    # — harnesses moved into the REVIEWER.md frontmatter and the file is no longer read.
     legacy = reviewer_dir / "harness.json"
     if legacy.is_file():
         raise ResolveError(
             f"{legacy} is no longer supported; move its harnesses into the REVIEWER.md "
             f"`harnesses:` frontmatter block"
         )
-    # A `harnesses:` block (even an empty list) is the reviewer's own choice; only its absence
-    # falls back to the global default. Per-entry validation already ran in parse_reviewer.
-    if harnesses is not None:
-        if not harnesses:
-            raise ResolveError(f"{reviewer_dir / REVIEWER_FILE} lists no harnesses")
-        return _assign_ids(harnesses)
-    if not settings.fallback_reviewer_harnesses:
-        raise ResolveError(
-            f"{reviewer_dir} has no harnesses: in its REVIEWER.md and "
-            f"settings.fallbackReviewerHarnesses is empty"
-        )
-    return _assign_ids(settings.fallback_reviewer_harnesses)
+    # An omitted `harnesses:` key selects the global fallback; a present one is the reviewer's
+    # own choice (a present-but-empty block was already rejected in parse_reviewer).
+    if harnesses is None:
+        if not settings.fallback_reviewer_harnesses:
+            raise ResolveError(
+                f"{reviewer_dir} has no harnesses: in its REVIEWER.md and "
+                f"settings.fallbackReviewerHarnesses is empty"
+            )
+        return _assign_ids(settings.fallback_reviewer_harnesses)
+    if not harnesses:
+        raise ResolveError(f"{reviewer_dir / REVIEWER_FILE} lists no harnesses")
+    return _assign_ids(harnesses)
 
 
 def _assign_ids(instances: list[HarnessInstance]) -> list[HarnessRef]:

@@ -181,11 +181,20 @@ def test_empty_harnesses_block_raises(tmp_path):
 
 
 def test_legacy_harness_json_is_rejected(tmp_path):
-    # A leftover harness.json must fail loud (not silently fall back to fallback harnesses),
-    # pointing the user at the frontmatter migration.
-    d = make_reviewer(tmp_path, "python", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
+    # A leftover harness.json beside a reviewer with NO harnesses: block would have silently
+    # fallen back to the global default; it must fail loud (not return the fallback harnesses).
+    d = make_reviewer(tmp_path, "python")  # no harnesses: block -> would otherwise use fallback
     (d / "harness.json").write_text('{"harnesses": []}')
     with pytest.raises(ResolveError, match="no longer supported"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_blank_harnesses_block_raises(tmp_path):
+    # A present-but-null `harnesses:` is a likely mistake; it must error, not select the fallback.
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\nname: python\ndescription: d\nharnesses:\n---\nbody\n")
+    with pytest.raises(ResolveError, match="no entries"):
         resolve_reviewer("python", tmp_path, _settings())
 
 
@@ -203,18 +212,26 @@ def test_auto_activate_paths_parsed_from_frontmatter(tmp_path):
     assert front.auto_activate_paths == ["src/**", "docs/*.md"]
 
 
-def test_empty_name_raises_resolve_error(tmp_path):
-    d = tmp_path / ".aeview" / "reviewers" / "python"
+def test_underscore_auto_activate_paths_key_rejected(tmp_path):
+    # populate_by_name is off, so only the kebab `auto-activate-paths` is accepted; the underscore
+    # spelling is an unknown key under extra="forbid". Pins the "one spelling per key" contract.
+    d = tmp_path / ".aeview" / "reviewers" / "py"
     d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text('---\nname: ""\ndescription: d\n---\nbody\n')
+    (d / "REVIEWER.md").write_text(
+        "---\nname: py\ndescription: d\n"
+        'harnesses: [{"harness": "codex", "model": "gpt-5.5"}]\n'
+        'auto_activate_paths: ["src/**"]\n---\nbody\n'
+    )
     with pytest.raises(ResolveError, match="invalid frontmatter"):
-        resolve_reviewer("python", tmp_path, _settings())
+        resolve_reviewer("py", tmp_path, _settings())
 
 
-def test_missing_name_raises_resolve_error(tmp_path):
+@pytest.mark.parametrize("frontmatter", ['name: ""\ndescription: d', "description: d"])
+def test_invalid_name_raises_resolve_error(tmp_path, frontmatter):
+    # Empty (min_length=1) and absent (required) both surface via the "invalid frontmatter" path.
     d = tmp_path / ".aeview" / "reviewers" / "python"
     d.mkdir(parents=True)
-    (d / "REVIEWER.md").write_text("---\ndescription: d\n---\nbody\n")
+    (d / "REVIEWER.md").write_text(f"---\n{frontmatter}\n---\nbody\n")
     with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("python", tmp_path, _settings())
 
