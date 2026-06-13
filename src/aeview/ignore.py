@@ -7,15 +7,15 @@ not a `.aeview/` special case); each file's patterns are anchored at its own dir
 re-include something a higher file ignored. Diff paths are repo-root-relative, so they are
 resolved against the repo root before matching.
 
-The non-git `patch` scope is left untouched (its paths aren't repo-root-relative). Self-collect's
-live `git diff` inspect commands can still surface an ignored file — a known, accepted leak, like
-the read-only sandbox allowing reads anywhere.
+The non-git `patch` scope is left untouched (its paths aren't repo-root-relative). When filtering
+removes anything, the scope's `inspect` hints are cleared so a self-collect prompt won't re-derive
+the unfiltered diff; a reviewer could still run `git diff` itself under the read-only sandbox — a
+residual, accepted leak (this is query-cleanliness, not a security boundary, and reads are allowed
+anywhere by design).
 
-Known limitations (this is query-cleanliness, not a security boundary):
+Known limitations:
 - Merge commits reviewed via `commit:<merge-sha>` produce a combined diff (`diff --cc`), which is
   not split into per-file blocks here, so it passes through unfiltered.
-- Untracked files are diffed with cwd-relative paths (scope.py); from a subdirectory those won't
-  anchor against the repo root, so untracked-file filtering assumes cwd == repo root.
 - Paths git renders specially (non-ASCII is handled via `core.quotePath=false`; embedded spaces or
   control chars in the `diff --git` header are best-effort) may not match.
 """
@@ -152,5 +152,8 @@ def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, 
     filtered, ignored = filter_diff(resolved.diff, Path(res.stdout.strip()), specs)
     if not ignored:
         return resolved, []
-    new_scope = replace(resolved, diff=filtered, summary=summarize_diff(filtered))
+    # Clear the inspect hints too: in self-collect they tell the harness to re-run `git diff`, which
+    # re-derives the *unfiltered* diff and re-surfaces ignored files. The frozen diff file is
+    # filtered and the commit list rides separately, so the harness still has its context.
+    new_scope = replace(resolved, diff=filtered, summary=summarize_diff(filtered), inspect=[])
     return new_scope, ignored

@@ -224,6 +224,39 @@ def test_load_specs_skips_unreadable(aeview_home, tmp_path):
     assert all(root != tmp_path for root, _ in specs)  # the unreadable one was skipped
 
 
+def test_home_level_aeviewignore_is_loaded(aeview_home):
+    home = aeview_home.parent  # the fixture's HOME (~); the home rung's file is ~/.aeviewignore
+    (home / ".aeviewignore").write_text("**/*.lock\n")
+    sub = home / "proj"
+    sub.mkdir()
+    specs = _load_specs(sub)
+    assert any(root == home for root, _ in specs)  # ~/.aeviewignore loaded as the home rung
+    assert _is_ignored(sub / "uv.lock", specs) is True  # **/*.lock matches under home
+
+
+def test_combined_diff_passes_through_unfiltered(tmp_path):
+    # Merge-commit combined diffs (diff --cc) aren't split into per-file blocks -> pass through
+    # unchanged (documented limitation). Pins that boundary against _split_blocks changes.
+    diff = "diff --cc uv.lock\nindex 1,2..3\n--- a/uv.lock\n+++ b/uv.lock\n@@@ -1 -1 +1 @@@\n++x\n"
+    out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
+    assert ignored == [] and out == diff
+
+
+def test_filter_resolved_clears_inspect_when_filtered(aeview_home, git_repo):
+    # When filtering removes anything, the inspect hints are cleared so a self-collect prompt
+    # won't re-derive the unfiltered diff via `git diff`.
+    (git_repo / ".aeviewignore").write_text("*.lock\n")
+    resolved = ResolvedScope(
+        spec=ScopeSpec(type="branch", base="origin/main"),
+        diff=_diff("uv.lock", "app.py"),
+        summary="s",
+        inspect=["git diff origin/main"],
+    )
+    new, ignored = filter_resolved(resolved, git_repo)
+    assert ignored == ["uv.lock"]
+    assert new.inspect == []
+
+
 def test_subdir_cwd_anchors_against_repo_root(aeview_home, git_repo):
     # Run from a subdir: a repo-root .aeviewignore still matches a repo-root file (diff paths are
     # repo-root-relative), and a subdir .aeviewignore does NOT reach files above it.

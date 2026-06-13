@@ -11,7 +11,7 @@ from aeview.report import EXIT_APPROVE, EXIT_ERROR, EXIT_NEEDS_ATTENTION, exit_c
 from aeview.resolve import ResolveError
 from aeview.schema import Report
 from aeview.scope import ScopeError
-from conftest import commit, make_reviewer
+from conftest import commit, git, make_reviewer
 
 
 async def _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text):
@@ -112,6 +112,44 @@ def test_plan_excludes_ignored_from_bundle(aeview_home, git_repo):
     assert plan.ignored == ["uv.lock"]
     assert "b/app.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
     assert plan.bundle.diff_bytes == len(plan.bundle.diff.encode("utf-8"))
+
+
+def test_plan_filters_non_ascii_path(aeview_home, git_repo):
+    # quotePath=false keeps a non-ASCII filename raw in the diff, so .aeviewignore still matches it.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    (git_repo / "café.lock").write_text("lock\n")
+    plan = _plan_run(
+        ["default"], "working-tree", None, git_repo, False, False, None, load_settings()
+    )
+    assert "café.lock" in plan.ignored
+    assert "café.lock" not in plan.bundle.diff
+
+
+def test_plan_filters_untracked_from_subdirectory(aeview_home, git_repo):
+    # Invoked from a subdir: untracked diffs are repo-root-relative, so a root-level ignored file
+    # is still matched and a kept subdir file carries its repo-root path.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    sub = git_repo / "src"
+    sub.mkdir()
+    (sub / "feature.py").write_text("x = 1\n")
+    (git_repo / "uv.lock").write_text("lock\n")
+    plan = _plan_run(["default"], "working-tree", None, sub, False, False, None, load_settings())
+    assert plan.ignored == ["uv.lock"]
+    assert "b/src/feature.py" in plan.bundle.diff
+
+
+def test_plan_filters_commit_scope(aeview_home, git_repo):
+    # A single commit touching both an ignored and a kept file: git show -> filter through planning.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "uv.lock").write_text("lock\n")
+    (git_repo / "mod.py").write_text("x = 1\n")
+    git(git_repo, "add", "uv.lock", "mod.py")
+    git(git_repo, "commit", "-q", "--no-verify", "-m", "both")
+    sha = git(git_repo, "rev-parse", "HEAD").strip()
+    plan = _plan_run(["default"], "commit", sha, git_repo, False, False, None, load_settings())
+    assert plan.ignored == ["uv.lock"]
+    assert "b/mod.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
 
 
 def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):

@@ -87,10 +87,18 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
 # --- git/gh helpers -------------------------------------------------------------------
 
 
+# Forced diff config so output is parseable regardless of the user's gitconfig:
+# quotePath=false -> raw UTF-8 paths (not \xxx escapes), so non-ASCII names stay matchable +
+# readable; noprefix/mnemonicprefix=false -> always the standard a//b/ prefixes the diff parser
+# (summarize_diff, .aeviewignore) depends on.
+_GIT_BASE = (
+    "git", "-c", "core.pager=cat", "-c", "core.quotePath=false",
+    "-c", "diff.noprefix=false", "-c", "diff.mnemonicprefix=false",
+)
+
+
 def _git(args: list[str], cwd: Path) -> str:
-    # quotePath=false: emit raw UTF-8 paths (not \xxx escapes) so non-ASCII filenames stay matchable
-    # by .aeviewignore and readable in the prompt.
-    res = run_sync(["git", "-c", "core.pager=cat", "-c", "core.quotePath=false", *args], cwd=cwd)
+    res = run_sync([*_GIT_BASE, *args], cwd=cwd)
     if res.returncode != 0:
         raise ScopeError(res.stderr.strip() or f"git {' '.join(args)} failed")
     return res.stdout
@@ -135,14 +143,14 @@ def _merge_base(cwd: Path, base: str) -> str:
 
 
 def _untracked_diff(cwd: Path) -> str:
-    listing = _git(["ls-files", "--others", "--exclude-standard", "-z"], cwd)
+    # Enumerate + diff from the repo top-level so untracked blocks carry repo-root-relative paths
+    # (matching the tracked `git diff` and what .aeviewignore anchors against), regardless of which
+    # subdirectory aeview was invoked from.
+    top = Path(_git(["rev-parse", "--show-toplevel"], cwd).strip())
+    listing = _git(["ls-files", "--others", "--exclude-standard", "-z"], top)
     parts: list[str] = []
     for rel in (p for p in listing.split("\0") if p):
-        res = run_sync(
-            ["git", "-c", "core.pager=cat", "-c", "core.quotePath=false",
-             "diff", "--no-index", "--", "/dev/null", rel],
-            cwd=cwd,
-        )
+        res = run_sync([*_GIT_BASE, "diff", "--no-index", "--", "/dev/null", rel], cwd=top)
         out = res.stdout
         if not out:
             continue

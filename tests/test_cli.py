@@ -312,6 +312,11 @@ def test_dry_run_render_lists_ignored_files():
     assert "ignored (2 via .aeviewignore): dist/x.js, uv.lock" in out
 
 
+def test_dry_run_render_no_ignored_shows_dash():
+    out = _render_dry_run(_dry_plan(1), Settings())  # the common case: nothing ignored
+    assert "ignored (0 via .aeviewignore): —" in out
+
+
 def test_dry_run_render_multi_with_dedup_harness():
     out = _render_dry_run(_dry_plan(2), _settings_with_dedup())
     assert "roster (2 reviews):" in out  # plural
