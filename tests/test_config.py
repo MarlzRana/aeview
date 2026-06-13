@@ -29,18 +29,7 @@ def test_ensure_seeded_writes_defaults(aeview_home):
     assert (aeview_home / "DEDUPLICATION.md").exists()
     default_md = aeview_home / "reviewers" / "default" / "REVIEWER.md"
     assert default_md.exists()
-    assert "harnesses:" in default_md.read_text()  # harnesses live in the frontmatter now (N1)
-    assert not (aeview_home / "reviewers" / "default" / "harness.json").exists()  # no longer seeded
-
-
-def test_ensure_seeded_removes_stale_default_harness_json(aeview_home):
-    # An upgrade can leave the old machine-seeded default harness.json; ensure_seeded removes it so
-    # the now fail-loud resolver doesn't reject the default reviewer.
-    ensure_seeded()
-    stale = aeview_home / "reviewers" / "default" / "harness.json"
-    stale.write_text('{"harnesses": [{"harness": "claude-code", "model": "claude-opus-4-8"}]}')
-    ensure_seeded()
-    assert not stale.exists()
+    assert "harnesses:" in default_md.read_text()  # the default ships its harnesses in frontmatter
 
 
 def test_ensure_seeded_never_clobbers(aeview_home):

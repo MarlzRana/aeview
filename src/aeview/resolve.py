@@ -190,14 +190,6 @@ def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Rev
 def _resolve_harnesses(
     harnesses: list[HarnessInstance] | None, reviewer_dir: Path, settings: Settings
 ) -> list[HarnessRef]:
-    # Fail loud on a leftover harness.json instead of silently falling back to the global default
-    # — harnesses moved into the REVIEWER.md frontmatter and the file is no longer read.
-    legacy = reviewer_dir / "harness.json"
-    if legacy.is_file():
-        raise ResolveError(
-            f"{legacy} is no longer supported; move its harnesses into the REVIEWER.md "
-            f"`harnesses:` frontmatter block"
-        )
     # An omitted `harnesses:` key selects the global fallback; a present one is the reviewer's
     # own choice (a present-but-empty block was already rejected in parse_reviewer).
     if harnesses is None:

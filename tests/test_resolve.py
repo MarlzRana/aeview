@@ -44,7 +44,7 @@ def test_default_resolves_from_home(aeview_home, tmp_path):
     r = resolve_reviewer("default", tmp_path, _settings())
     assert r.name == "default"
     assert r.source == aeview_home / "reviewers" / "default"
-    # The seeded default's harnesses come from its frontmatter (N1), not the fallback — assert the
+    # The seeded default's harnesses come from its frontmatter, not the fallback — assert the
     # resolved instance so a malformed/dropped seeded harnesses block is caught, not masked.
     assert [(h.instance.harness, h.instance.model) for h in r.harnesses] == [
         ("claude-code", "claude-opus-4-8")
@@ -180,15 +180,6 @@ def test_empty_harnesses_block_raises(tmp_path):
         resolve_reviewer("python", tmp_path, _settings())
 
 
-def test_legacy_harness_json_is_rejected(tmp_path):
-    # A leftover harness.json beside a reviewer with NO harnesses: block would have silently
-    # fallen back to the global default; it must fail loud (not return the fallback harnesses).
-    d = make_reviewer(tmp_path, "python")  # no harnesses: block -> would otherwise use fallback
-    (d / "harness.json").write_text('{"harnesses": []}')
-    with pytest.raises(ResolveError, match="no longer supported"):
-        resolve_reviewer("python", tmp_path, _settings())
-
-
 def test_blank_harnesses_block_raises(tmp_path):
     # A present-but-null `harnesses:` is a likely mistake; it must error, not select the fallback.
     d = tmp_path / ".aeview" / "reviewers" / "python"
@@ -199,8 +190,8 @@ def test_blank_harnesses_block_raises(tmp_path):
 
 
 def test_auto_activate_paths_parsed_from_frontmatter(tmp_path):
-    # Validated + parsed in N1 (activation lands in N3); pins the kebab-case alias so a regression
-    # there is caught before N3 consumes it.
+    # Parsed + validated as frontmatter (the path-matching that consumes it lives elsewhere);
+    # pins the kebab-case alias so a regression there is caught.
     d = tmp_path / ".aeview" / "reviewers" / "py"
     d.mkdir(parents=True)
     (d / "REVIEWER.md").write_text(

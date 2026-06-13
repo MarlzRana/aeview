@@ -91,11 +91,6 @@ def ensure_seeded() -> Path:
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(_package_data(src_name), encoding="utf-8")
-    # The default reviewer's harnesses moved into its REVIEWER.md frontmatter. Remove the obsolete
-    # machine-seeded harness.json (aeview's own past artifact, never user-authored) so the now
-    # fail-loud resolver doesn't reject the default on an upgrade. User-authored harness.json files
-    # are left to fail loud on purpose, prompting their own migration.
-    (home / "reviewers" / "default" / "harness.json").unlink(missing_ok=True)
     return home
 
 
