@@ -350,11 +350,12 @@ async def _run_reviews_and_merge(
 def _render_dry_run(plan: _Plan, settings: Settings) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
+    ignored_display = ", ".join(plan.ignored) or "—"
     lines = [
         "dry run — no model calls, nothing persisted",
         f"scope: {_scope_label(bundle.scope)}",
         f"bundle: {mode}, {bundle.diff_bytes} bytes",
-        f"ignored ({len(plan.ignored)} via .aeviewignore): {', '.join(plan.ignored) or '—'}",
+        f"ignored ({len(plan.ignored)} via .aeviewignore): {ignored_display}",
         f"reviewers: {', '.join(plan.names)}",
         f"roster ({len(plan.roster)} review{'' if len(plan.roster) == 1 else 's'}):",
     ]

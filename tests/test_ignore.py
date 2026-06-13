@@ -125,7 +125,8 @@ def test_rename_into_ignored_path_is_dropped(tmp_path):
         "--- a/src/x.py\n+++ b/generated/x.py\n@@ -1 +1 @@\n-x\n+y\n"
     )
     out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["generated/"])))
-    assert ignored == ["generated/x.py"] and out == ""
+    assert ignored == ["generated/x.py"]
+    assert out == ""
 
 
 def test_copy_to_reviewable_path_is_kept(tmp_path):
@@ -145,7 +146,8 @@ def test_all_ignored_drops_preamble(tmp_path):
     # result is genuinely empty and "nothing to review" can fire for an all-ignored commit.
     diff = "commit abc123\nAuthor: x\n\n    a message\n\n" + _diff("uv.lock")
     out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert out == "" and ignored == ["uv.lock"]
+    assert ignored == ["uv.lock"]
+    assert out == ""
 
 
 def test_rename_only_and_mode_only_blocks_match_by_header(tmp_path):
@@ -155,10 +157,12 @@ def test_rename_only_and_mode_only_blocks_match_by_header(tmp_path):
         "rename from old.lock\nrename to new.lock\n"
     )
     out, ignored = filter_diff(rename_only, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert ignored == ["new.lock"] and out == ""  # destination is new.lock
+    assert ignored == ["new.lock"]  # destination is new.lock
+    assert out == ""
     mode_only = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
     out, ignored = filter_diff(mode_only, tmp_path, _specs((tmp_path, ["*.sh"])))
-    assert ignored == ["run.sh"] and out == ""
+    assert ignored == ["run.sh"]
+    assert out == ""
 
 
 # --- filter_resolved (integration with a real repo) ------------------------------------
@@ -239,7 +243,8 @@ def test_combined_diff_passes_through_unfiltered(tmp_path):
     # unchanged (documented limitation). Pins that boundary against _split_blocks changes.
     diff = "diff --cc uv.lock\nindex 1,2..3\n--- a/uv.lock\n+++ b/uv.lock\n@@@ -1 -1 +1 @@@\n++x\n"
     out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert ignored == [] and out == diff
+    assert ignored == []
+    assert out == diff
 
 
 def test_filter_resolved_clears_inspect_when_filtered(aeview_home, git_repo):
@@ -255,6 +260,29 @@ def test_filter_resolved_clears_inspect_when_filtered(aeview_home, git_repo):
     new, ignored = filter_resolved(resolved, git_repo)
     assert ignored == ["uv.lock"]
     assert new.inspect == []
+
+
+def test_filter_resolved_no_match_preserves_scope_and_inspect(aeview_home, git_repo):
+    # An ignore file exists but matches nothing -> short-circuit: the scope is returned unchanged
+    # (same object) so inspect is preserved (not cleared like the matched path does).
+    (git_repo / ".aeviewignore").write_text("*.lock\n")
+    resolved = ResolvedScope(
+        spec=ScopeSpec(type="branch", base="origin/main"),
+        diff=_diff("app.py"),
+        summary="s",
+        inspect=["git diff origin/main"],
+    )
+    new, ignored = filter_resolved(resolved, git_repo)
+    assert ignored == []
+    assert new is resolved
+
+
+def test_load_specs_skips_invalid_utf8(aeview_home, tmp_path):
+    # A non-UTF-8 .aeviewignore raises UnicodeDecodeError (a ValueError) on read; the except must
+    # catch it and skip, never aborting a review.
+    (tmp_path / ".aeviewignore").write_bytes(b"\xff\xfe*.lock\n")
+    specs = _load_specs(tmp_path)
+    assert all(root != tmp_path for root, _ in specs)
 
 
 def test_subdir_cwd_anchors_against_repo_root(aeview_home, git_repo):

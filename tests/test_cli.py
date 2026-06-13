@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -277,6 +278,20 @@ def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude
     monkeypatch.chdir(git_repo)
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])
     # On stderr specifically, so it never pollutes the report/--json on stdout.
+    assert "excluded 1 file(s) via .aeviewignore" in result.stderr
+
+
+def test_run_json_stdout_unpolluted_by_ignore_notice(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # --json: stdout must be the parseable report only; the exclusion notice goes to stderr.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    (git_repo / "uv.lock").write_text("lock\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
+    json.loads(result.stdout)  # stdout parses as the report JSON
+    assert ".aeviewignore" not in result.stdout
     assert "excluded 1 file(s) via .aeviewignore" in result.stderr
 
 

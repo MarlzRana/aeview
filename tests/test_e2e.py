@@ -139,6 +139,21 @@ def test_plan_filters_untracked_from_subdirectory(aeview_home, git_repo):
     assert "b/src/feature.py" in plan.bundle.diff
 
 
+@pytest.mark.parametrize("cfg", ["diff.mnemonicprefix", "diff.noprefix"])
+def test_plan_filters_under_hostile_diff_config(aeview_home, git_repo, cfg):
+    # A repo gitconfig that drops/renames the a//b/ prefixes must not defeat filtering — the forced
+    # _GIT_BASE flags override it so the diff parser always sees standard prefixes.
+    git(git_repo, "config", cfg, "true")
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    (git_repo / "uv.lock").write_text("lock\n")
+    plan = _plan_run(
+        ["default"], "working-tree", None, git_repo, False, False, None, load_settings()
+    )
+    assert "uv.lock" in plan.ignored
+    assert "uv.lock" not in plan.bundle.diff
+
+
 def test_plan_filters_commit_scope(aeview_home, git_repo):
     # A single commit touching both an ignored and a kept file: git show -> filter through planning.
     commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
