@@ -120,6 +120,16 @@ def _is_repo(cwd: Path) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "true"
 
 
+def repo_root(cwd: Path) -> Path | None:
+    """The repository top-level for `cwd`, or None when `cwd` isn't inside a git work tree.
+    Tracked/untracked diff paths are repo-root-relative, so `.aeviewignore` filtering and
+    auto-activation anchor those paths against this root before matching."""
+    res = run_sync(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
+    if res.returncode != 0:
+        return None
+    return Path(res.stdout.strip())
+
+
 def _has_head(cwd: Path) -> bool:
     return _git_ok(["rev-parse", "--verify", "HEAD"], cwd)
 

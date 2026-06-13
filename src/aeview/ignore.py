@@ -27,9 +27,8 @@ from pathlib import Path
 
 from pathspec import GitIgnoreSpec
 
-from .process import run_sync
 from .resolve import candidate_rungs
-from .scope import ResolvedScope, summarize_diff
+from .scope import ResolvedScope, repo_root, summarize_diff
 
 IGNORE_FILE = ".aeviewignore"
 
@@ -118,14 +117,23 @@ def _block_path(block: str) -> str | None:
     return plus or rename_to or header_new
 
 
-def filter_diff(diff: str, repo_root: Path, specs: RungSpecs) -> tuple[str, list[str]]:
+def changed_paths(diff: str) -> list[str]:
+    """The destination (new) path of every file block in a unified diff, in order. Reuses the
+    same block-splitting + destination-path logic as filtering, so auto-activation matches against
+    exactly the files that survived `.aeviewignore` (and ignores a spoofed `+++` content line the
+    same way). Blocks whose path can't be parsed (e.g. a `diff --cc` merge block) are skipped."""
+    _, blocks = _split_blocks(diff)
+    return [p for block in blocks if (p := _block_path(block)) is not None]
+
+
+def filter_diff(diff: str, root: Path, specs: RungSpecs) -> tuple[str, list[str]]:
     """Drop diff blocks matching `.aeviewignore`; return (kept diff, sorted ignored paths)."""
     preamble, blocks = _split_blocks(diff)
     kept_blocks: list[str] = []
     ignored: set[str] = set()
     for block in blocks:
         rel = _block_path(block)
-        if rel is not None and _is_ignored(repo_root / rel, specs):
+        if rel is not None and _is_ignored(root / rel, specs):
             ignored.add(rel)
             continue
         kept_blocks.append(block)
@@ -146,10 +154,10 @@ def filter_resolved(resolved: ResolvedScope, cwd: Path) -> tuple[ResolvedScope, 
     specs = _load_specs(cwd)
     if not specs:
         return resolved, []
-    res = run_sync(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
-    if res.returncode != 0:
+    root = repo_root(cwd)
+    if root is None:
         return resolved, []
-    filtered, ignored = filter_diff(resolved.diff, Path(res.stdout.strip()), specs)
+    filtered, ignored = filter_diff(resolved.diff, root, specs)
     if not ignored:
         return resolved, []
     # Clear the inspect hints too: in self-collect they tell the harness to re-run `git diff`, which

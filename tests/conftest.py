@@ -8,17 +8,28 @@ from pathlib import Path
 import pytest
 
 
-def make_reviewer(base: Path, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
+def make_reviewer(
+    base: Path,
+    name: str,
+    *,
+    body="BODY",
+    fm_name=None,
+    harnesses=None,
+    auto_activate_paths=None,
+) -> Path:
     """Create a reviewer at <base>/.aeview/reviewers/<name>/ with harnesses in its frontmatter.
 
     `harnesses` is a list of dicts (or [] for an explicit empty block); None omits the block so
-    the reviewer falls back to settings.fallbackReviewerHarnesses. JSON is valid YAML, so the
-    list is embedded as a flow sequence in the frontmatter."""
+    the reviewer falls back to settings.fallbackReviewerHarnesses. `auto_activate_paths` is a list
+    of globs (or None to omit the key) written under the kebab-case `auto-activate-paths` alias.
+    JSON is valid YAML, so each list is embedded as a flow sequence in the frontmatter."""
     d = base / ".aeview" / "reviewers" / name
     d.mkdir(parents=True, exist_ok=True)
     front = [f"name: {fm_name or name}", "description: d"]
     if harnesses is not None:
         front.append(f"harnesses: {json.dumps(harnesses)}")
+    if auto_activate_paths is not None:
+        front.append(f"auto-activate-paths: {json.dumps(auto_activate_paths)}")
     fm = "\n".join(front)
     (d / "REVIEWER.md").write_text(f"---\n{fm}\n---\n{body}\n")
     return d

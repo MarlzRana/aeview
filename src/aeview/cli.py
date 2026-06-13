@@ -21,6 +21,7 @@ from typing import Annotated
 import typer
 
 from . import __version__
+from .activate import select_auto_reviewers
 from .bundle import Bundle, build_bundle
 from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
@@ -51,7 +52,7 @@ from .runstore import (
     reconcile_interrupted,
 )
 from .schema import DedupPlan, Invocation, Report, RosterEntry, RunManifest, ScopeSpec
-from .scope import ScopeError, parse_scope
+from .scope import ResolvedScope, ScopeError, parse_scope, repo_root
 from .scope import resolve as resolve_scope
 
 app = typer.Typer(
@@ -160,6 +161,11 @@ def run(
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
         typer.echo(f"aeview: excluded {len(plan.ignored)} file(s) via .aeviewignore", err=True)
+    if plan.auto_activated:  # surface which reviewers the changed paths pulled in — never silently
+        joined = ", ".join(plan.auto_activated)
+        typer.echo(
+            f"aeview: auto-activated {len(plan.auto_activated)} reviewer(s): {joined}", err=True
+        )
 
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
@@ -172,14 +178,16 @@ def run(
     raise typer.Exit(exit_code(report))
 
 
-def _split_reviewers(values: list[str] | None) -> list[str]:
+def _split_reviewers(values: list[str] | None) -> list[str] | None:
     """Flatten --reviewers: comma-separated (a,b) and/or repeated (--reviewers a --reviewers b).
 
-    Omitting --reviewers uses the default reviewer; passing it *blank* (e.g. `--reviewers ""`,
+    Returns None when --reviewers is omitted entirely — the signal for auto mode (run `default`
+    plus every reviewer whose auto-activate-paths match). Any explicit value disables auto mode,
+    so `--reviewers default` runs only the default. Passing it *blank* (e.g. `--reviewers ""`,
     usually an empty shell variable) is a mistake and errors rather than silently defaulting.
     """
     if values is None:
-        return ["default"]
+        return None
     names = [n.strip() for item in values for n in item.split(",") if n.strip()]
     if not names:
         raise ResolveError("--reviewers was given but empty; omit it to use the default reviewer")
@@ -235,10 +243,11 @@ class _Plan:
     roster: list[RosterEntry]
     bundle: Bundle
     ignored: list[str]  # paths excluded by .aeviewignore (surfaced; never silently dropped)
+    auto_activated: list[str]  # reviewers auto mode added beyond default (empty otherwise)
 
 
 def _plan_run(
-    names: list[str],
+    names: list[str] | None,
     stype: str,
     value: str | None,
     cwd: Path,
@@ -248,7 +257,47 @@ def _plan_run(
     settings: Settings,
 ) -> _Plan:
     """Resolve reviewers + scope and build the bundle — the sync front half shared by `run` and
-    `--dry-run`. Raises ScopeError/ResolveError; makes no model calls and writes no run dir."""
+    `--dry-run`. Raises ScopeError/ResolveError; makes no model calls and writes no run dir.
+
+    Scope is resolved + .aeviewignore-filtered first because auto mode (names is None) selects
+    reviewers from the changed files; the same order means a scope error surfaces ahead of a
+    reviewer error in every mode.
+    """
+    resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
+    if resolved.is_empty:
+        raise ScopeError(f"nothing to review for scope '{stype}'")
+    # Drop .aeviewignore'd files before measuring/bundling, so the byte count, the prompt, and
+    # auto-activation only see what's actually under review.
+    resolved, ignored = filter_resolved(resolved, cwd)
+    if resolved.is_empty:
+        raise ScopeError(
+            f"nothing to review for scope '{stype}' (all changes matched .aeviewignore)"
+        )
+
+    reviewers, names, auto_activated = _select_reviewers(names, resolved, cwd, settings)
+    roster = build_roster(reviewers)
+    if not roster:
+        raise ResolveError(
+            "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
+        )
+    return _Plan(
+        names=names,
+        reviewers=reviewers,
+        roster=roster,
+        bundle=build_bundle(resolved),
+        ignored=ignored,
+        auto_activated=auto_activated,
+    )
+
+
+def _select_reviewers(
+    names: list[str] | None, resolved: ResolvedScope, cwd: Path, settings: Settings
+) -> tuple[list[Reviewer], list[str], list[str]]:
+    """Pick the reviewer set. Returns (reviewers, resolved names, auto-activated names). None =
+    auto mode; `all` = every discovered reviewer; otherwise the explicit names, resolved fail-fast
+    (you asked for these specific ones). Only auto mode reports auto-activated names."""
+    if names is None:
+        return _select_auto(resolved, cwd, settings)
     if "all" in names:
         discovered = discover_reviewers(cwd)
         if not discovered:
@@ -257,34 +306,28 @@ def _plan_run(
         reviewers = _resolve_all_lenient(discovered, cwd, settings)
         if not reviewers:
             raise ResolveError("every discovered reviewer had invalid config")
-        names = [r.name for r in reviewers]
-    else:
-        # Explicitly named reviewers fail fast — you asked for these specific ones.
-        names = list(dict.fromkeys(names))  # de-dupe, preserve order
-        reviewers = [resolve_reviewer(name, cwd, settings) for name in names]
-    roster = build_roster(reviewers)
-    if not roster:
-        raise ResolveError(
-            "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
-        )
+        return reviewers, [r.name for r in reviewers], []
+    names = list(dict.fromkeys(names))  # de-dupe, preserve order
+    return [resolve_reviewer(name, cwd, settings) for name in names], names, []
 
-    resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
-    if resolved.is_empty:
-        raise ScopeError(f"nothing to review for scope '{stype}'")
-    # Drop .aeviewignore'd files before measuring/bundling, so the byte count and the prompt only
-    # see what's actually under review.
-    resolved, ignored = filter_resolved(resolved, cwd)
-    if resolved.is_empty:
-        raise ScopeError(
-            f"nothing to review for scope '{stype}' (all changes matched .aeviewignore)"
-        )
-    return _Plan(
-        names=names,
-        reviewers=reviewers,
-        roster=roster,
-        bundle=build_bundle(resolved),
-        ignored=ignored,
-    )
+
+def _select_auto(
+    resolved: ResolvedScope, cwd: Path, settings: Settings
+) -> tuple[list[Reviewer], list[str], list[str]]:
+    """Auto mode: always run `default` (fail-fast — the package-seeded baseline; a broken default
+    is a real problem), plus every reviewer whose auto-activate-paths match a changed file (lenient
+    skip-with-warning, like `all`). The non-git `patch` scope has no repo root to anchor paths,
+    so it runs default alone. `names`/`auto_activated` reflect only reviewers that actually run."""
+    default = resolve_reviewer("default", cwd, settings)
+    # patch-scope paths aren't repo-root-relative (the same reason .aeviewignore skips it), and a
+    # non-git cwd has no root to anchor against — either way only the default baseline runs.
+    root = None if resolved.spec.type == "patch" else repo_root(cwd)
+    matched = select_auto_reviewers(cwd, root, resolved.diff) if root is not None else []
+    extra = [name for name in matched if name != "default"]  # default already in; don't re-resolve
+    extra_reviewers = _resolve_all_lenient(extra, cwd, settings)
+    reviewers = [default, *extra_reviewers]
+    names = list(dict.fromkeys(r.name for r in reviewers))
+    return reviewers, names, [r.name for r in extra_reviewers]
 
 
 async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
@@ -351,11 +394,13 @@ def _render_dry_run(plan: _Plan, settings: Settings) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
     ignored_display = ", ".join(plan.ignored) or "—"
+    activated_display = ", ".join(plan.auto_activated) or "—"
     lines = [
         "dry run — no model calls, nothing persisted",
         f"scope: {_scope_label(bundle.scope)}",
         f"bundle: {mode}, {bundle.diff_bytes} bytes",
         f"ignored ({len(plan.ignored)} via .aeviewignore): {ignored_display}",
+        f"auto-activated ({len(plan.auto_activated)} via auto-activate-paths): {activated_display}",
         f"reviewers: {', '.join(plan.names)}",
         f"roster ({len(plan.roster)} review{'' if len(plan.roster) == 1 else 's'}):",
     ]

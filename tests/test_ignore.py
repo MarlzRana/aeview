@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pathspec import GitIgnoreSpec
 
-from aeview.ignore import _is_ignored, _load_specs, filter_diff, filter_resolved
+from aeview.ignore import _is_ignored, _load_specs, changed_paths, filter_diff, filter_resolved
 from aeview.schema import ScopeSpec
 from aeview.scope import ResolvedScope
 
@@ -60,6 +60,20 @@ def test_filter_diff_no_match_is_unchanged(tmp_path):
     out, ignored = filter_diff(diff, tmp_path, _specs((tmp_path, ["*.lock"])))
     assert ignored == []
     assert out == diff
+
+
+def test_changed_paths_returns_destinations():
+    # Auto-activation matches against these: the destination (new) path of each file block.
+    diff = "commit abc\n\n" + _diff("src/app.py", "uv.lock")
+    assert changed_paths(diff) == ["src/app.py", "uv.lock"]
+
+
+def test_changed_paths_uses_new_side_of_rename():
+    block = (
+        "diff --git a/old/name.py b/new/name.py\nsimilarity index 100%\n"
+        "rename from old/name.py\nrename to new/name.py\n"
+    )
+    assert changed_paths(block) == ["new/name.py"]
 
 
 def test_filter_diff_preserves_preamble(tmp_path):

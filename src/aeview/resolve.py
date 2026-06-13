@@ -129,6 +129,15 @@ def _reviewer_dir(rung: Path, name: str) -> Path:
     return rung / _AEVIEW_DIR / _REVIEWERS / name
 
 
+def reviewer_scope_path(source: Path) -> Path:
+    """The directory a reviewer's `auto-activate-paths` are anchored at: the parent of its
+    `.aeview` dir (the inverse of `_reviewer_dir`). A repo reviewer at
+    `<repo>/.aeview/reviewers/<name>` scopes to `<repo>`; the home reviewer at
+    `~/.aeview/reviewers/<name>` scopes to `~`. Auto-activation only considers a changed file
+    that lives under this path, matched relative to it."""
+    return source.parents[2]  # <scope>/.aeview/reviewers/<name> -> <scope>
+
+
 def resolve_reviewer(name: str, cwd: Path, settings: Settings) -> Reviewer:
     for rung in candidate_rungs(cwd):
         reviewer_file = _reviewer_dir(rung, name) / REVIEWER_FILE

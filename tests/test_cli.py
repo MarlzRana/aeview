@@ -53,8 +53,10 @@ def test_dedup_plan_none_when_unconfigured():
     assert _dedup_plan(_roster(3), Settings(deduplication_harness=None)) is None
 
 
-def test_default_when_none():
-    assert _split_reviewers(None) == ["default"]
+def test_none_signals_auto_mode():
+    # Omitting --reviewers returns None: the auto-mode signal (default + path-activated reviewers),
+    # distinct from an explicit `--reviewers default` which runs only the default.
+    assert _split_reviewers(None) is None
 
 
 def test_comma_separated_single_flag():
@@ -301,6 +303,7 @@ def _dry_plan(
     mode: str = "inline",
     thinking: str | None = None,
     ignored: list[str] | None = None,
+    auto_activated: list[str] | None = None,
 ) -> _Plan:
     roster = [
         RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}",
@@ -311,7 +314,14 @@ def _dry_plan(
         mode=mode, scope=ScopeSpec(type="branch", base="main"),
         diff="x", summary="s", diff_bytes=123,
     )
-    return _Plan(names=["r"], reviewers=[], roster=roster, bundle=bundle, ignored=ignored or [])
+    return _Plan(
+        names=["r"],
+        reviewers=[],
+        roster=roster,
+        bundle=bundle,
+        ignored=ignored or [],
+        auto_activated=auto_activated or [],
+    )
 
 
 def test_dry_run_render_single_review_skips_dedup():

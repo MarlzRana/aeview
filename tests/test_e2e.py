@@ -167,6 +167,94 @@ def test_plan_filters_commit_scope(aeview_home, git_repo):
     assert "b/mod.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
 
 
+_HARNESS = [{"harness": "claude-code", "model": "opus"}]
+
+
+def _auto_plan(cwd):
+    # Bare `aeview run` (no --reviewers) -> auto mode: default + path-activated reviewers.
+    return _plan_run(None, "working-tree", None, cwd, False, False, None, load_settings())
+
+
+def test_auto_mode_activates_matching_reviewer(aeview_home, git_repo):
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _auto_plan(git_repo)
+    assert "default" in plan.names and "py" in plan.names
+    assert plan.auto_activated == ["py"]
+
+
+def test_auto_mode_default_only_when_nothing_matches(aeview_home, git_repo):
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["nomatch/**"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _auto_plan(git_repo)
+    assert plan.names == ["default"]  # default is the always-on baseline
+    assert plan.auto_activated == []
+
+
+def test_explicit_default_bypasses_activation(aeview_home, git_repo):
+    # `--reviewers default` is explicit -> activation is disabled even though py's glob matches.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _plan_run(
+        ["default"], "working-tree", None, git_repo, False, False, None, load_settings()
+    )
+    assert plan.names == ["default"]
+    assert plan.auto_activated == []
+
+
+def test_all_bypasses_activation(aeview_home, git_repo):
+    # `all` sweeps every discovered reviewer regardless of paths, and reports no auto-activation.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["nomatch/**"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _plan_run(["all"], "working-tree", None, git_repo, False, False, None, load_settings())
+    assert {"default", "py"} <= set(plan.names)
+    assert plan.auto_activated == []
+
+
+def test_auto_fails_fast_on_broken_default(aeview_home, git_repo):
+    # A broken default shadows the seeded one (nearest rung wins); auto mode must fail fast on it.
+    bad = git_repo / ".aeview" / "reviewers" / "default"
+    bad.mkdir(parents=True)
+    (bad / "REVIEWER.md").write_text("---\nname: default\nbogus_key: 1\n---\nb\n")
+    (git_repo / "feature.py").write_text("x = 1\n")
+    with pytest.raises(ResolveError):
+        _auto_plan(git_repo)
+
+
+def test_auto_lenient_skips_broken_activated(aeview_home, git_repo):
+    # A path-matched reviewer with broken config (dir name != frontmatter name) is skipped, while a
+    # valid matched sibling still runs and default is unaffected.
+    paths = ["*.py"]
+    make_reviewer(git_repo, "good", harnesses=_HARNESS, auto_activate_paths=paths)
+    make_reviewer(git_repo, "bad", fm_name="WRONG", harnesses=_HARNESS, auto_activate_paths=paths)
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _auto_plan(git_repo)
+    assert "good" in plan.names and "default" in plan.names
+    assert "bad" not in plan.names
+    assert plan.auto_activated == ["good"]
+
+
+def test_auto_activation_respects_aeviewignore(aeview_home, git_repo):
+    # The only file 'locks' would match is excluded by .aeviewignore, so it doesn't auto-activate;
+    # the kept .py file keeps the scope non-empty and default still runs.
+    commit(git_repo, ".aeviewignore", "*.lock\n", "ignore")
+    make_reviewer(git_repo, "locks", harnesses=_HARNESS, auto_activate_paths=["*.lock"])
+    (git_repo / "uv.lock").write_text("x\n")
+    (git_repo / "feature.py").write_text("y = 1\n")
+    plan = _auto_plan(git_repo)
+    assert plan.auto_activated == []
+    assert "default" in plan.names
+
+
+def test_auto_patch_scope_runs_default_only(aeview_home, git_repo):
+    # patch-scope paths aren't repo-root-relative, so auto mode can't anchor them -> default alone.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    plan = _plan_run(None, "patch", None, git_repo, False, False, patch, load_settings())
+    assert plan.names == ["default"]
+    assert plan.auto_activated == []
+
+
 def test_unknown_reviewer_raises(aeview_home, git_repo, stub_claude):
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     with pytest.raises(ResolveError):
