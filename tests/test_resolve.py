@@ -111,7 +111,7 @@ def test_unterminated_frontmatter_raises_resolve_error(tmp_path):
 # --- harness resolution ----------------------------------------------------------------
 
 
-def test_harness_json_used_when_present(tmp_path):
+def test_frontmatter_harnesses_used_when_present(tmp_path):
     make_reviewer(tmp_path, "python", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
     r = resolve_reviewer("python", tmp_path, _settings())
     assert [h.instance.harness for h in r.harnesses] == ["codex"]
@@ -119,7 +119,7 @@ def test_harness_json_used_when_present(tmp_path):
 
 
 def test_harness_falls_back_to_settings(tmp_path):
-    make_reviewer(tmp_path, "python")  # no harness.json
+    make_reviewer(tmp_path, "python")  # no harnesses: block in frontmatter
     r = resolve_reviewer("python", tmp_path, _settings("sonnet"))
     assert [h.instance.model for h in r.harnesses] == ["sonnet"]
 
@@ -152,15 +152,24 @@ def test_instance_ids_never_collide_with_escalated_form(tmp_path):
     assert len(ids) == len(set(ids))  # all unique -> no file clobbering
 
 
-def test_malformed_harness_json_raises_resolve_error(tmp_path):
-    d = make_reviewer(tmp_path, "python", harnesses=[{"harness": "claude-code", "model": "m"}])
-    (d / "harness.json").write_text("{not valid json")
-    with pytest.raises(ResolveError, match="invalid"):
+def test_malformed_frontmatter_harnesses_raises_resolve_error(tmp_path):
+    # A harness entry missing a required field (model) fails frontmatter validation.
+    make_reviewer(tmp_path, "python", harnesses=[{"harness": "codex"}])
+    with pytest.raises(ResolveError, match="invalid frontmatter"):
         resolve_reviewer("python", tmp_path, _settings())
 
 
-def test_empty_harness_json_raises(tmp_path):
-    make_reviewer(tmp_path, "python", harnesses=[])
+def test_unknown_frontmatter_key_raises_resolve_error(tmp_path):
+    # extra="forbid" turns a typo'd key into a clear error instead of silently ignoring it.
+    d = tmp_path / ".aeview" / "reviewers" / "python"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text("---\nname: python\ndescription: d\nharneses: []\n---\nbody\n")
+    with pytest.raises(ResolveError, match="invalid frontmatter"):
+        resolve_reviewer("python", tmp_path, _settings())
+
+
+def test_empty_harnesses_block_raises(tmp_path):
+    make_reviewer(tmp_path, "python", harnesses=[])  # explicit `harnesses: []`
     with pytest.raises(ResolveError, match="no harnesses"):
         resolve_reviewer("python", tmp_path, _settings())
 
@@ -190,8 +199,8 @@ def test_discover_reviewers_includes_default_and_repo(aeview_home, tmp_path):
 
 
 def test_bundled_repo_reviewers_resolve(tmp_path):
-    # Guards the repo's own .aeview/reviewers/* configs: each resolves (valid harness.json,
-    # dir == frontmatter name) and names a supported harness. Models aren't validated here
+    # Guards the repo's own .aeview/reviewers/* configs: each resolves (valid frontmatter
+    # harnesses, dir == frontmatter name) and names a supported harness. Models aren't validated
     # (they're free-form strings checked only at run time), but a typo'd/broken checked-in
     # config that synthetic tests would miss is caught.
     reviewers_dir = _REPO_ROOT / ".aeview" / "reviewers"

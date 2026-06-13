@@ -1,5 +1,0 @@
-{
-  "harnesses": [
-    { "harness": "codex", "model": "gpt-5.5", "thinking": "xhigh" }
-  ]
-}

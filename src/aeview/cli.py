@@ -259,7 +259,9 @@ def _plan_run(
         reviewers = [resolve_reviewer(name, cwd, settings) for name in names]
     roster = build_roster(reviewers)
     if not roster:
-        raise ResolveError("no harnesses resolved (check harness.json / fallbackReviewerHarnesses)")
+        raise ResolveError(
+            "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
+        )
 
     resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
     if resolved.is_empty:
@@ -708,18 +710,17 @@ def reviewers(
 # fullmatch (not match): re's `$` also matches before a trailing newline, so `match` would let
 # a name like "foo\n" through and create a newline-bearing reviewer dir.
 _SAFE_REVIEWER_NAME = re.compile(r"[A-Za-z0-9_-]+")
-_STARTER_HARNESS = (
-    '{\n  "harnesses": [\n    { "harness": "claude-code", "model": "claude-opus-4-8" }\n  ]\n}\n'
-)
+_STARTER_HARNESS_BLOCK = "harnesses:\n  - { harness: claude-code, model: claude-opus-4-8 }\n"
 
 
-def _starter_reviewer(name: str) -> str:
+def _starter_reviewer(name: str, with_harness: bool) -> str:
     return (
         f"---\n"
         # Quote the name: an unquoted YAML 1.1 scalar like `yes`/`no`/`null` parses as a
         # bool/None, so `init yes` would scaffold a reviewer whose frontmatter name isn't "yes".
         f'name: "{name}"\n'
         f"description: TODO one-line summary of what this reviewer checks.\n"
+        f"{_STARTER_HARNESS_BLOCK if with_harness else ''}"
         f"---\n\n"
         f"You are a focused code reviewer. TODO: describe the specific class of problems this\n"
         f"reviewer should hunt for in the change under review.\n\n"
@@ -739,10 +740,13 @@ def init(
     name: Annotated[str, typer.Argument(help="Reviewer name (the dir + frontmatter name).")],
     with_harness: Annotated[
         bool,
-        typer.Option("--with-harness", help="Also scaffold a harness.json (claude-code/opus)."),
+        typer.Option(
+            "--with-harness",
+            help="Scaffold a harnesses: block (claude-code/opus) in the frontmatter.",
+        ),
     ] = False,
 ) -> None:
-    """Scaffold a repo reviewer at .aeview/reviewers/<name>/ (REVIEWER.md, optional harness)."""
+    """Scaffold a repo reviewer (REVIEWER.md with its harnesses in the frontmatter)."""
     if name in RESERVED_REVIEWER_NAMES:
         typer.echo(f"aeview: '{name}' is reserved (it's a --reviewers keyword)", err=True)
         raise typer.Exit(EXIT_ERROR)
@@ -752,26 +756,17 @@ def init(
         )
         raise typer.Exit(EXIT_ERROR)
     target = Path.cwd() / ".aeview" / "reviewers" / name
-    # Claim the reviewer dir atomically (exclusive create). This is the real guard against a
-    # concurrent init and against adopting a crashed init's leftover files — a marker-only
-    # `REVIEWER.md` check would let two inits race, or a later harness-less init publish a stale
-    # harness.json left behind by an earlier crashed `--with-harness` run.
+    # Claim the reviewer dir atomically (exclusive create) — the real guard against a concurrent
+    # init and against adopting a crashed init's leftover dir (a marker-only check would race).
     try:
         target.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
         typer.echo(f"aeview: reviewer '{name}' already exists at {target}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
+    # REVIEWER.md is the visibility marker — discovery keys on it — written atomically so a
+    # concurrent reader never sees a half-written marker. Harnesses live in its frontmatter now,
+    # so there's a single file to create (--with-harness just adds the block).
     reviewer_md = target / "REVIEWER.md"
-    created: list[Path] = []
-    if with_harness:
-        harness_json = target / "harness.json"
-        atomic_write_text(harness_json, _STARTER_HARNESS)
-        created.append(harness_json)
-    # REVIEWER.md is the visibility marker — discovery keys on it — so write it last, and
-    # atomically, so a concurrent reader never sees a half-written marker or a reviewer without
-    # its harness.json.
-    atomic_write_text(reviewer_md, _starter_reviewer(name))
-    created.append(reviewer_md)
+    atomic_write_text(reviewer_md, _starter_reviewer(name, with_harness))
     typer.echo(f"created reviewer '{name}':")
-    for path in created:
-        typer.echo(f"  {path}")
+    typer.echo(f"  {reviewer_md}")

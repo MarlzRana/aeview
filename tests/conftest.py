@@ -9,12 +9,18 @@ import pytest
 
 
 def make_reviewer(base: Path, name: str, *, body="BODY", fm_name=None, harnesses=None) -> Path:
-    """Create a reviewer at <base>/.aeview/reviewers/<name>/ (optional harness.json)."""
+    """Create a reviewer at <base>/.aeview/reviewers/<name>/ with harnesses in its frontmatter.
+
+    `harnesses` is a list of dicts (or [] for an explicit empty block); None omits the block so
+    the reviewer falls back to settings.fallbackReviewerHarnesses. JSON is valid YAML, so the
+    list is embedded as a flow sequence in the frontmatter."""
     d = base / ".aeview" / "reviewers" / name
     d.mkdir(parents=True, exist_ok=True)
-    (d / "REVIEWER.md").write_text(f"---\nname: {fm_name or name}\ndescription: d\n---\n{body}\n")
+    front = [f"name: {fm_name or name}", "description: d"]
     if harnesses is not None:
-        (d / "harness.json").write_text(json.dumps({"harnesses": harnesses}))
+        front.append(f"harnesses: {json.dumps(harnesses)}")
+    fm = "\n".join(front)
+    (d / "REVIEWER.md").write_text(f"---\n{fm}\n---\n{body}\n")
     return d
 
 

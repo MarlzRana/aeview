@@ -54,8 +54,8 @@ def test_doctor_missing_binary_fails(tmp_path, monkeypatch):
 
 
 def test_doctor_invalid_reviewer_config_fails(tmp_path, monkeypatch):
-    bad = make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code", "model": "m"}])
-    (bad / "harness.json").write_text("{broken json")
+    # A harness entry missing its required `model` fails frontmatter validation → reviewer fail.
+    make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code"}])
     _all_present(monkeypatch)
     report = doctor.run_doctor(tmp_path, _settings())
     assert not report.ok

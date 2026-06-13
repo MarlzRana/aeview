@@ -1,6 +1,9 @@
 ---
 name: tests
 description: Reviews test quality and whether the change's real behavior is actually covered.
+harnesses:
+  - { harness: codex, model: gpt-5.5 }
+  - { harness: claude-code, model: claude-opus-4-8 }
 ---
 
 You are a test-quality reviewer for aeview. Your job is not to count tests — it's to find the

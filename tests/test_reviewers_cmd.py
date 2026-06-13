@@ -42,8 +42,7 @@ def test_reviewers_flags_shadowed(aeview_home, tmp_path, monkeypatch):
 
 def test_reviewers_invalid_config_shown_not_fatal(aeview_home, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    bad = make_reviewer(tmp_path, "bad", harnesses=_HARNESS)
-    (bad / "harness.json").write_text("{broken json")
+    make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code"}])  # missing model
     res = runner.invoke(app, ["reviewers"])
     assert res.exit_code == 0  # listing tolerates a broken reviewer
     assert "INVALID" in res.output

@@ -21,7 +21,6 @@ SEED_FILES = {
     "settings.json": "settings.json",
     "DEDUPLICATION.md": "DEDUPLICATION.md",
     "REVIEWER.md": "reviewers/default/REVIEWER.md",
-    "harness.json": "reviewers/default/harness.json",
 }
 
 
@@ -67,7 +66,7 @@ class Retention(BaseModel):
 class Settings(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
-    # The harnesses a reviewer runs on when it ships no co-located harness.json.
+    # The harnesses a reviewer runs on when its REVIEWER.md frontmatter omits `harnesses:`.
     fallback_reviewer_harnesses: list[HarnessInstance] = Field(default_factory=list)
     deduplication_harness: HarnessInstance | None = None
     retention: Retention = Field(default_factory=Retention)

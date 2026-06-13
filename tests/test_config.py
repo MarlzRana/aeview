@@ -27,8 +27,10 @@ def test_ensure_seeded_writes_defaults(aeview_home):
     ensure_seeded()
     assert (aeview_home / "settings.json").exists()
     assert (aeview_home / "DEDUPLICATION.md").exists()
-    assert (aeview_home / "reviewers" / "default" / "REVIEWER.md").exists()
-    assert (aeview_home / "reviewers" / "default" / "harness.json").exists()
+    default_md = aeview_home / "reviewers" / "default" / "REVIEWER.md"
+    assert default_md.exists()
+    assert "harnesses:" in default_md.read_text()  # harnesses live in the frontmatter now (N1)
+    assert not (aeview_home / "reviewers" / "default" / "harness.json").exists()  # no longer seeded
 
 
 def test_ensure_seeded_never_clobbers(aeview_home):

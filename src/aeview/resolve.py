@@ -5,26 +5,24 @@ For each name, climb from CWD through its ancestors (terminating at home) lookin
 global config dir `~/.aeview/`, so the same climb reaches `~/.aeview/reviewers/<name>/`
 with no special case. `.agents/` is reserved for shared, standardized conventions.
 
-A reviewer's harnesses come from a co-located `harness.json`; absent → the global
-`fallbackReviewerHarnesses` in settings.json. The dir name must equal the frontmatter
-`name`.
+A reviewer's harnesses come from a `harnesses:` block in its REVIEWER.md frontmatter;
+absent → the global `fallbackReviewerHarnesses` in settings.json. The dir name must equal
+the frontmatter `name`.
 """
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import HarnessInstance, Settings, split_frontmatter
 from .schema import RosterEntry
 
 REVIEWER_FILE = "REVIEWER.md"
-HARNESS_FILE = "harness.json"
 _AEVIEW_DIR = ".aeview"
 _REVIEWERS = "reviewers"
 # Names that can't be reviewers because they're CLI keywords. `all` is the bulk-sweep
@@ -44,6 +42,20 @@ class HarnessRef:
     id: str
 
 
+class ReviewerFrontMatter(BaseModel):
+    """The validated YAML frontmatter of a REVIEWER.md. `harnesses` (N1) lives here, not in a
+    separate file; `extra="forbid"` turns a typo'd key (e.g. `harneses:`) into a clear error."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str
+    description: str = ""
+    harnesses: list[HarnessInstance] | None = None
+    # Accepted + validated here so the frontmatter contract is stable across the batch; the
+    # activation logic that consumes it is wired in N3 (I9 — auto-activate-paths).
+    auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
+
+
 @dataclass(slots=True)
 class Reviewer:
     name: str
@@ -53,8 +65,8 @@ class Reviewer:
     harnesses: list[HarnessRef]
 
 
-def parse_reviewer(path: Path) -> tuple[str, str, str]:
-    """Split a REVIEWER.md into (name, description, body) using YAML frontmatter."""
+def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
+    """Parse a REVIEWER.md into its validated frontmatter + body."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -73,11 +85,13 @@ def parse_reviewer(path: Path) -> tuple[str, str, str]:
         meta = {}
     if not isinstance(meta, dict):
         raise ResolveError(f"{path} frontmatter must be a mapping")
-    name = meta.get("name")
-    description = meta.get("description", "")
-    if not name:
+    try:
+        front_matter = ReviewerFrontMatter.model_validate(meta)
+    except ValidationError as exc:
+        raise ResolveError(f"{path} has invalid frontmatter: {exc}") from exc
+    if not front_matter.name:
         raise ResolveError(f"{path} frontmatter is missing 'name'")
-    return str(name), str(description), body  # body already had its leading newlines stripped
+    return front_matter, body  # body already had its leading newlines stripped
 
 
 def _candidate_rungs(cwd: Path) -> list[Path]:
@@ -144,37 +158,38 @@ def discover_reviewers(cwd: Path) -> list[str]:
 
 
 def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Reviewer:
-    name, description, body = parse_reviewer(reviewer_dir / REVIEWER_FILE)
-    if name != dir_name:
+    front, body = parse_reviewer(reviewer_dir / REVIEWER_FILE)
+    if front.name != dir_name:
         raise ResolveError(
             f"reviewer directory '{dir_name}' does not match its REVIEWER.md name "
-            f"'{name}' ({reviewer_dir})"
+            f"'{front.name}' ({reviewer_dir})"
         )
-    if name in RESERVED_REVIEWER_NAMES:
-        raise ResolveError(f"'{name}' is a reserved reviewer name (it's a --reviewers keyword)")
+    if front.name in RESERVED_REVIEWER_NAMES:
+        raise ResolveError(
+            f"'{front.name}' is a reserved reviewer name (it's a --reviewers keyword)"
+        )
     return Reviewer(
-        name=name,
-        description=description,
+        name=front.name,
+        description=front.description,
         body=body,
         source=reviewer_dir,
-        harnesses=_resolve_harnesses(reviewer_dir, settings),
+        harnesses=_resolve_harnesses(front, reviewer_dir, settings),
     )
 
 
-def _resolve_harnesses(reviewer_dir: Path, settings: Settings) -> list[HarnessRef]:
-    harness_file = reviewer_dir / HARNESS_FILE
-    if harness_file.is_file():
-        try:
-            raw = json.loads(harness_file.read_text(encoding="utf-8"))
-            instances = [HarnessInstance.model_validate(h) for h in raw.get("harnesses", [])]
-        except (OSError, json.JSONDecodeError, ValidationError, AttributeError) as exc:
-            raise ResolveError(f"{harness_file} is invalid: {exc}") from exc
-        if not instances:
-            raise ResolveError(f"{harness_file} lists no harnesses")
-        return _assign_ids(instances)
+def _resolve_harnesses(
+    front: ReviewerFrontMatter, reviewer_dir: Path, settings: Settings
+) -> list[HarnessRef]:
+    # A `harnesses:` block (even an empty list) is the reviewer's own choice; only its absence
+    # falls back to the global default. Per-entry validation already ran in parse_reviewer.
+    if front.harnesses is not None:
+        if not front.harnesses:
+            raise ResolveError(f"{reviewer_dir / REVIEWER_FILE} lists no harnesses")
+        return _assign_ids(front.harnesses)
     if not settings.fallback_reviewer_harnesses:
         raise ResolveError(
-            f"{reviewer_dir} has no harness.json and settings.fallbackReviewerHarnesses is empty"
+            f"{reviewer_dir} has no harnesses: in its REVIEWER.md and "
+            f"settings.fallbackReviewerHarnesses is empty"
         )
     return _assign_ids(settings.fallback_reviewer_harnesses)
 

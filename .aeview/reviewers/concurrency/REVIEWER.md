@@ -1,6 +1,8 @@
 ---
 name: concurrency
 description: Reviews asyncio and subprocess concurrency in aeview's fan-out and run store.
+harnesses:
+  - { harness: codex, model: gpt-5.5, thinking: xhigh }
 ---
 
 You are a concurrency reviewer for aeview, a CLI that fans many agent-CLI subprocesses out

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from typer.testing import CliRunner
 
 from aeview.cli import app
@@ -20,16 +18,16 @@ def test_init_creates_reviewer_without_harness(aeview_home, tmp_path, monkeypatc
     md = _reviewer_dir(tmp_path, "myrev") / "REVIEWER.md"
     assert md.exists()
     assert 'name: "myrev"' in md.read_text()  # quoted so YAML-1.1 keywords stay strings
-    assert not (md.parent / "harness.json").exists()  # optional → omitted by default
+    assert "harnesses:" not in md.read_text()  # optional → omitted by default (uses fallback)
 
 
-def test_init_with_harness_seeds_claude_opus(aeview_home, tmp_path, monkeypatch):
+def test_init_with_harness_writes_frontmatter_harnesses(aeview_home, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     res = runner.invoke(app, ["init", "myrev", "--with-harness"])
     assert res.exit_code == 0
-    hj = _reviewer_dir(tmp_path, "myrev") / "harness.json"
-    instance = json.loads(hj.read_text())["harnesses"][0]
-    assert instance == {"harness": "claude-code", "model": "claude-opus-4-8"}
+    text = (_reviewer_dir(tmp_path, "myrev") / "REVIEWER.md").read_text()
+    assert "harnesses:" in text
+    assert "{ harness: claude-code, model: claude-opus-4-8 }" in text
 
 
 def test_init_scaffold_resolves(aeview_home, tmp_path, monkeypatch):
@@ -83,12 +81,12 @@ def test_init_refuses_existing(aeview_home, tmp_path, monkeypatch):
 
 
 def test_init_refuses_partial_leftover_dir(aeview_home, tmp_path, monkeypatch):
-    # A crashed `init --with-harness` can leave a dir with harness.json but no REVIEWER.md.
-    # The exclusive-mkdir claim must refuse it, never publish a marker over the stale harness.
+    # A crashed init can leave a reviewer dir without its REVIEWER.md marker. The exclusive-mkdir
+    # claim must refuse the existing dir, never publish a marker into stale leftovers.
     monkeypatch.chdir(tmp_path)
     d = _reviewer_dir(tmp_path, "foo")
     d.mkdir(parents=True)
-    (d / "harness.json").write_text('{"harnesses": []}')
+    (d / "leftover.tmp").write_text("partial")
     res = runner.invoke(app, ["init", "foo"])
     assert res.exit_code == 2
     assert "already exists" in res.output

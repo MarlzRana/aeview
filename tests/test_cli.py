@@ -112,16 +112,14 @@ def _settings():
 
 def test_resolve_all_lenient_skips_bad_reviewer(tmp_path, capsys):
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "m"}])
-    bad = make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code", "model": "m"}])
-    (bad / "harness.json").write_text("{broken json")
+    make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code"}])  # missing model
     resolved = _resolve_all_lenient(["good", "bad"], tmp_path, _settings())
     assert [r.name for r in resolved] == ["good"]  # bad one skipped
     assert "skipping reviewer 'bad'" in capsys.readouterr().err
 
 
 def test_resolve_all_lenient_all_bad_returns_empty(tmp_path, capsys):
-    bad = make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code", "model": "m"}])
-    (bad / "harness.json").write_text("{broken json")
+    make_reviewer(tmp_path, "bad", harnesses=[{"harness": "claude-code"}])  # missing model
     # The only discovered reviewer is broken -> empty list (the run's hard-error guard).
     assert _resolve_all_lenient(["bad"], tmp_path, _settings()) == []
     assert "skipping reviewer 'bad'" in capsys.readouterr().err
