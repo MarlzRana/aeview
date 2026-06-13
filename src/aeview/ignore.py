@@ -91,33 +91,31 @@ def _strip_ab(token: str) -> str | None:
     return token[2:] if token.startswith(("a/", "b/")) else token
 
 
-def _header_paths(line: str) -> set[str]:
-    # `diff --git a/<old> b/<new>` -> {old, new} (best-effort for space-free paths).
-    rest = line[len("diff --git ") :]
-    marker = rest.rfind(" b/")
-    if marker == -1:
-        return set()
-    return {p for p in (_strip_ab(rest[:marker]), _strip_ab(rest[marker + 1 :].strip())) if p}
+def _header_new_path(line: str) -> str | None:
+    # `diff --git a/<old> b/<new>` -> the new (b/) side (best-effort for space-free paths).
+    marker = line.rfind(" b/")
+    return _strip_ab(line[marker + 1 :].strip()) if marker != -1 else None
 
 
-def _block_paths(block: str) -> set[str]:
-    """Every path a diff block touches — both sides of the `diff --git` header, the `---`/`+++`
-    lines, and rename/copy from/to. A block is dropped if ANY of these is ignored, so an ignored
-    file can't slip through a rename to an allowed path. Only the header region (before the first
-    `@@` hunk) is read, so a spoofed `+++ b/...` line in the diff *content* can't redirect the
-    match into hiding a file from review."""
-    paths: set[str] = set()
+def _block_path(block: str) -> str | None:
+    """The block's destination (new) path — the only side that decides ignore status: a file
+    renamed OUT of an ignored path is still reviewed at its new path, and one renamed INTO an
+    ignored path is dropped (a deletion's path comes from the header, which is unchanged). Only
+    the header region (before the first `@@` hunk) is read, so a spoofed `+++ b/...` line in the
+    diff *content* can't redirect the match into hiding a file from review."""
+    plus: str | None = None
+    rename_to: str | None = None
+    header_new: str | None = None
     for line in block.splitlines():
         if line.startswith("@@"):
             break  # hunks begin — content lines must never be parsed as headers
-        if line.startswith(("+++ ", "--- ")):
-            if (p := _strip_ab(line[4:].strip())) is not None:
-                paths.add(p)
+        if line.startswith("+++ "):
+            plus = _strip_ab(line[4:].strip())
+        elif line.startswith(("rename to ", "copy to ")):
+            rename_to = line.split(" ", 2)[2].strip()
         elif line.startswith("diff --git "):
-            paths |= _header_paths(line)
-        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
-            paths.add(line.split(" ", 2)[2].strip())
-    return paths
+            header_new = _header_new_path(line)
+    return plus or rename_to or header_new
 
 
 def filter_diff(diff: str, repo_root: Path, specs: RungSpecs) -> tuple[str, list[str]]:
@@ -126,9 +124,9 @@ def filter_diff(diff: str, repo_root: Path, specs: RungSpecs) -> tuple[str, list
     kept_blocks: list[str] = []
     ignored: set[str] = set()
     for block in blocks:
-        matched = {p for p in _block_paths(block) if _is_ignored(repo_root / p, specs)}
-        if matched:
-            ignored |= matched
+        rel = _block_path(block)
+        if rel is not None and _is_ignored(repo_root / rel, specs):
+            ignored.add(rel)
             continue
         kept_blocks.append(block)
     # When every file block is ignored, drop the preamble too (e.g. `git show`'s commit header),

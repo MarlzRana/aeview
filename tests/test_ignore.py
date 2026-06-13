@@ -70,7 +70,8 @@ def test_filter_diff_preserves_preamble(tmp_path):
     assert "b/a.py" in out and "b/uv.lock" not in out
 
 
-def test_filter_diff_deletion_uses_old_path(tmp_path):
+def test_filter_diff_deletion_matched_by_header_path(tmp_path):
+    # A deletion (+++ /dev/null) resolves its path from the unchanged `diff --git` header.
     block = (
         "diff --git a/old.lock b/old.lock\ndeleted file mode 100644\n"
         "--- a/old.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
@@ -103,28 +104,40 @@ def test_spoofed_content_header_does_not_redirect_match(tmp_path):
     assert "b/app.py" in out
 
 
-def test_rename_from_ignored_path_is_dropped(tmp_path):
-    # Renaming an ignored file to an allowed path must drop the block — its content (the rename
-    # delta) would otherwise leak the ignored file.
+def test_rename_out_of_ignored_path_is_kept(tmp_path):
+    # Destination decides: renaming OUT of an ignored path to a reviewable one keeps the file —
+    # dropping it would hide a now-reviewable change at a normal path.
     block = (
-        "diff --git a/secret.lock b/public.txt\nsimilarity index 80%\n"
-        "rename from secret.lock\nrename to public.txt\n"
-        "--- a/secret.lock\n+++ b/public.txt\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/generated/x.py b/src/x.py\nsimilarity index 90%\n"
+        "rename from generated/x.py\nrename to src/x.py\n"
+        "--- a/generated/x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-x\n+y\n"
     )
-    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert ignored == ["secret.lock"]
-    assert out == ""
+    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["generated/"])))
+    assert ignored == []
+    assert "b/src/x.py" in out
 
 
-def test_copy_from_ignored_path_is_dropped(tmp_path):
-    # Symmetric to renames: a copy from an ignored path also leaks the ignored content -> drop.
+def test_rename_into_ignored_path_is_dropped(tmp_path):
+    # ...but renaming INTO an ignored path drops the block, recorded by its new path.
     block = (
-        "diff --git a/secret.lock b/public.txt\nsimilarity index 80%\n"
-        "copy from secret.lock\ncopy to public.txt\n"
-        "--- a/secret.lock\n+++ b/public.txt\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/src/x.py b/generated/x.py\nsimilarity index 90%\n"
+        "rename from src/x.py\nrename to generated/x.py\n"
+        "--- a/src/x.py\n+++ b/generated/x.py\n@@ -1 +1 @@\n-x\n+y\n"
     )
-    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert ignored == ["secret.lock"] and out == ""
+    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["generated/"])))
+    assert ignored == ["generated/x.py"] and out == ""
+
+
+def test_copy_to_reviewable_path_is_kept(tmp_path):
+    # Copies follow the same destination rule: a copy to a reviewable path is kept.
+    block = (
+        "diff --git a/generated/x.py b/src/x.py\nsimilarity index 90%\n"
+        "copy from generated/x.py\ncopy to src/x.py\n"
+        "--- a/generated/x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    out, ignored = filter_diff(block, tmp_path, _specs((tmp_path, ["generated/"])))
+    assert ignored == []
+    assert "b/src/x.py" in out
 
 
 def test_all_ignored_drops_preamble(tmp_path):
@@ -136,13 +149,13 @@ def test_all_ignored_drops_preamble(tmp_path):
 
 
 def test_rename_only_and_mode_only_blocks_match_by_header(tmp_path):
-    # Blocks with no `---`/`+++` (pure rename or mode change) resolve their path from the header.
+    # Blocks with no `+++` (pure rename or mode change) resolve their destination from the header.
     rename_only = (
         "diff --git a/old.lock b/new.lock\nsimilarity index 100%\n"
         "rename from old.lock\nrename to new.lock\n"
     )
     out, ignored = filter_diff(rename_only, tmp_path, _specs((tmp_path, ["*.lock"])))
-    assert ignored == ["new.lock", "old.lock"] and out == ""
+    assert ignored == ["new.lock"] and out == ""  # destination is new.lock
     mode_only = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
     out, ignored = filter_diff(mode_only, tmp_path, _specs((tmp_path, ["*.sh"])))
     assert ignored == ["run.sh"] and out == ""
