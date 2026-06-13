@@ -190,7 +190,10 @@ def _split_reviewers(values: list[str] | None) -> list[str] | None:
         return None
     names = [n.strip() for item in values for n in item.split(",") if n.strip()]
     if not names:
-        raise ResolveError("--reviewers was given but empty; omit it to use the default reviewer")
+        raise ResolveError(
+            "--reviewers was given but empty; omit it for auto mode "
+            "(default + path-activated reviewers)"
+        )
     return names
 
 
@@ -274,14 +277,14 @@ def _plan_run(
             f"nothing to review for scope '{stype}' (all changes matched .aeviewignore)"
         )
 
-    reviewers, names, auto_activated = _select_reviewers(names, resolved, cwd, settings)
+    reviewers, auto_activated = _select_reviewers(names, resolved, cwd, settings)
     roster = build_roster(reviewers)
     if not roster:
         raise ResolveError(
             "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
         )
     return _Plan(
-        names=names,
+        names=[r.name for r in reviewers],  # resolve_reviewer pins name == dir == frontmatter name
         reviewers=reviewers,
         roster=roster,
         bundle=build_bundle(resolved),
@@ -292,10 +295,10 @@ def _plan_run(
 
 def _select_reviewers(
     names: list[str] | None, resolved: ResolvedScope, cwd: Path, settings: Settings
-) -> tuple[list[Reviewer], list[str], list[str]]:
-    """Pick the reviewer set. Returns (reviewers, resolved names, auto-activated names). None =
-    auto mode; `all` = every discovered reviewer; otherwise the explicit names, resolved fail-fast
-    (you asked for these specific ones). Only auto mode reports auto-activated names."""
+) -> tuple[list[Reviewer], list[str]]:
+    """Pick the reviewer set + the auto-activated subset. None = auto mode; `all` = every discovered
+    reviewer; otherwise the explicit names, resolved fail-fast (you asked for these specific ones).
+    Only auto mode auto-activates; the other modes report an empty auto-activated list."""
     if names is None:
         return _select_auto(resolved, cwd, settings)
     if "all" in names:
@@ -306,28 +309,29 @@ def _select_reviewers(
         reviewers = _resolve_all_lenient(discovered, cwd, settings)
         if not reviewers:
             raise ResolveError("every discovered reviewer had invalid config")
-        return reviewers, [r.name for r in reviewers], []
+        return reviewers, []
     names = list(dict.fromkeys(names))  # de-dupe, preserve order
-    return [resolve_reviewer(name, cwd, settings) for name in names], names, []
+    return [resolve_reviewer(name, cwd, settings) for name in names], []
 
 
 def _select_auto(
     resolved: ResolvedScope, cwd: Path, settings: Settings
-) -> tuple[list[Reviewer], list[str], list[str]]:
+) -> tuple[list[Reviewer], list[str]]:
     """Auto mode: always run `default` (fail-fast — the package-seeded baseline; a broken default
     is a real problem), plus every reviewer whose auto-activate-paths match a changed file (lenient
-    skip-with-warning, like `all`). The non-git `patch` scope has no repo root to anchor paths,
-    so it runs default alone. `names`/`auto_activated` reflect only reviewers that actually run."""
+    skip-with-warning, like `all`). Returns (reviewers, auto-activated names) — the names are only
+    the path-matched extras that actually resolved and run."""
     default = resolve_reviewer("default", cwd, settings)
     # patch-scope paths aren't repo-root-relative (the same reason .aeviewignore skips it), and a
     # non-git cwd has no root to anchor against — either way only the default baseline runs.
     root = None if resolved.spec.type == "patch" else repo_root(cwd)
-    matched = select_auto_reviewers(cwd, root, resolved.diff) if root is not None else []
-    extra = [name for name in matched if name != "default"]  # default already in; don't re-resolve
-    extra_reviewers = _resolve_all_lenient(extra, cwd, settings)
-    reviewers = [default, *extra_reviewers]
-    names = list(dict.fromkeys(r.name for r in reviewers))
-    return reviewers, names, [r.name for r in extra_reviewers]
+    if root is None:
+        return [default], []
+    # Drop `default` from the matches: it's already resolved unconditionally, and resolving it a
+    # second time would build a duplicate roster entry with the same id -> clobbered review files.
+    matched = [n for n in select_auto_reviewers(cwd, root, resolved.diff) if n != "default"]
+    extra_reviewers = _resolve_all_lenient(matched, cwd, settings)
+    return [default, *extra_reviewers], [r.name for r in extra_reviewers]
 
 
 async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:

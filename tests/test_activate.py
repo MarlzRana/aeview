@@ -97,6 +97,15 @@ def test_home_reviewer_matches_repo_under_home(aeview_home, tmp_path):
     assert "global" in select_auto_reviewers(repo, repo, _diff("x.py"))
 
 
+def test_multiple_reviewers_activate_in_discovery_order(aeview_home, tmp_path):
+    # All matching reviewers activate, nearest-first (here: sorted within the one rung).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    make_reviewer(repo, "alpha", harnesses=HARNESS, auto_activate_paths=["*.py"])
+    make_reviewer(repo, "beta", harnesses=HARNESS, auto_activate_paths=["*.py"])
+    assert select_auto_reviewers(repo, repo, _diff("x.py")) == ["alpha", "beta"]
+
+
 def test_home_reviewer_does_not_match_repo_outside_home(aeview_home, tmp_path):
     # The scope-path under-check: a repo NOT under ~ has no file the home reviewer can claim.
     home = aeview_home.parent

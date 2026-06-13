@@ -283,6 +283,17 @@ def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude
     assert "excluded 1 file(s) via .aeviewignore" in result.stderr
 
 
+def test_run_surfaces_auto_activated_on_stderr(aeview_home, git_repo, stub_claude, monkeypatch):
+    # The "never silently" contract for auto mode: a bare run reports which reviewers its changed
+    # paths pulled in, on stderr (mirrors the .aeviewignore notice).
+    make_reviewer(git_repo, "py", harnesses=[{"harness": "claude-code", "model": "opus"}],
+                  auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])  # no --reviewers = auto
+    assert "auto-activated 1 reviewer(s): py" in result.stderr
+
+
 def test_run_json_stdout_unpolluted_by_ignore_notice(
     aeview_home, git_repo, stub_claude, monkeypatch
 ):
@@ -340,6 +351,16 @@ def test_dry_run_render_lists_ignored_files():
 def test_dry_run_render_no_ignored_shows_dash():
     out = _render_dry_run(_dry_plan(1), Settings())  # the common case: nothing ignored
     assert "ignored (0 via .aeviewignore): —" in out
+
+
+def test_dry_run_render_lists_auto_activated():
+    out = _render_dry_run(_dry_plan(1, auto_activated=["py", "docs"]), Settings())
+    assert "auto-activated (2 via auto-activate-paths): py, docs" in out
+
+
+def test_dry_run_render_no_auto_activated_shows_dash():
+    out = _render_dry_run(_dry_plan(1), Settings())  # explicit/no-match: nothing auto-activated
+    assert "auto-activated (0 via auto-activate-paths): —" in out
 
 
 def test_dry_run_render_multi_with_dedup_harness():

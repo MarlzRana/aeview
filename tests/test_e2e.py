@@ -246,6 +246,29 @@ def test_auto_activation_respects_aeviewignore(aeview_home, git_repo):
     assert "default" in plan.names
 
 
+def test_auto_activates_repo_reviewer_from_subdirectory(aeview_home, git_repo):
+    # Invoked from repo/src: discovery walks up to the repo-root reviewer, and changed paths anchor
+    # at the repo root (not cwd), so a repo-level reviewer still activates.
+    make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["src/**"])
+    sub = git_repo / "src"
+    sub.mkdir()
+    (sub / "feature.py").write_text("x = 1\n")
+    plan = _plan_run(None, "working-tree", None, sub, False, False, None, load_settings())
+    assert "py" in plan.names
+    assert plan.auto_activated == ["py"]
+
+
+def test_auto_repo_default_with_matching_paths_runs_once(aeview_home, git_repo):
+    # A repo-level `default` whose own auto-activate-paths match must resolve exactly once — never
+    # duplicated into a second roster entry with a clashing id.
+    make_reviewer(git_repo, "default", harnesses=_HARNESS, auto_activate_paths=["*.py"])
+    (git_repo / "feature.py").write_text("x = 1\n")
+    plan = _auto_plan(git_repo)
+    assert plan.names == ["default"]
+    assert [e.reviewer for e in plan.roster].count("default") == 1
+    assert plan.auto_activated == []  # default is the baseline, never reported as an extra
+
+
 def test_auto_patch_scope_runs_default_only(aeview_home, git_repo):
     # patch-scope paths aren't repo-root-relative, so auto mode can't anchor them -> default alone.
     make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
