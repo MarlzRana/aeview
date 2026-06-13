@@ -3,6 +3,8 @@ from __future__ import annotations
 from typer.testing import CliRunner
 
 from aeview.cli import app
+from aeview.config import HarnessInstance
+from aeview.resolve import parse_reviewer
 
 runner = CliRunner()
 
@@ -26,9 +28,10 @@ def test_init_with_harness_writes_frontmatter_harnesses(aeview_home, tmp_path, m
     monkeypatch.chdir(tmp_path)
     res = runner.invoke(app, ["init", "myrev", "--with-harness"])
     assert res.exit_code == 0
-    text = (_reviewer_dir(tmp_path, "myrev") / "REVIEWER.md").read_text()
-    assert "harnesses:" in text
-    assert "{ harness: claude-code, model: claude-opus-4-8 }" in text
+    # Assert the parsed harnesses, not the exact YAML text — survives a harmless reformat of the
+    # starter block, still fails if the scaffolded harness regresses.
+    front, _ = parse_reviewer(_reviewer_dir(tmp_path, "myrev") / "REVIEWER.md")
+    assert front.harnesses == [HarnessInstance(harness="claude-code", model="claude-opus-4-8")]
 
 
 def test_init_scaffold_resolves(aeview_home, tmp_path, monkeypatch):
