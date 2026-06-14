@@ -55,17 +55,25 @@ class _Controller:
         # Simulate the real SDK raising in CopilotClient.__init__ (e.g. "Copilot CLI not found").
         self._state["client_init_exc"] = exc
 
+    def set_stop_error(self, exc: BaseException) -> None:
+        # Make client.stop() raise so _teardown_client must fall back to force_stop().
+        self._state["stop_error"] = exc
+
 
 @pytest.fixture
 def copilot_sdk(monkeypatch):
     """Mock the copilot SDK boundary (copilot.CopilotClient) with an offline fake. The adapter
     resolves the SDK's bundled binary, so Tier-1 tests intercept the SDK call itself. Default = a
     valid approve answer with usage 100/20; queue_turn sets per-turn answer/usage/exc/delay and the
-    controller exposes the client + session kwargs, the send_and_wait calls, and teardown counts."""
-    state: dict = {"turns": [], "client_init_exc": None}
+    controller exposes the client + session kwargs, the send_and_wait calls, and teardown counts
+    (start/stop/force_stop on the client, disconnect on the session — explicit lifecycle, no
+    context managers)."""
+    state: dict = {"turns": [], "client_init_exc": None, "stop_error": None}
     captured: dict = {
         "clients": 0,
+        "started": 0,
         "stopped": 0,
+        "force_stopped": 0,
         "disconnected": 0,
         "client_kwargs": None,
         "create_kwargs": None,
@@ -83,10 +91,7 @@ def copilot_sdk(monkeypatch):
             self._handlers: list = []
             captured["create_kwargs"] = create_kwargs
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
+        async def disconnect(self):
             captured["disconnected"] += 1
 
         def on(self, handler):
@@ -114,11 +119,16 @@ def copilot_sdk(monkeypatch):
             if state["client_init_exc"] is not None:
                 raise state["client_init_exc"]
 
-        async def __aenter__(self):
-            return self
+        async def start(self):
+            captured["started"] += 1
 
-        async def __aexit__(self, *exc):
+        async def stop(self):
             captured["stopped"] += 1
+            if state["stop_error"] is not None:
+                raise state["stop_error"]
+
+        async def force_stop(self):
+            captured["force_stopped"] += 1
 
         async def create_session(self, **kwargs):
             return FakeSession(kwargs)
@@ -728,9 +738,10 @@ def test_sdk_call_kwargs_match_the_real_sdk():
 # --- preflight -------------------------------------------------------------------------
 
 
-def test_preflight_no_override_resolves_bundled_and_warns():
-    # No override → resolve the bundled binary (need not be on PATH). Copilot has no no-cost auth
-    # probe, so the best we can say is warn (present, auth unverifiable) — never a billed call.
+def test_preflight_no_override_resolves_bundled_and_warns(monkeypatch):
+    # No override + no COPILOT_CLI_PATH → resolve the bundled binary (need not be on PATH). Copilot
+    # has no no-cost auth probe, so the best we can say is warn (present, auth unverifiable).
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
     assert "auth not verifiable" in pf.detail
@@ -750,10 +761,11 @@ def test_preflight_non_executable_override_fails(monkeypatch):
 
 
 def test_preflight_fails_when_bundle_missing(monkeypatch):
-    # With no override copilot resolves ONLY its bundled binary — if the bundled path doesn't exist,
-    # doctor must FAIL (matching what the run path would do), not silently pass.
+    # With no override + no COPILOT_CLI_PATH, copilot resolves ONLY its bundled binary — if that
+    # path doesn't exist, doctor must FAIL (matching what the run path would do), not silently pass.
     import copilot.client as cc
 
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
     monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: "/no/bundle/copilot")
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "fail"
@@ -763,6 +775,7 @@ def test_preflight_fails_when_bundle_path_is_none(monkeypatch):
     # _get_bundled_cli_path returns None on an unsupported/binary-less wheel — doctor FAILS.
     import copilot.client as cc
 
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
     monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "fail"
@@ -776,9 +789,100 @@ def test_preflight_fails_when_bundle_resolution_raises(monkeypatch):
     def boom():
         raise RuntimeError("resolution exploded")
 
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
     monkeypatch.setattr(cc, "_get_bundled_cli_path", boom)
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "fail"
+
+
+# --- dogfood r1: teardown robustness, None-answer, retry timeout, usage guard, resolution ---
+
+
+async def test_raising_stop_does_not_break_the_result(copilot_sdk, tmp_path):
+    # A stop() that raises must not mask a valid parsed result; _teardown_client falls back to
+    # force_stop() (the SDK's escape for a stuck/failing stop()).
+    copilot_sdk.set_stop_error(RuntimeError("destroy RPC failed"))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # the result survives a raising teardown
+    assert copilot_sdk.captured["force_stopped"] == 1  # hard-kill fallback ran
+
+
+async def test_none_answer_reprompts_and_recovers(copilot_sdk, tmp_path):
+    # send_and_wait returns None when the model produced no assistant message — treat it as no
+    # answer and re-prompt (a realistic production path: the model declines / an empty turn).
+    copilot_sdk.queue_turn(None)  # attempt 1: no message
+    copilot_sdk.queue_turn(json.dumps(_VALID))  # attempt 2: valid
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(copilot_sdk.captured["send_calls"]) == 2
+
+
+async def test_none_answer_both_attempts_fails(copilot_sdk, tmp_path):
+    copilot_sdk.queue_turn(None)
+    copilot_sdk.queue_turn(None)
+    with pytest.raises(AdapterError, match="did not return a JSON object"):
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+
+
+async def test_retry_turn_also_gets_the_configured_timeout(copilot_sdk, tmp_path):
+    # Both the first turn AND the same-session retry must carry the per-review timeout, not the
+    # SDK's 60s default.
+    copilot_sdk.queue_turn("no json")  # forces a re-prompt
+    copilot_sdk.queue_turn(json.dumps(_VALID))
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 77.0)
+    assert [c["timeout"] for c in copilot_sdk.captured["send_calls"]] == [77.0, 77.0]
+
+
+async def test_none_input_tokens_counted_as_zero(copilot_sdk, tmp_path):
+    # copilot can omit input tokens (AssistantUsageData.input_tokens=None); the `or 0` guard keeps
+    # the run working and counts it as 0.
+    copilot_sdk.queue_turn(json.dumps(_VALID), usage=(None, 9))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.usage.input_tokens == 0
+    assert out.usage.output_tokens == 9
+
+
+def test_preflight_honors_copilot_cli_path(monkeypatch, tmp_path):
+    # No aeview override: the SDK resolves COPILOT_CLI_PATH before the bundle, so preflight must too
+    # (else doctor would FAIL a run that would succeed). A valid env path → warn (resolved).
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)  # no bundle
+    binp = tmp_path / "copilot"
+    binp.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(binp))
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert str(binp) in pf.detail
+
+
+def test_preflight_copilot_cli_path_missing_file_fails(monkeypatch):
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/nonexistent/copilot")
+    assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+def test_preflight_no_override_does_not_fall_back_to_path(monkeypatch):
+    # No override + no bundle + no COPILOT_CLI_PATH → fail, even if a copilot is on PATH: the SDK
+    # has no PATH search for the bare binary, so doctor must not either (else it'd report OK on a
+    # run that would fail). _resolve_copilot_bin's no-override path never calls which.
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setattr(copilot, "which", lambda b: "/usr/bin/copilot")  # a PATH copilot exists
+    assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+def test_bundled_cli_path_symbol_exists_in_real_sdk():
+    # Doctor's no-override resolution imports the private copilot.client._get_bundled_cli_path (no
+    # public equivalent); pin it against the REAL SDK so an upgrade that removes it fails loudly
+    # here rather than silently degrading doctor's copilot check.
+    import copilot.client as cc
+
+    assert callable(cc._get_bundled_cli_path)
 
 
 # --- registry + capability -------------------------------------------------------------

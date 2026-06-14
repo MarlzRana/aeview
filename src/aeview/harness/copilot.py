@@ -24,6 +24,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import json
+import os
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -47,7 +48,7 @@ from .base import (
 )
 
 if TYPE_CHECKING:
-    from copilot import PermissionRequest, PermissionRequestResult, SessionEvent
+    from copilot import CopilotSession, PermissionRequest, PermissionRequestResult, SessionEvent
 
 # copilot reasoning-effort levels, derived from the SDK's ReasoningEffort Literal so the accepted
 # set tracks the SDK; "default"/None leaves it unset. (Narrower than the old CLI set — no none/max.)
@@ -60,6 +61,10 @@ _MAX_ATTEMPTS = 2
 # per-review timeout is set, pass an effectively-unbounded value and let the caller's bound (none)
 # govern — in practice reviewTimeoutSeconds is always set, so this only covers the None path.
 _UNBOUNDED_TIMEOUT = 365 * 24 * 60 * 60
+
+# Cap on the client teardown: stop() awaits a destroy RPC (which can hang on a dead connection)
+# before its own bounded terminate→kill, so we bound stop() and fall back to the SDK's force_stop().
+_TEARDOWN_GRACE = 10.0
 
 # The retry turn rides the SAME session, so the model still sees its first (bad) answer + the schema
 # above it — this just re-states the format requirement more forcefully.
@@ -205,19 +210,28 @@ class CopilotAdapter:
         """Run one read-only review (with one re-prompt on invalid output) to completion inside the
         caller's (isolated) event loop. `asyncio.timeout(None)` is a no-op, so this bounds the run
         only when a timeout is set; a timeout is fail-fast (non-transient), matching every other
-        adapter. The async-with blocks ALWAYS tear down the client (stop(): terminate → 5s → kill),
-        so the copilot subprocess can't leak; the error chosen below already wins."""
+        adapter. Teardown is explicit + best-effort (NOT `async with`): the result is built and
+        returned only after `_teardown_client`, which is bounded and never raises — so a valid
+        parsed answer survives a teardown that stalls or errors (an `async with` exit would let it
+        mask the result). On the daemon thread a wedged teardown can't block aeview; the subprocess
+        finishes on its own (clean subtree-kill is deferred I6b-2)."""
         sw_timeout = timeout if timeout is not None else _UNBOUNDED_TIMEOUT
         collector = _UsageCollector()
+        client: CopilotClient | None = None
         try:
-            async with asyncio.timeout(timeout):
-                async with CopilotClient(working_directory=cwd, connection=connection) as client:
-                    async with await client.create_session(
+            try:
+                async with asyncio.timeout(timeout):
+                    # Construct inside the try so a "Copilot CLI not found" RuntimeError (raised in
+                    # CopilotClient.__init__) is normalized to AdapterError like any other failure.
+                    client = CopilotClient(working_directory=cwd, connection=connection)
+                    await client.start()
+                    session = await client.create_session(
                         model=model or None,
                         reasoning_effort=effort,
                         on_permission_request=_deny_by_default_permission,
                         working_directory=cwd,
-                    ) as session:
+                    )
+                    try:
                         unsubscribe = session.on(collector.handle)
                         try:
                             payload, raw = await _run_turns(
@@ -225,26 +239,34 @@ class CopilotAdapter:
                             )
                         finally:
                             unsubscribe()
-                        usage = Usage(
-                            input_tokens=collector.input_tokens,
-                            output_tokens=collector.output_tokens,
-                            cost_usd=0.0,
-                        )
-                        return _TurnResult(payload=payload, raw=raw, usage=usage)
-        except AdapterError:
-            # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
-            raise
-        except TimeoutError as exc:
-            raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
-        except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
-            # The SDK has no public base error or retryable helper, so classify transient by text
-            # (rate-limit/overload still retries), matching the old CLI path. The dedup path catches
-            # only AdapterError, so an escape strands the run non-terminal. (CancelledError is a
-            # BaseException, not Exception, so cancellation is not swallowed.)
-            detail = str(exc)
-            raise AdapterError(
-                f"copilot run failed: {detail}", transient=looks_transient(detail)
-            ) from exc
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await session.disconnect()
+            except AdapterError:
+                # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
+                raise
+            except TimeoutError as exc:
+                raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
+            except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
+                # The SDK has no public base error or retryable helper, so classify transient by
+                # text (rate-limit/overload still retries), matching the old CLI path. The dedup
+                # path catches only AdapterError, so an escape strands the run non-terminal.
+                # (CancelledError is a BaseException, not Exception — cancellation isn't caught.)
+                detail = str(exc)
+                raise AdapterError(
+                    f"copilot run failed: {detail}", transient=looks_transient(detail)
+                ) from exc
+            # Reached only when the inner try completed (every except re-raises), so payload/raw are
+            # bound. Built after teardown (the finally below) so teardown can't mask the result.
+            usage = Usage(
+                input_tokens=collector.input_tokens,
+                output_tokens=collector.output_tokens,
+                cost_usd=0.0,
+            )
+            return _TurnResult(payload=payload, raw=raw, usage=usage)
+        finally:
+            if client is not None:
+                await _teardown_client(client)
 
     def preflight(self) -> Preflight:
         # The SDK resolves a bundled `copilot` not necessarily on PATH, so don't gate on PATH.
@@ -265,11 +287,15 @@ class CopilotAdapter:
         return RuntimeConnection.for_stdio(path=which(self._copilot_bin) or self._copilot_bin)
 
     def _resolve_copilot_bin(self) -> str | None:
-        # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail: an
-        # override resolves via which (abs path or bare name, executability-checked); with NO
-        # override the SDK uses ONLY its bundled binary (no PATH fallback), so neither do we.
+        # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail. An
+        # aeview override resolves via which (abs path or bare name, executability-checked). With NO
+        # override the SDK's order is COPILOT_CLI_PATH env (used verbatim, no PATH search) → bundled
+        # binary; there is no `which("copilot")` fallback, so neither do we.
         if self._copilot_bin:
             return which(self._copilot_bin)
+        env_path = os.environ.get("COPILOT_CLI_PATH")
+        if env_path:
+            return env_path if Path(env_path).exists() else None
         try:
             from copilot.client import _get_bundled_cli_path
 
@@ -329,8 +355,21 @@ def _deny_by_default_permission(
     return PermissionDecisionReject()
 
 
+async def _teardown_client(client: CopilotClient) -> None:
+    # Best-effort, bounded teardown. stop() disconnects sessions + awaits a destroy RPC (which can
+    # hang on a dead connection) before its own bounded terminate→kill, so cap it and fall back to
+    # force_stop() (the SDK's escape for a stuck stop()). A teardown that raises or hangs must
+    # neither mask a valid parsed result nor block — on the daemon thread a wedged teardown only
+    # abandons the subprocess (it finishes on its own; clean subtree-kill is deferred I6b-2).
+    try:
+        await asyncio.wait_for(client.stop(), timeout=_TEARDOWN_GRACE)
+    except Exception:  # noqa: BLE001 - bounded; fall back to the hard kill, never propagate
+        with contextlib.suppress(Exception):
+            await client.force_stop()
+
+
 async def _run_turns(
-    session: object,
+    session: CopilotSession,
     base_prompt: str,
     schema: dict,
     sw_timeout: float,
@@ -342,9 +381,11 @@ async def _run_turns(
     last_error = "copilot produced no valid output"
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         text = base_prompt if attempt == 1 else _RETRY_SUFFIX
-        event = await session.send_and_wait(text, timeout=sw_timeout)  # type: ignore[attr-defined]
+        event = await session.send_and_wait(text, timeout=sw_timeout)
         answer = _final_text(event)
-        payload = _extract_json(answer, schema) if answer else None
+        # _extract_json returns None for an empty answer too (no `{` to scan), so no answer, a
+        # JSON-less answer, and an unparseable answer all funnel to the same re-prompt path.
+        payload = _extract_json(answer, schema)
         if payload is None:
             last_error = "copilot did not return a JSON object matching the schema"
             continue

@@ -28,16 +28,16 @@ def _run_sync_rc(rc: int):
     return lambda args, cwd=None, timeout=None: ProcResult(rc, "", "")
 
 
-def _mock_seams(monkeypatch, *, present=True, authed=True):
+def _mock_seams(monkeypatch, *, authed=True):
     """Mock the SDK-resolving adapters' preflight seams: claude_code.run_sync (claude's bundled-
     binary auth probe), codex.which/run_sync (codex's override/bundled resolution + probe), and
-    doctor.which/run_sync (gh). claude, codex AND copilot all resolve their bundled binaries
-    regardless of `present` (so a missing-binary case must use a bad override — see
-    test_doctor_bad_override_fails); copilot has no auth probe, so its real bundle → warn."""
+    doctor.which/run_sync (gh). claude, codex AND copilot all resolve their bundled binaries (so a
+    missing-binary case must use a bad override — see test_doctor_bad_override_fails); copilot has
+    no auth probe, so its real bundle → warn."""
     from aeview.harness import claude_code, codex
 
     def which_fn(binary):
-        return f"/usr/bin/{binary}" if present else None
+        return f"/usr/bin/{binary}"
 
     rs = _run_sync_rc(0 if authed else 1)
     monkeypatch.setattr(claude_code, "run_sync", rs)
