@@ -61,26 +61,23 @@ def run_doctor(cwd: Path, settings: Settings) -> DoctorReport:
         checks.append(Check("dedup", "warn", "no deduplicationHarness configured"))
 
     for harness in sorted(harness_types):
-        checks.append(_check_harness(harness))
+        checks.append(_check_harness(harness, settings))
 
     checks.append(_check_gh())
     return DoctorReport(checks)
 
 
-def _check_harness(harness: str) -> Check:
+def _check_harness(harness: str, settings: Settings) -> Check:
     name = f"harness:{harness}"
     try:
-        adapter = get_adapter(harness)
+        adapter = get_adapter(harness, settings.harness_binaries.get(harness))
     except AdapterError as exc:
         return Check(name, "fail", str(exc))
-    if which(adapter.binary) is None:
-        return Check(name, "fail", f"{adapter.binary} not found on PATH")
-    if not adapter.auth_status_args:
-        # Some CLIs (copilot) expose no no-cost auth-status command; don't burn a billed call.
-        return Check(name, "warn", f"{adapter.binary} present; auth not verifiable")
-    if run_sync(adapter.auth_status_args, timeout=_AUTH_PROBE_TIMEOUT).returncode == 0:
-        return Check(name, "ok", f"{adapter.binary} present and authenticated")
-    return Check(name, "warn", f"{adapter.binary} present but auth could not be verified")
+    # Each adapter owns its check: claude verifies its SDK-resolved (possibly bundled) binary;
+    # codex/copilot use the shared PATH+auth probe. The harnessBinaries override is already
+    # baked into the constructed adapter.
+    pf = adapter.preflight()
+    return Check(name, pf.status, pf.detail)
 
 
 def _check_gh() -> Check:

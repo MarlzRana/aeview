@@ -20,9 +20,11 @@ from ..schema import ReviewOutput, Usage, make_strict_schema, review_output_json
 from .base import (
     AdapterError,
     HarnessOutput,
+    Preflight,
     SchemaSupport,
     StructuredOutput,
     classify_transient,
+    default_preflight,
 )
 
 # codex reasoning-effort levels (no "minimal", unlike claude); "default"/None -> leave unset.
@@ -32,8 +34,15 @@ _EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 class CodexAdapter:
     name: str = "codex"
     schema_support: SchemaSupport = "constrained"
-    binary: str = "codex"
     auth_status_args: list[str] = ["codex", "login", "status"]  # noqa: RUF012
+
+    def __init__(self, binary_override: str | None = None) -> None:
+        # settings.harnessBinaries["codex"] → argv[0]. None → "codex" on PATH. (Still shells out;
+        # the SDK migration is N5b.)
+        self.binary = binary_override or "codex"
+
+    def preflight(self) -> Preflight:
+        return default_preflight(self)
 
     async def run_structured(
         self,
@@ -52,7 +61,7 @@ class CodexAdapter:
             last_message = Path(tmp) / "last_message.txt"
 
             args = [
-                "codex",
+                self.binary,
                 "exec",
                 "--sandbox",
                 "read-only",

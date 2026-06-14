@@ -73,7 +73,7 @@ class _OkAdapter:
 
 
 async def test_one_reviewer_two_harnesses_writes_distinct_instance_dirs(aeview_home, monkeypatch):
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _OkAdapter())
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _OkAdapter())
     store = RunStore.create(new_run_id())
     store.write_prompt("tests", "SHARED PROMPT")
     roster = [

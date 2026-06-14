@@ -1,151 +1,221 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    CLINotFoundError,
+    ProcessError,
+    ResultMessage,
+    TextBlock,
+)
 
 from aeview.harness import claude_code
 from aeview.harness.base import AdapterError
 from aeview.process import ProcResult
 
-_VALID_CLAUDE_JSON = json.dumps(
-    {
+_REVIEW = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
+
+
+def _result(**overrides) -> ResultMessage:
+    base = {
+        "subtype": "success",
+        "duration_ms": 1,
+        "duration_api_ms": 1,
         "is_error": False,
+        "num_turns": 1,
+        "session_id": "s",
         "total_cost_usd": 0.01,
         "usage": {"input_tokens": 5, "output_tokens": 3},
-        "structured_output": {
-            "verdict": "approve",
-            "summary": "ok",
-            "findings": [],
-            "next_steps": [],
-        },
+        "structured_output": _REVIEW,
     }
-)
+    base.update(overrides)
+    return ResultMessage(**base)
+
+
+def _messages(result: ResultMessage, *, text: str = "reviewed") -> list:
+    # A typical run: one assistant turn (transcript) followed by the terminal ResultMessage.
+    return [AssistantMessage(content=[TextBlock(text=text)], model="claude-opus-4-8"), result]
 
 
 @pytest.fixture
-def capture_run_async(monkeypatch):
-    """Replace the adapter's run_async with a capturing stub; return the captured call."""
-    captured: dict = {}
+def capture_query(monkeypatch):
+    """Mock the SDK boundary: replace claude_code.query with a stub async generator that captures
+    the call (prompt + options) and yields canned SDK messages. Override captured['messages'] before
+    the call to control output; defaults to a valid approve review."""
+    captured: dict = {"messages": _messages(_result())}
 
-    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
-        captured["args"] = args
-        captured["cwd"] = cwd
-        captured["input_text"] = input_text
-        captured["timeout"] = timeout
-        return ProcResult(0, _VALID_CLAUDE_JSON, "")
+    async def fake_query(*, prompt, options, transport=None):
+        captured["prompt"] = prompt
+        captured["options"] = options
+        for message in captured["messages"]:
+            yield message
 
-    monkeypatch.setattr(claude_code, "run_async", fake)
+    monkeypatch.setattr(claude_code, "query", fake_query)
     return captured
 
 
-async def test_adapter_pins_read_only_argv(capture_run_async, tmp_path):
+def _install_raising_query(monkeypatch, exc: Exception) -> None:
+    async def fake_query(*, prompt, options, transport=None):
+        raise exc
+        yield  # unreachable — present only so this is an async generator (the SDK's query type)
+
+    monkeypatch.setattr(claude_code, "query", fake_query)
+
+
+async def test_options_pin_read_only_sandbox_and_schema(capture_query, tmp_path):
     adapter = claude_code.ClaudeCodeAdapter()
     out = await adapter.run("REVIEW PROMPT", "sonnet", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"
 
-    args = capture_run_async["args"]
-    # The read-only contract: native sandbox + dontAsk + mutating tools disallowed.
-    assert _flag_value(args, "--permission-mode") == "dontAsk"
-    assert _flag_value(args, "--disallowedTools") == "Edit Write NotebookEdit"
-    settings = json.loads(_flag_value(args, "--settings"))
-    assert settings["sandbox"]["enabled"] is True
-    assert settings["sandbox"]["filesystem"]["denyWrite"] == ["/"]
-    assert settings["sandbox"]["allowUnsandboxedCommands"] is False
-    assert settings["sandbox"]["failIfUnavailable"] is True
-    # Structured output + model wiring.
-    assert _flag_value(args, "--output-format") == "json"
-    assert _flag_value(args, "--model") == "sonnet"
-    assert "--json-schema" in args
+    opts = capture_query["options"]
+    # The two-layer read-only contract carried on the SDK options.
+    assert opts.permission_mode == "dontAsk"
+    assert opts.disallowed_tools == ["Edit", "Write", "NotebookEdit"]
+    sandbox = json.loads(opts.settings)["sandbox"]
+    assert sandbox["enabled"] is True
+    assert sandbox["filesystem"]["denyWrite"] == ["/"]
+    assert sandbox["failIfUnavailable"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+    # Read-anywhere: the filesystem root is granted as readable so reviewers can read references
+    # outside the repo (under dontAsk the Read tool is otherwise denied outside cwd). Live-verified.
+    assert opts.add_dirs == ["/"]
+    assert opts.extra_args.get("no-session-persistence", "MISSING") is None
+    # Structured output + model wiring; prompt goes to query(prompt=...), not into options.
+    assert opts.output_format["type"] == "json_schema"
+    assert "verdict" in opts.output_format["schema"]["properties"]
+    assert opts.model == "sonnet"
+    assert opts.cwd == str(tmp_path)
+    assert capture_query["prompt"] == "REVIEW PROMPT"
 
 
-async def test_run_structured_delivers_the_given_schema(capture_run_async, tmp_path):
-    # The generic path must hand through whatever schema it's given (e.g. dedup), not the
-    # review schema. Assert the --json-schema arg carries the caller's schema verbatim.
+async def test_run_structured_delivers_the_given_schema(capture_query, tmp_path):
+    # The generic path hands through whatever schema it's given (e.g. dedup), not the review schema.
     from aeview.schema import duplicate_groups_json_schema
 
-    adapter = claude_code.ClaudeCodeAdapter()
+    capture_query["messages"] = _messages(_result(structured_output={"duplicate_groups": []}))
     schema = duplicate_groups_json_schema()
-    await adapter.run_structured("P", schema, "opus", tmp_path, tmp_path / "log", timeout=5.0)
-
-    # The genuine assertion: the *given* schema is delivered on --json-schema (the stub's
-    # canned return payload would only document the stub, so we don't assert on it).
-    delivered = json.loads(_flag_value(capture_run_async["args"], "--json-schema"))
+    out = await claude_code.ClaudeCodeAdapter().run_structured(
+        "P", schema, "opus", tmp_path, tmp_path / "log", timeout=5.0
+    )
+    delivered = capture_query["options"].output_format["schema"]
     assert "duplicate_groups" in delivered["properties"]
-    assert "verdict" not in delivered.get("properties", {})  # not the review schema
+    assert "verdict" not in delivered.get("properties", {})
+    assert out.payload == {"duplicate_groups": []}
 
 
-async def test_adapter_forwards_timeout_to_run_async(capture_run_async, tmp_path):
-    # The per-review timeout must reach run_async (where the child is killed on expiry) — the
-    # fan_out->adapter hop is tested elsewhere, this pins adapter.run->run_structured->run_async.
-    await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log", None, 90.0)
-    assert capture_run_async["timeout"] == 90.0
+async def test_thinking_maps_to_effort(capture_query, tmp_path):
+    await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log", "xhigh")
+    assert capture_query["options"].extra_args["effort"] == "xhigh"
 
 
-async def test_adapter_maps_thinking_to_effort(capture_run_async, tmp_path):
-    adapter = claude_code.ClaudeCodeAdapter()
-    await adapter.run("p", "opus", tmp_path, tmp_path / "log", "xhigh")
-    args = capture_run_async["args"]
-    assert _flag_value(args, "--effort") == "xhigh"
-
-
-async def test_adapter_omits_effort_for_default_thinking(capture_run_async, tmp_path):
+async def test_default_thinking_omits_effort(capture_query, tmp_path):
     adapter = claude_code.ClaudeCodeAdapter()
     await adapter.run("p", "opus", tmp_path, tmp_path / "log", "default")
-    assert "--effort" not in capture_run_async["args"]
+    assert "effort" not in capture_query["options"].extra_args
     await adapter.run("p", "opus", tmp_path, tmp_path / "log", None)
-    assert "--effort" not in capture_run_async["args"]
+    assert "effort" not in capture_query["options"].extra_args
 
 
-async def test_adapter_passes_prompt_on_stdin_not_argv(capture_run_async, tmp_path):
-    adapter = claude_code.ClaudeCodeAdapter()
-    await adapter.run("REVIEW PROMPT", "sonnet", tmp_path, tmp_path / "log")
-    assert capture_run_async["input_text"] == "REVIEW PROMPT"  # stdin
-    assert "REVIEW PROMPT" not in capture_run_async["args"]  # not an argv element (ARG_MAX)
+async def test_usage_and_cost_are_mapped(capture_query, tmp_path):
+    capture_query["messages"] = _messages(
+        _result(total_cost_usd=0.25, usage={"input_tokens": 100, "output_tokens": 40})
+    )
+    out = await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert out.usage.input_tokens == 100
+    assert out.usage.output_tokens == 40
+    assert out.usage.cost_usd == 0.25
 
 
-async def test_adapter_missing_binary_becomes_adapter_error(monkeypatch, tmp_path):
-    async def missing(args, cwd=None, log_path=None, input_text=None, timeout=None):
-        return ProcResult(127, "", "claude: command not found")
-
-    monkeypatch.setattr(claude_code, "run_async", missing)
-    adapter = claude_code.ClaudeCodeAdapter()
-    with pytest.raises(AdapterError):
-        await adapter.run("p", "sonnet", tmp_path, tmp_path / "log")
+async def test_binary_override_threads_to_cli_path(capture_query, tmp_path):
+    await claude_code.ClaudeCodeAdapter("/custom/claude").run(
+        "p", "opus", tmp_path, tmp_path / "log"
+    )
+    assert capture_query["options"].cli_path == "/custom/claude"
 
 
-def test_interpret_classifies_rate_limit_as_transient():
-    adapter = claude_code.ClaudeCodeAdapter()
-    payload = json.dumps({"is_error": True, "api_error_status": 429, "result": "slow down"})
+async def test_default_adapter_leaves_cli_path_unset(capture_query, tmp_path):
+    # No override → cli_path None → the SDK uses its own resolution (bundled binary, then PATH).
+    await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert capture_query["options"].cli_path is None
+
+
+async def test_missing_binary_becomes_non_transient_adapter_error(monkeypatch, tmp_path):
+    _install_raising_query(monkeypatch, CLINotFoundError("Claude Code not found"))
     with pytest.raises(AdapterError) as ei:
-        adapter._interpret(payload, "", 1)
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
+
+
+async def test_process_error_rate_limit_is_transient(monkeypatch, tmp_path):
+    _install_raising_query(monkeypatch, ProcessError("boom", exit_code=1, stderr="rate limit hit"))
+    with pytest.raises(AdapterError) as ei:
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
     assert ei.value.transient is True
 
 
-def test_interpret_classifies_auth_error_as_non_transient():
-    adapter = claude_code.ClaudeCodeAdapter()
-    payload = json.dumps(
-        {"is_error": True, "api_error_status": 401, "result": "could not load credentials"}
+async def test_process_error_generic_is_non_transient(monkeypatch, tmp_path):
+    _install_raising_query(
+        monkeypatch, ProcessError("boom", exit_code=2, stderr="some other error")
     )
     with pytest.raises(AdapterError) as ei:
-        adapter._interpret(payload, "", 1)
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
     assert ei.value.transient is False
 
 
-def test_interpret_missing_binary_is_non_transient():
-    adapter = claude_code.ClaudeCodeAdapter()
+async def test_timeout_is_non_transient_and_fails_fast(monkeypatch, tmp_path):
+    # asyncio.timeout fires while the generator is still producing -> non-transient (fail-fast), and
+    # the generator is aclosed in the finally so the subprocess can't leak.
+    async def slow_query(*, prompt, options, transport=None):
+        await asyncio.sleep(10)
+        yield  # pragma: no cover - never reached; the timeout fires first
+
+    monkeypatch.setattr(claude_code, "query", slow_query)
     with pytest.raises(AdapterError) as ei:
-        adapter._interpret("", "claude: command not found", 127)
+        await claude_code.ClaudeCodeAdapter().run(
+            "p", "opus", tmp_path, tmp_path / "log", timeout=0.05
+        )
     assert ei.value.transient is False
 
 
-def test_interpret_timeout_is_non_transient():
-    # A per-review timeout (our 124) must NOT be retried, even though "timed out" reads transient
-    # to the text classifier — fail-fast so a stuck review burns one window, not three.
-    adapter = claude_code.ClaudeCodeAdapter()
+async def test_run_rejects_schema_invalid_structured_output(capture_query, tmp_path):
+    capture_query["messages"] = _messages(_result(structured_output={"summary": "no verdict"}))
+    with pytest.raises(AdapterError, match="schema validation"):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+
+
+def test_interpret_rate_limit_status_is_transient():
+    rm = _result(is_error=True, api_error_status=429, result="slow down")
     with pytest.raises(AdapterError) as ei:
-        adapter._interpret("", "claude: timed out after 1s", 124)
+        claude_code.ClaudeCodeAdapter()._interpret(rm, [])
+    assert ei.value.transient is True
+
+
+def test_interpret_auth_error_is_non_transient():
+    rm = _result(is_error=True, api_error_status=401, result="could not load credentials")
+    with pytest.raises(AdapterError) as ei:
+        claude_code.ClaudeCodeAdapter()._interpret(rm, [])
     assert ei.value.transient is False
+
+
+def test_interpret_transient_via_errors_text_without_status():
+    rm = _result(is_error=True, api_error_status=None, errors=["overloaded, please try again"])
+    with pytest.raises(AdapterError) as ei:
+        claude_code.ClaudeCodeAdapter()._interpret(rm, [])
+    assert ei.value.transient is True
+
+
+def test_interpret_no_result_message_is_error():
+    with pytest.raises(AdapterError, match="no result message"):
+        claude_code.ClaudeCodeAdapter()._interpret(None, [])
+
+
+def test_interpret_missing_structured_output_is_error():
+    rm = _result(structured_output=None)
+    with pytest.raises(AdapterError, match="structured_output"):
+        claude_code.ClaudeCodeAdapter()._interpret(rm, [])
 
 
 def test_classify_transient_timeout_vs_real_transient():
@@ -157,43 +227,20 @@ def test_classify_transient_timeout_vs_real_transient():
     assert classify_transient(1, "some other error") is False
 
 
-def test_interpret_transient_text_on_non_json_is_transient():
-    adapter = claude_code.ClaudeCodeAdapter()
-    with pytest.raises(AdapterError) as ei:
-        adapter._interpret("", "error: overloaded, please try again", 1)
-    assert ei.value.transient is True
+def test_preflight_ok_when_binary_resolves_and_authed(monkeypatch):
+    # No override → resolves the SDK's bundled binary; mock the auth probe so no subprocess spawns.
+    monkeypatch.setattr(claude_code, "run_sync", lambda *a, **k: ProcResult(0, "", ""))
+    pf = claude_code.ClaudeCodeAdapter().preflight()
+    assert pf.status == "ok"
 
 
-def test_interpret_transient_via_result_text_without_status():
-    adapter = claude_code.ClaudeCodeAdapter()
-    payload = json.dumps({"is_error": True, "api_error_status": None, "result": "rate limit hit"})
-    with pytest.raises(AdapterError) as ei:
-        adapter._interpret(payload, "", 1)
-    assert ei.value.transient is True
+def test_preflight_warns_when_auth_unverified(monkeypatch):
+    monkeypatch.setattr(claude_code, "run_sync", lambda *a, **k: ProcResult(1, "", "not logged in"))
+    pf = claude_code.ClaudeCodeAdapter().preflight()
+    assert pf.status == "warn"
 
 
-def test_interpret_nonzero_exit_without_error_payload():
-    # Valid JSON, not flagged is_error, but a non-zero exit -> treated as a failure.
-    adapter = claude_code.ClaudeCodeAdapter()
-    with pytest.raises(AdapterError, match="without an error payload"):
-        adapter._interpret(json.dumps({"result": "out"}), "", 1)
-
-
-async def test_run_rejects_schema_invalid_structured_output(monkeypatch, tmp_path):
-    # run() validates the structured_output into ReviewOutput; codex has this guard and claude
-    # must too (the validation moved into run() when run_structured was split out).
-    bad = json.dumps(
-        {"is_error": False, "structured_output": {"summary": "no verdict"},
-         "usage": {"input_tokens": 1, "output_tokens": 1}, "total_cost_usd": 0.0}
-    )
-
-    async def fake(args, cwd=None, log_path=None, input_text=None, timeout=None):
-        return ProcResult(0, bad, "")
-
-    monkeypatch.setattr(claude_code, "run_async", fake)
-    with pytest.raises(AdapterError, match="schema validation"):
-        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
-
-
-def _flag_value(args: list[str], flag: str) -> str:
-    return args[args.index(flag) + 1]
+def test_preflight_fails_when_override_binary_missing():
+    # An explicit override that doesn't exist can't be resolved -> fail (no auth probe attempted).
+    pf = claude_code.ClaudeCodeAdapter("/nonexistent/claude/binary").preflight()
+    assert pf.status == "fail"

@@ -75,6 +75,10 @@ class Settings(BaseModel):
     # keeps hitting transient errors can still span a few invocations, each bounded by this.
     # Generous by default — model reviews of a large diff are slow.
     review_timeout_seconds: int = Field(default=1200, ge=1)
+    # Per-harness binary path override, keyed by harness name (claude-code/codex/copilot). Each
+    # harness SDK resolves its own bundled binary by default; an entry here points it at a specific
+    # executable instead (claude `cli_path`, codex/copilot argv[0]). Absent/empty → SDK default.
+    harness_binaries: dict[str, str] = Field(default_factory=dict)
 
 
 def _package_data(name: str) -> str:

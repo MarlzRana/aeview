@@ -104,7 +104,10 @@ async def _dedup_and_apply(
             Usage(),
         )
 
-    outcome = await run_dedup(pool, instance, store, cwd, DEDUP_TIMEOUT_S)
+    outcome = await run_dedup(
+        pool, instance, store, cwd, DEDUP_TIMEOUT_S,
+        binary_override=settings.harness_binaries.get(instance.harness),
+    )
     if outcome.status != "ok":
         return (
             Dedup(status="failed", harness=outcome.harness_id, reason=outcome.reason,

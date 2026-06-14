@@ -28,8 +28,9 @@ _HARNESS = [{"harness": "claude-code", "model": "opus"}]
 
 def _roster(n: int) -> list[RosterEntry]:
     return [
-        RosterEntry(id=f"r{i}__claude-code-opus", reviewer=f"r{i}", harness="claude-code",
-                    model="opus")
+        RosterEntry(
+            id=f"r{i}__claude-code-opus", reviewer=f"r{i}", harness="claude-code", model="opus"
+        )
         for i in range(n)
     ]
 
@@ -110,9 +111,7 @@ def test_doctor_command_exit_codes(aeview_home, monkeypatch):
 
 
 def _settings():
-    return Settings(
-        fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model="m")]
-    )
+    return Settings(fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model="m")])
 
 
 def test_resolve_all_lenient_skips_bad_reviewer(tmp_path, capsys):
@@ -193,8 +192,9 @@ def test_run_prunes_stale_terminal_runs(aeview_home, git_repo, stub_claude, monk
     assert "stale-run" not in {p.name for p in runs_dir().iterdir()}
 
 
-def test_run_reconciles_and_prunes_crashed_running_run(aeview_home, git_repo, stub_claude,
-                                                       monkeypatch):
+def test_run_reconciles_and_prunes_crashed_running_run(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
     # A crashed run stuck 'running' (dead pid) is reconciled to 'interrupted' at the start of a
     # real run, which makes it a prune candidate (keepLast=0 + old) -> the stuck-running leak is
     # collected instead of lingering forever.
@@ -249,17 +249,22 @@ def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_cl
 
     monkeypatch.chdir(git_repo)
     aeview_home.mkdir(parents=True, exist_ok=True)
-    (aeview_home / "settings.json").write_text(json.dumps({"reviewTimeoutSeconds": 555}))
+    (aeview_home / "settings.json").write_text(
+        json.dumps({"reviewTimeoutSeconds": 555, "harnessBinaries": {"claude-code": "/x/claude"}})
+    )
     captured: dict = {}
 
-    async def fake_fan_out(store, roster, prompts, cwd, timeout=None):
+    async def fake_fan_out(store, roster, prompts, cwd, timeout=None, harness_binaries=None):
         captured["timeout"] = timeout
+        captured["harness_binaries"] = harness_binaries
         return []
 
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     CliRunner().invoke(app, ["run", "--scope", "working-tree"])
     assert captured["timeout"] == 555
+    # settings.harnessBinaries also threads to fan_out (the per-harness binary override).
+    assert captured["harness_binaries"] == {"claude-code": "/x/claude"}
 
 
 def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
@@ -350,13 +355,17 @@ def _dry_plan(
     auto_activated: list[str] | None = None,
 ) -> _Plan:
     roster = [
-        RosterEntry(id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}",
-                    thinking=thinking)
+        RosterEntry(
+            id=f"r__h{i}", reviewer="r", harness="claude-code", model=f"m{i}", thinking=thinking
+        )
         for i in range(n_reviews)
     ]
     bundle = Bundle(
-        mode=mode, scope=ScopeSpec(type="branch", base="main"),
-        diff="x", summary="s", diff_bytes=123,
+        mode=mode,
+        scope=ScopeSpec(type="branch", base="main"),
+        diff="x",
+        summary="s",
+        diff_bytes=123,
     )
     return _Plan(
         names=["r"],
@@ -432,11 +441,13 @@ def test_merge_settings_carries_the_pinned_dedup_plan():
     from aeview.cli import _merge_settings
     from aeview.schema import DedupPlan
 
-    settings = _merge_settings(DedupPlan(id="x", harness="codex", model="gpt-5.5", thinking="high"))
+    plan = DedupPlan(id="x", harness="codex", model="gpt-5.5", thinking="high")
+    settings = _merge_settings(plan, {"codex": "/x/codex"})
     pinned = settings.deduplication_harness
     assert pinned is not None
     assert (pinned.harness, pinned.model, pinned.thinking) == ("codex", "gpt-5.5", "high")
-    assert _merge_settings(None).deduplication_harness is None
+    assert settings.harness_binaries == {"codex": "/x/codex"}  # live overrides ride alongside
+    assert _merge_settings(None, {}).deduplication_harness is None
 
 
 def test_display_path_collapses_home_with_boundary_guard(tmp_path, monkeypatch):

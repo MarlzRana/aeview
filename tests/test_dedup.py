@@ -46,7 +46,9 @@ class _StubAdapter:
 
 async def test_run_dedup_ok_writes_artifacts_and_returns_groups(aeview_home, monkeypatch, tmp_path):
     payload = {"duplicate_groups": [{"survivor": "f2", "duplicates": ["f1"]}]}
-    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: _StubAdapter(payload=payload))
+    monkeypatch.setattr(
+        dedup_mod, "get_adapter", lambda h, override=None: _StubAdapter(payload=payload)
+    )
     store = RunStore.create(new_run_id())
 
     outcome = await run_dedup(_pool(), _instance(), store, tmp_path, timeout=5.0)
@@ -68,7 +70,9 @@ async def test_run_dedup_ok_writes_artifacts_and_returns_groups(aeview_home, mon
 
 async def test_run_dedup_adapter_error_is_failed_outcome(aeview_home, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        dedup_mod, "get_adapter", lambda h: _StubAdapter(error=AdapterError("timed out"))
+        dedup_mod,
+        "get_adapter",
+        lambda h, override=None: _StubAdapter(error=AdapterError("timed out")),
     )
     store = RunStore.create(new_run_id())
 
@@ -86,7 +90,7 @@ async def test_run_dedup_adapter_error_is_failed_outcome(aeview_home, monkeypatc
 async def test_run_dedup_invalid_output_is_failed(aeview_home, monkeypatch, tmp_path):
     # Payload that doesn't match DuplicateGroups -> validation failure -> failed outcome.
     monkeypatch.setattr(
-        dedup_mod, "get_adapter", lambda h: _StubAdapter(payload={"wrong": "shape"})
+        dedup_mod, "get_adapter", lambda h, override=None: _StubAdapter(payload={"wrong": "shape"})
     )
     store = RunStore.create(new_run_id())
     outcome = await run_dedup(_pool(), _instance(), store, tmp_path, timeout=5.0)
@@ -113,7 +117,7 @@ async def test_run_dedup_invokes_adapter_with_dedup_schema_and_instance(
     aeview_home, monkeypatch, tmp_path
 ):
     rec = _RecordingAdapter()
-    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: rec)
+    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h, override=None: rec)
     await run_dedup(_pool(), _instance(), RunStore.create(new_run_id()), tmp_path, timeout=42.0)
 
     assert "duplicate_groups" in rec.call["schema"]["properties"]  # dedup schema, not review
@@ -128,7 +132,7 @@ async def test_dedup_prompt_frames_adversarial_finding_as_data(aeview_home, monk
     # after the data-only instruction — not be presented as instructions. Asserts ordering,
     # not mere presence, so a regression that drops/relocates the framing fails.
     rec = _RecordingAdapter()
-    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: rec)
+    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h, override=None: rec)
     adversarial = [
         PooledFinding(
             id="f1",

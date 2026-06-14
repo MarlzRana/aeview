@@ -84,7 +84,11 @@ async def test_findings_sorted_by_severity(aeview_home):
 
 async def test_failed_review_counted_in_coverage(aeview_home):
     failed = ReviewResult(
-        id="r2", reviewer="default", harness="claude-code", model="sonnet", status="failed",
+        id="r2",
+        reviewer="default",
+        harness="claude-code",
+        model="sonnet",
+        status="failed",
         error="boom",
     )
     review = _done("r1", [_finding("x", "high")], "needs-attention")
@@ -97,7 +101,11 @@ async def test_failed_review_counted_in_coverage(aeview_home):
 async def test_all_reviews_failed_forces_needs_attention(aeview_home):
     # The deferred bug: a run where every review failed must not report a green approve.
     failed = ReviewResult(
-        id="r", reviewer="default", harness="claude-code", model="sonnet", status="failed",
+        id="r",
+        reviewer="default",
+        harness="claude-code",
+        model="sonnet",
+        status="failed",
         error="boom",
     )
     report = await _merge([failed], aeview_home)
@@ -122,7 +130,7 @@ def _two_reviews() -> list[ReviewResult]:
 
 async def test_dedup_groups_collapse_to_one_survivor(aeview_home, monkeypatch):
     # f1 (a, high) and f2 (b, critical) are judged the same issue; survivor f2 kept verbatim.
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome(
             "ok", [DuplicateGroup(survivor="f2", duplicates=["f1"])], Usage(cost_usd=0.02), "dx"
         )
@@ -144,7 +152,7 @@ async def test_dedup_groups_collapse_to_one_survivor(aeview_home, monkeypatch):
 
 
 async def test_dedup_failure_emits_raw_union_with_notice(aeview_home, monkeypatch):
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome(
             "failed", [], Usage(), "dx", reason="harness timed out after 600s", warning="W"
         )
@@ -163,7 +171,7 @@ async def test_dedup_skipped_when_fewer_than_two_findings(aeview_home, monkeypat
     # billed harness call entirely (run_dedup must not be invoked).
     called = False
 
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         nonlocal called
         called = True
         return DedupOutcome("ok", [], Usage(), "dx")
@@ -189,7 +197,7 @@ async def test_dedup_unconfigured_with_multiple_reviews_fails_loud(aeview_home):
 
 async def test_invalid_survivor_falls_back_to_strongest(aeview_home, monkeypatch):
     # Harness nominates an id that isn't in the group; aeview falls back to severity->conf->id.
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome(
             "ok", [DuplicateGroup(survivor="f99", duplicates=["f1", "f2"])], Usage(), "dx"
         )
@@ -212,7 +220,7 @@ def _three_reviews() -> list[ReviewResult]:
 
 async def test_ungrouped_findings_survive_as_singletons(aeview_home, monkeypatch):
     # A group covers only f1+f3; f2 is never mentioned and must survive on its own (no loss).
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome("ok", [DuplicateGroup(survivor="f3", duplicates=["f1"])], Usage(), "dx")
 
     monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
@@ -226,7 +234,7 @@ async def test_ungrouped_findings_survive_as_singletons(aeview_home, monkeypatch
 
 async def test_hostile_groups_no_loss_no_double_count(aeview_home, monkeypatch):
     # Overlapping groups, a repeated id, and an unknown id — every real finding appears once.
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome(
             "ok",
             [
@@ -250,7 +258,7 @@ async def test_same_review_grouping_is_not_corroboration(aeview_home, monkeypatc
     # Reviewer `a` emits two findings the harness groups together; `b` only satisfies the
     # >1-review gate. The survivor has agreement 2 (raw group size) but ONE distinct review,
     # so it must NOT count as corroborated. This fails under the old `f.agreement > 1` formula.
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome("ok", [DuplicateGroup(survivor="f1", duplicates=["f2"])], Usage(), "dx")
 
     monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
@@ -267,7 +275,7 @@ async def test_same_review_grouping_is_not_corroboration(aeview_home, monkeypatc
 
 
 async def test_next_steps_ordered_by_strongest_severity(aeview_home, monkeypatch):
-    async def fake_dedup(pool, instance, store, cwd, timeout=600.0):
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome("ok", [], Usage(), "dx")  # no grouping, keep all findings
 
     monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)

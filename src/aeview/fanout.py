@@ -29,7 +29,12 @@ def _backoff_delay(attempt: int) -> float:
 
 
 async def _run_review(
-    store: RunStore, entry: RosterEntry, prompt: str, cwd: Path, timeout: float | None
+    store: RunStore,
+    entry: RosterEntry,
+    prompt: str,
+    cwd: Path,
+    timeout: float | None,
+    harness_binaries: dict[str, str],
 ) -> ReviewResult:
     result = ReviewResult(
         id=entry.id,
@@ -43,7 +48,7 @@ async def _run_review(
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        return await _attempt_review(store, result, entry, prompt, cwd, timeout)
+        return await _attempt_review(store, result, entry, prompt, cwd, timeout, harness_binaries)
     except AdapterError as exc:
         return _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
@@ -51,16 +56,25 @@ async def _run_review(
 
 
 async def _attempt_review(
-    store: RunStore, result: ReviewResult, entry: RosterEntry, prompt: str, cwd: Path,
+    store: RunStore,
+    result: ReviewResult,
+    entry: RosterEntry,
+    prompt: str,
+    cwd: Path,
     timeout: float | None,
+    harness_binaries: dict[str, str],
 ) -> ReviewResult:
-    adapter = get_adapter(entry.harness)
+    adapter = get_adapter(entry.harness, harness_binaries.get(entry.harness))
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             out = await adapter.run(
-                prompt, entry.model, cwd, store.log_path(entry.reviewer, entry.id),
-                thinking=entry.thinking, timeout=timeout,
+                prompt,
+                entry.model,
+                cwd,
+                store.log_path(entry.reviewer, entry.id),
+                thinking=entry.thinking,
+                timeout=timeout,
             )
         except AdapterError as exc:
             last_error = str(exc)
@@ -98,10 +112,12 @@ async def fan_out(
     prompt_by_reviewer: dict[str, str],
     cwd: Path,
     timeout: float | None = None,
+    harness_binaries: dict[str, str] | None = None,
 ) -> list[ReviewResult]:
+    overrides = harness_binaries or {}
     tasks = [
         asyncio.create_task(
-            _run_review(store, entry, prompt_by_reviewer[entry.reviewer], cwd, timeout)
+            _run_review(store, entry, prompt_by_reviewer[entry.reviewer], cwd, timeout, overrides)
         )
         for entry in roster
     ]

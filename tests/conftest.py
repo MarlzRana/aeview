@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 
 def make_reviewer(
@@ -45,16 +46,75 @@ def aeview_home(tmp_path, monkeypatch):
     return home / ".aeview"
 
 
+_STUB_OK = {
+    "verdict": "needs-attention",
+    "summary": "One issue found.",
+    "findings": [
+        {
+            "title": "Unhandled None input",
+            "body": "add() will raise on None.",
+            "severity": "high",
+            "category": "bug",
+            "confidence": 0.8,
+            "location": {"file": "app.py", "line_start": 2, "line_end": 2},
+            "recommendation": "Guard against None before adding.",
+        }
+    ],
+    "next_steps": ["Add a None guard."],
+}
+_STUB_APPROVE = {
+    "verdict": "approve",
+    "summary": "Looks correct.",
+    "findings": [],
+    "next_steps": [],
+}
+
+
+def _stub_result(structured, *, is_error: bool = False, result: str = "") -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=is_error,
+        num_turns=1,
+        session_id="stub",
+        total_cost_usd=0.0123,
+        usage={"input_tokens": 100, "output_tokens": 50},
+        result=result,
+        structured_output=structured,
+    )
+
+
 @pytest.fixture
 def stub_claude(monkeypatch):
-    """Put the offline `claude` stub first on PATH; return a mode setter."""
-    stub_dir = Path(__file__).parent / "stubs"
-    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    """Mock the claude SDK boundary (claude_code.query) with an offline async-generator stub. The
+    claude adapter resolves the SDK's bundled binary (not a PATH stub), so Tier-1 tests intercept
+    the SDK call itself. Returns a mode setter; modes mirror the old CLI stub (ok/approve/error/
+    malformed). A dedup call (its schema carries duplicate_groups) returns an empty grouping."""
+    from aeview.harness import claude_code
+
+    state = {"mode": "ok"}
+
+    async def fake_query(*, prompt, options, transport=None):
+        if "duplicate_groups" in json.dumps(options.output_format):
+            yield _stub_result({"duplicate_groups": []})  # dedup ok: findings pass through
+            return
+        yield AssistantMessage(content=[TextBlock(text="stub review")], model="claude-opus-4-8")
+        mode = state["mode"]
+        if mode == "error":
+            yield _stub_result(None, is_error=True, result="stub harness error")  # non-transient
+        elif mode == "approve":
+            yield _stub_result(_STUB_APPROVE)
+        elif mode == "malformed":
+            yield _stub_result({"summary": "missing verdict"})  # run() schema-validation fails
+        else:  # ok
+            yield _stub_result(_STUB_OK)
+
+    monkeypatch.setattr(claude_code, "query", fake_query)
 
     def set_mode(mode: str) -> None:
-        monkeypatch.setenv("AEVIEW_STUB_MODE", mode)
+        state["mode"] = mode
 
-    set_mode("ok")
     return set_mode
 
 

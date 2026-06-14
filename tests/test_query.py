@@ -44,9 +44,7 @@ class _ApproveAdapter:
 
 
 def _roster() -> list[RosterEntry]:
-    return [
-        RosterEntry(id=_REVIEW_ID, reviewer="default", harness="claude-code", model="opus")
-    ]
+    return [RosterEntry(id=_REVIEW_ID, reviewer="default", harness="claude-code", model="opus")]
 
 
 def _write_run(
@@ -190,9 +188,7 @@ def test_status_rejects_dotdot_and_backslash_run_ids(aeview_home):
 
 
 def _custom_roster(*ids: str) -> list[RosterEntry]:
-    return [
-        RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids
-    ]
+    return [RosterEntry(id=i, reviewer="default", harness="claude-code", model="m") for i in ids]
 
 
 def _review(rid: str, status: str) -> ReviewResult:
@@ -323,8 +319,11 @@ def test_list_empty(aeview_home):
 def test_list_newest_first_with_verdict_and_coverage(aeview_home):
     _write_run("old", created_at="2026-06-07T09:00:00Z", verdict="approve", contributed=1)
     _write_run(
-        "new", created_at="2026-06-07T13:00:00Z", verdict="needs-attention",
-        contributed=2, failed=1,
+        "new",
+        created_at="2026-06-07T13:00:00Z",
+        verdict="needs-attention",
+        contributed=2,
+        failed=1,
     )
     res = runner.invoke(app, ["list"])
     lines = [ln for ln in res.output.splitlines() if ln.strip()]
@@ -459,16 +458,20 @@ def _resume_run(run_id: str, statuses: dict[str, str]) -> RunStore:
     for rid, status in statuses.items():
         store.write_review(
             ReviewResult(
-                id=rid, reviewer="default", harness="claude-code",
-                model=rid.split("__")[1], status=status,
-                verdict="approve" if status == "done" else None, summary="s",
+                id=rid,
+                reviewer="default",
+                harness="claude-code",
+                model=rid.split("__")[1],
+                status=status,
+                verdict="approve" if status == "done" else None,
+                summary="s",
             )
         )
     return store
 
 
 def test_resume_reruns_only_non_done_and_remerges(aeview_home, monkeypatch):
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _ApproveAdapter())
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _ApproveAdapter())
     store = _resume_run("rerun", {"default__a": "done", "default__b": "failed"})
     res = runner.invoke(app, ["resume", "rerun"])
     assert res.exit_code == 0  # both approve now -> merged approve
@@ -487,7 +490,9 @@ def test_resume_reruns_only_non_done_and_remerges(aeview_home, monkeypatch):
 def test_resume_merge_only_when_crashed_before_merge(aeview_home, monkeypatch):
     # All reviews done but no report (crashed after the reviews, before merge): resume merges
     # the on-disk reviews without re-running anything.
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _ApproveAdapter())  # must NOT be called
+    monkeypatch.setattr(
+        fanout, "get_adapter", lambda h, override=None: _ApproveAdapter()
+    )  # must NOT be called
     store = _resume_run("premerge", {"default__a": "done", "default__b": "done"})
     assert not (store.dir / "report.json").exists()
     res = runner.invoke(app, ["resume", "premerge"])
@@ -504,18 +509,27 @@ def test_status_wait_polls_until_terminal(aeview_home, monkeypatch):
     store = RunStore.create("r")
     store.write_manifest(
         RunManifest(
-            run_id="r", created_at="2026-06-07T10:00:00Z", overall="running",
+            run_id="r",
+            created_at="2026-06-07T10:00:00Z",
+            overall="running",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster(_REVIEW_ID), pid=os.getpid(),
+            roster=_custom_roster(_REVIEW_ID),
+            pid=os.getpid(),
         )
     )
     store.write_review(
-        ReviewResult(id=_REVIEW_ID, reviewer="default", harness="claude-code", model="opus",
-                     status="done")
+        ReviewResult(
+            id=_REVIEW_ID, reviewer="default", harness="claude-code", model="opus", status="done"
+        )
     )
     store.write_report(
-        Report(verdict="approve", summary="s", coverage=Coverage(contributed=1, failed=0),
-               dedup=Dedup(status="skipped"), usage=UsageBreakdown())
+        Report(
+            verdict="approve",
+            summary="s",
+            coverage=Coverage(contributed=1, failed=0),
+            dedup=Dedup(status="skipped"),
+            usage=UsageBreakdown(),
+        )
     )
 
     def flip_to_done(_seconds):
@@ -565,22 +579,28 @@ class _RecordingAdapter:
         self.seen.append({"prompt": prompt, "cwd": str(cwd)})
         return HarnessOutput(
             review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
-            usage=Usage(), raw="{}",
+            usage=Usage(),
+            raw="{}",
         )
 
 
 def test_resume_uses_manifest_cwd_and_frozen_prompt(aeview_home, tmp_path, monkeypatch):
     adapter = _RecordingAdapter()
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
     repo = tmp_path / "original-repo"
     repo.mkdir()
     store = RunStore.create("rc")
     store.write_prompt("default", "FROZEN PROMPT BODY")
     store.write_manifest(
         RunManifest(
-            run_id="rc", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            run_id="rc",
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster("default__a"), dedup=None, cwd=str(repo), pid=_DEAD_PID,
+            roster=_custom_roster("default__a"),
+            dedup=None,
+            cwd=str(repo),
+            pid=_DEAD_PID,
         )
     )
     store.write_review(_review("default__a", "running"))
@@ -595,17 +615,25 @@ class _DedupStubAdapter:
 
     async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
         finding = Finding(
-            title="t", body="b", severity="low", category="bug", confidence=0.5,
-            location=Location(file="f.py", line_start=1, line_end=1), recommendation="r",
+            title="t",
+            body="b",
+            severity="low",
+            category="bug",
+            confidence=0.5,
+            location=Location(file="f.py", line_start=1, line_end=1),
+            recommendation="r",
         )
         return HarnessOutput(
-            review=ReviewOutput(verdict="needs-attention", summary="s", findings=[finding],
-                                next_steps=[]),
-            usage=Usage(), raw="{}",
+            review=ReviewOutput(
+                verdict="needs-attention", summary="s", findings=[finding], next_steps=[]
+            ),
+            usage=Usage(),
+            raw="{}",
         )
 
-    async def run_structured(self, prompt, schema, model, cwd, log_path, thinking=None,
-                             timeout=None, validate=None):
+    async def run_structured(
+        self, prompt, schema, model, cwd, log_path, thinking=None, timeout=None, validate=None
+    ):
         from aeview.harness.base import StructuredOutput
 
         return StructuredOutput(payload={"duplicate_groups": []}, usage=Usage(), raw="{}")
@@ -614,8 +642,8 @@ class _DedupStubAdapter:
 def test_resume_remerges_via_pinned_dedup_harness(aeview_home, monkeypatch):
     import aeview.dedup as dedup_mod
 
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _DedupStubAdapter())
-    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h: _DedupStubAdapter())
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _DedupStubAdapter())
+    monkeypatch.setattr(dedup_mod, "get_adapter", lambda h, override=None: _DedupStubAdapter())
     store = RunStore.create("pin")
     store.write_prompt("default", "P")
     roster = [
@@ -624,7 +652,9 @@ def test_resume_remerges_via_pinned_dedup_harness(aeview_home, monkeypatch):
     ]
     store.write_manifest(
         RunManifest(
-            run_id="pin", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            run_id="pin",
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
             roster=roster,
             dedup=DedupPlan(id="codex-gpt-5.5", harness="codex", model="gpt-5.5", thinking=None),
@@ -645,7 +675,7 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     (aeview_home / "settings.json").write_text(json.dumps({"reviewTimeoutSeconds": 777}))
     captured: dict = {}
 
-    async def fake_fan_out(store, roster, prompts, cwd, timeout=None):
+    async def fake_fan_out(store, roster, prompts, cwd, timeout=None, harness_binaries=None):
         captured["timeout"] = timeout
         return []
 
@@ -654,9 +684,13 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     store.write_prompt("default", "P")
     store.write_manifest(
         RunManifest(
-            run_id="t", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            run_id="t",
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+            roster=_custom_roster("default__a"),
+            dedup=None,
+            pid=_DEAD_PID,
         )
     )
     store.write_review(_review("default__a", "running"))
@@ -668,9 +702,13 @@ def test_resume_missing_prompt_exits_error(aeview_home):
     store = RunStore.create("noprompt")
     store.write_manifest(
         RunManifest(
-            run_id="noprompt", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            run_id="noprompt",
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+            roster=_custom_roster("default__a"),
+            dedup=None,
+            pid=_DEAD_PID,
         )
     )
     store.write_review(_review("default__a", "failed"))  # pending, but no prompt.md was written
@@ -686,12 +724,17 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
 
     store = _resume_run("stale", {"default__a": "done", "default__b": "failed"})
     store.write_report(
-        Report(verdict="approve", summary="stale", coverage=Coverage(contributed=2, failed=0),
-               dedup=Dedup(status="skipped"), usage=UsageBreakdown())
+        Report(
+            verdict="approve",
+            summary="stale",
+            coverage=Coverage(contributed=2, failed=0),
+            dedup=Dedup(status="skipped"),
+            usage=UsageBreakdown(),
+        )
     )
     seen: dict = {}
 
-    async def fake_fan_out(s, roster, prompts, cwd, timeout=None):
+    async def fake_fan_out(s, roster, prompts, cwd, timeout=None, harness_binaries=None):
         seen["report_existed"] = (s.dir / "report.json").exists()
         return []
 
@@ -710,14 +753,18 @@ class _FailAdapter:
 def test_resume_all_failed_exits_error(aeview_home, monkeypatch):
     # Every re-run review fails -> contributed 0 -> overall 'failed' -> exit 2 (the failed branch
     # of the shared completion path, which the happy-path resume tests never reach).
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _FailAdapter())
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _FailAdapter())
     store = RunStore.create("allfail")
     store.write_prompt("default", "P")
     store.write_manifest(
         RunManifest(
-            run_id="allfail", created_at="2026-06-07T10:00:00Z", overall="interrupted",
+            run_id="allfail",
+            created_at="2026-06-07T10:00:00Z",
+            overall="interrupted",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster("default__a"), dedup=None, pid=_DEAD_PID,
+            roster=_custom_roster("default__a"),
+            dedup=None,
+            pid=_DEAD_PID,
         )
     )
     store.write_review(_review("default__a", "running"))
@@ -736,9 +783,12 @@ def test_status_wait_run_pruned_mid_wait_exits_error(aeview_home, monkeypatch):
     store = RunStore.create("vanish")
     store.write_manifest(
         RunManifest(
-            run_id="vanish", created_at="2026-06-07T10:00:00Z", overall="running",
+            run_id="vanish",
+            created_at="2026-06-07T10:00:00Z",
+            overall="running",
             invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="working-tree")),
-            roster=_custom_roster(_REVIEW_ID), pid=os.getpid(),  # live -> enters the poll loop
+            roster=_custom_roster(_REVIEW_ID),
+            pid=os.getpid(),  # live -> enters the poll loop
         )
     )
     monkeypatch.setattr(cli.time, "sleep", lambda _s: shutil.rmtree(store.dir))

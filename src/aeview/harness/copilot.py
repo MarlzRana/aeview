@@ -28,9 +28,11 @@ from ..schema import ReviewOutput, Usage, review_output_json_schema
 from .base import (
     AdapterError,
     HarnessOutput,
+    Preflight,
     SchemaSupport,
     StructuredOutput,
     classify_transient,
+    default_preflight,
 )
 
 # copilot reasoning-effort levels (--effort); "default"/None -> leave unset.
@@ -61,8 +63,15 @@ _RETRY_SUFFIX = (
 class CopilotAdapter:
     name: str = "copilot"
     schema_support: SchemaSupport = "prompt"
-    binary: str = "copilot"
     auth_status_args: list[str] = []  # no no-cost auth probe; doctor warns  # noqa: RUF012
+
+    def __init__(self, binary_override: str | None = None) -> None:
+        # settings.harnessBinaries["copilot"] → argv[0]. None → "copilot" on PATH. (Still shells
+        # out; the SDK migration is N5c.)
+        self.binary = binary_override or "copilot"
+
+    def preflight(self) -> Preflight:
+        return default_preflight(self)
 
     async def run_structured(
         self,
@@ -80,7 +89,7 @@ class CopilotAdapter:
         (wrong enum/type) so that case re-prompts too. The generic dedup caller intentionally
         omits it and one-shots — a deep-invalid dedup payload degrades to the raw-union path."""
         base_prompt = _embed_schema(prompt, schema)
-        args = ["copilot", *_READ_ONLY_ARGS]
+        args = [self.binary, *_READ_ONLY_ARGS]
         if model:
             args += ["--model", model]
         if thinking and thinking != "default":

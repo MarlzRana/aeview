@@ -57,6 +57,7 @@ async def run_dedup(
     store: RunStore,
     cwd: Path,
     timeout: float = DEDUP_TIMEOUT_S,
+    binary_override: str | None = None,
 ) -> DedupOutcome:
     instance_id = instance.descriptor_id
     prompt = _compose(pool)
@@ -65,7 +66,7 @@ async def run_dedup(
 
     started = now_iso()
     try:
-        adapter = get_adapter(instance.harness)
+        adapter = get_adapter(instance.harness, binary_override)
         out = await adapter.run_structured(
             prompt,
             duplicate_groups_json_schema(),

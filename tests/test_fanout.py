@@ -53,7 +53,7 @@ def _no_sleep(monkeypatch):
 
 async def test_transient_failure_retries_then_succeeds(aeview_home, monkeypatch):
     adapter = _FlakyAdapter(transient_failures=2)
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
     store = RunStore.create(new_run_id())
 
     [result] = await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
@@ -64,7 +64,7 @@ async def test_transient_failure_retries_then_succeeds(aeview_home, monkeypatch)
 
 async def test_transient_failure_exhausts_attempts(aeview_home, monkeypatch):
     adapter = _FlakyAdapter(transient_failures=99)
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
     store = RunStore.create(new_run_id())
 
     [result] = await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
@@ -75,7 +75,7 @@ async def test_transient_failure_exhausts_attempts(aeview_home, monkeypatch):
 
 async def test_non_transient_fails_fast(aeview_home, monkeypatch):
     adapter = _AuthFailAdapter()
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
     store = RunStore.create(new_run_id())
 
     [result] = await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
@@ -85,7 +85,7 @@ async def test_non_transient_fails_fast(aeview_home, monkeypatch):
 
 
 async def test_unknown_harness_marks_failed(aeview_home, monkeypatch):
-    def boom(harness):
+    def boom(harness, override=None):
         raise AdapterError(f"harness '{harness}' is not supported")
 
     monkeypatch.setattr(fanout, "get_adapter", boom)
@@ -108,14 +108,14 @@ async def test_fan_out_threads_timeout_to_adapter(aeview_home, monkeypatch):
     # The configured per-review timeout must actually reach adapter.run (the stubs elsewhere
     # accept-and-ignore it, so nothing else pins this link end-to-end).
     adapter = _CaptureTimeoutAdapter()
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: adapter)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
     store = RunStore.create(new_run_id())
     await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home, timeout=42.0)
     assert adapter.timeout == 42.0
 
 
 async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
-    monkeypatch.setattr(fanout, "get_adapter", lambda h: _AuthFailAdapter())
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _AuthFailAdapter())
     store = RunStore.create(new_run_id())
     await fanout.fan_out(store, [_ENTRY], {"default": "p"}, aeview_home)
     on_disk = json.loads(store.review_path(_ENTRY.reviewer, _ENTRY.id).read_text())
