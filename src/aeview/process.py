@@ -64,9 +64,9 @@ async def run_async(
 ) -> ProcResult:
     """Run a command, capturing stdout/stderr. Optionally tee raw output to a log file.
 
-    Retained for CLI-shell-out harnesses with no Python SDK (the planned N6 Gemini CLI adapter):
-    the SDK-backed harnesses (claude/codex/copilot) no longer use this, but a shell-out harness
-    needs exactly this timeout-aware, stdin-fed, output-teeing runner. Do not delete with N5.
+    Generic shell-out runner for a harness invoked by a CLI binary directly (no Python SDK):
+    the SDK-backed harnesses (claude/codex/copilot) don't use this, but a binary-invoked harness
+    needs exactly this timeout-aware, stdin-fed, output-teeing runner.
 
     Harness CLIs buffer their output and only surface it on exit, so there is no value
     in streaming line-by-line here; we capture fully, then persist the raw bytes.

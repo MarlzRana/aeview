@@ -198,14 +198,14 @@ def test_doctor_codex_auth_probe_is_bounded(tmp_path, monkeypatch):
     assert all(args[-2:] == ["login", "status"] for args, _ in calls)
 
 
-# --- default_preflight (retained for the planned N6 Gemini CLI; no SDK adapter calls it now) ---
+# --- default_preflight (generic PATH-gated check; no SDK adapter calls it now) ---
 
 
 class _PathGatedAdapter:
-    """The PATH-gated adapter shape the planned Gemini CLI adapter will use: a named binary that
-    must be on PATH + an optional no-cost auth probe. default_preflight reads only these two."""
+    """A PATH-gated adapter shape: a named binary that must be on PATH + an optional no-cost auth
+    probe. default_preflight reads only these two."""
 
-    def __init__(self, binary: str = "gemini", auth_status_args: list[str] | None = None) -> None:
+    def __init__(self, binary: str = "cli", auth_status_args: list[str] | None = None) -> None:
         self.binary = binary
         self.auth_status_args = auth_status_args or []
 

@@ -128,9 +128,8 @@ def default_preflight(adapter: Adapter) -> Preflight:
     """PATH-based check for adapters that invoke a named binary: `adapter.binary` (already the
     override or the default) must be on PATH, then its no-cost auth probe (if any) must succeed.
     Adapters whose SDK resolves a bundled binary not on PATH (claude/codex/copilot) override
-    `preflight`. Retained for CLI-shell-out harnesses with no SDK + no bundled binary (the planned
-    N6 Gemini CLI adapter, which is PATH-gated with no auth probe → the warn path). Do not delete
-    with N5 even though no SDK adapter calls it now (a unit test pins the contract)."""
+    `preflight`. Generic check for a harness invoked by a CLI binary directly (PATH-gated, no
+    bundled binary); no SDK adapter currently calls it, but a unit test pins the contract."""
     binary = adapter.binary
     if which(binary) is None:
         return Preflight("fail", f"{binary} not found on PATH")
