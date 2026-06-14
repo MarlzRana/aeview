@@ -19,8 +19,10 @@ ourselves and parse `final_response`. Token usage comes from `result.usage.total
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
+import threading
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING
@@ -104,15 +106,26 @@ class CodexAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
     ) -> TurnResult:
-        # The SDK multiplexes its blocking RPC (incl. close()) on the shared asyncio.to_thread
-        # executor; under aeview's unbounded fan-out a saturated pool could starve a timed-out
-        # review's close() and deadlock the teardown. Run each review's SDK interaction in its OWN
-        # event loop (on a worker thread) so it has a private executor: close() always runs, and an
-        # outer cancellation can't abort it. Concurrent codex reviews are bounded by the process
-        # thread pool and serialize beyond it; the inner loop is bounded by the per-review timeout.
-        return await asyncio.to_thread(
-            asyncio.run, self._consume(config, prompt, schema, model, cwd, effort, timeout)
-        )
+        # The SDK runs its blocking RPC (incl. close()) on the shared asyncio.to_thread pool;
+        # under aeview's unbounded fan-out a saturated pool could starve a timed-out review's
+        # close() and deadlock teardown. So run each review's SDK work in its OWN event loop on a
+        # DEDICATED daemon thread: a private inner executor keeps close() from being starved; one
+        # thread per review (unbounded, like the fan-out) avoids a shared-pool cap or queue wait;
+        # and as a daemon it can't wedge interpreter exit on Ctrl-C (an abandoned read-only turn
+        # finishes on its own; a clean subtree-kill is deferred I6b-2 work). The inner
+        # asyncio.timeout bounds the work; cancelling the awaiter detaches from (but can't abort)
+        # the still-running inner loop.
+        outcome: concurrent.futures.Future[TurnResult] = concurrent.futures.Future()
+
+        def _runner() -> None:
+            coro = self._consume(config, prompt, schema, model, cwd, effort, timeout)
+            try:
+                outcome.set_result(asyncio.run(coro))
+            except BaseException as exc:  # noqa: BLE001 - marshal every outcome to the awaiting loop
+                outcome.set_exception(exc)
+
+        threading.Thread(target=_runner, name="aeview-codex-turn", daemon=True).start()
+        return await asyncio.wrap_future(outcome)
 
     async def run(
         self,
@@ -250,7 +263,7 @@ class CodexAdapter:
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
         }
-        lines = [result.final_response or "", "--- result ---", json.dumps(summary, default=str)]
+        lines = [result.final_response or "", "--- result ---", json.dumps(summary)]
         # Best-effort: a failed log write must not break the AdapterError-only failure contract.
         with contextlib.suppress(OSError):
             log_path.write_text("\n".join(lines), encoding="utf-8")

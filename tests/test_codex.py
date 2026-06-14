@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from openai_codex import ApprovalMode, Sandbox, ServerBusyError, TransportClosedError, TurnResult
@@ -75,7 +76,7 @@ def codex_sdk(monkeypatch):
     captured: dict = {"closed": 0, "instances": 0}
 
     class FakeThread:
-        async def run(self, input, *, output_schema=None, effort=None, **kwargs):
+        async def run(self, input, *, output_schema=None, effort=None):
             captured["input"] = input
             captured["output_schema"] = output_schema
             captured["effort"] = effort
@@ -326,6 +327,16 @@ def test_preflight_override_resolves_and_probes(monkeypatch):
 def test_preflight_non_executable_override_fails(monkeypatch):
     monkeypatch.setattr(codex, "which", lambda binary: None)  # override doesn't resolve
     pf = codex.CodexAdapter("/nope").preflight()
+    assert pf.status == "fail"
+
+
+def test_preflight_fails_when_bundle_unavailable(monkeypatch):
+    # With no override, codex resolves ONLY its bundled binary (no PATH fallback) — if the bundle is
+    # missing, doctor must FAIL (not silently pass via PATH), matching what the run path would do.
+    import codex_cli_bin
+
+    monkeypatch.setattr(codex_cli_bin, "bundled_codex_path", lambda: Path("/no/bundle/codex"))
+    pf = codex.CodexAdapter().preflight()
     assert pf.status == "fail"
 
 
