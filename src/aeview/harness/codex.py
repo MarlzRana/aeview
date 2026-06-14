@@ -35,7 +35,7 @@ from openai_codex import (
     Sandbox,
     is_retryable_error,
 )
-from openai_codex.types import ReasoningEffort
+from openai_codex.types import ReasoningEffort, TurnStatus
 from pydantic import ValidationError
 
 from ..process import run_sync
@@ -204,8 +204,11 @@ class CodexAdapter:
                 await codex.close()
 
     def _interpret(self, result: TurnResult) -> StructuredOutput:
-        # .run() already raised RuntimeError on a failed turn, so a returned result completed; an
-        # empty final message (None / commentary-only) is still a hard failure for a review.
+        # .run() raised RuntimeError on a failed turn, so a returned result should be completed;
+        # reject any other terminal state (e.g. interrupted) rather than trusting a partial final.
+        if result.status != TurnStatus.completed:
+            raise AdapterError(f"codex turn did not complete: {result.status.value}")
+        # An empty final message (None / commentary-only) is still a hard failure for a review.
         final = (result.final_response or "").strip()
         if not final:
             raise AdapterError("codex produced no final message")
@@ -220,7 +223,7 @@ class CodexAdapter:
         # The SDK resolves a bundled `codex` not necessarily on PATH, so don't gate on PATH. Resolve
         # exactly as the run path does (override → which; else bundled-only) so doctor can't report
         # OK while the run would fail, then probe auth with it.
-        binary = self._resolve_codex_bin(self._codex_bin)
+        binary = self._resolve_codex_bin()
         if binary is None:
             return Preflight("fail", "codex binary not resolvable (bad override or no bundle)")
         probe = [binary, *self.auth_status_args]
@@ -237,12 +240,12 @@ class CodexAdapter:
             return CodexConfig()
         return CodexConfig(codex_bin=which(self._codex_bin) or self._codex_bin)
 
-    def _resolve_codex_bin(self, override: str | None) -> str | None:
+    def _resolve_codex_bin(self) -> str | None:
         # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail: an
         # override resolves via which (abs path or bare name, executability-checked); with NO
         # override the SDK uses ONLY its bundled binary (no PATH fallback), so neither do we.
-        if override:
-            return which(override)
+        if self._codex_bin:
+            return which(self._codex_bin)
         try:
             from codex_cli_bin import bundled_codex_path
 

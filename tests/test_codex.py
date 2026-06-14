@@ -7,7 +7,14 @@ import threading
 from pathlib import Path
 
 import pytest
-from openai_codex import ApprovalMode, Sandbox, ServerBusyError, TransportClosedError, TurnResult
+from openai_codex import (
+    ApprovalMode,
+    CodexError,
+    Sandbox,
+    ServerBusyError,
+    TransportClosedError,
+    TurnResult,
+)
 from openai_codex.types import ReasoningEffort, ThreadTokenUsage, TurnStatus
 
 from aeview.harness import codex, get_adapter
@@ -28,10 +35,15 @@ def _usage(inp: int, out: int) -> ThreadTokenUsage:
     return ThreadTokenUsage.model_validate({"last": block, "total": block})
 
 
-def _result(final: str | None, *, usage: ThreadTokenUsage | None = None) -> TurnResult:
+def _result(
+    final: str | None,
+    *,
+    usage: ThreadTokenUsage | None = None,
+    status: TurnStatus = TurnStatus.completed,
+) -> TurnResult:
     return TurnResult(
         id="t1",
-        status=TurnStatus.completed,
+        status=status,
         error=None,
         started_at=None,
         completed_at=None,
@@ -224,6 +236,15 @@ async def test_transport_closed_is_non_transient(codex_sdk, tmp_path):
     assert ei.value.transient is False  # a dead transport fails fast
 
 
+async def test_codex_error_transient_by_text_retries(codex_sdk, tmp_path):
+    # A CodexError that isn't a ServerBusyError but reads transient must still retry: the
+    # looks_transient arm restores the old CLI text classification (not just is_retryable_error).
+    codex_sdk.set_exc(CodexError("the service is overloaded; try again"))
+    with pytest.raises(AdapterError) as ei:
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert ei.value.transient is True
+
+
 async def test_non_json_final_is_error(codex_sdk, tmp_path):
     codex_sdk.set_raw_result(_result("not json at all", usage=_usage(1, 1)))
     with pytest.raises(AdapterError, match="not JSON"):
@@ -233,6 +254,15 @@ async def test_non_json_final_is_error(codex_sdk, tmp_path):
 async def test_empty_final_message_is_error(codex_sdk, tmp_path):
     codex_sdk.set_raw_result(_result(None, usage=_usage(1, 1)))
     with pytest.raises(AdapterError, match="no final message"):
+        await codex.CodexAdapter().run_structured("p", {}, "gpt-5.5", tmp_path, tmp_path / "log")
+
+
+async def test_non_completed_turn_is_error(codex_sdk, tmp_path):
+    # .run() raises on a failed turn; any other non-completed terminal state (e.g. interrupted) is
+    # rejected rather than trusting a partial final message.
+    result = _result(json.dumps(_VALID), usage=_usage(1, 1), status=TurnStatus.interrupted)
+    codex_sdk.set_raw_result(result)
+    with pytest.raises(AdapterError, match="did not complete"):
         await codex.CodexAdapter().run_structured("p", {}, "gpt-5.5", tmp_path, tmp_path / "log")
 
 
@@ -320,6 +350,24 @@ async def test_cancellation_does_not_error_in_worker_thread(codex_sdk, tmp_path,
     assert thread_errors == []  # no InvalidStateError escaped the worker thread
 
 
+async def test_log_write_failure_suppressed_on_success(codex_sdk, tmp_path):
+    # A failed log write (here: log_path is a directory -> OSError) is suppressed so it can't break
+    # a successful review.
+    logdir = tmp_path / "logdir"
+    logdir.mkdir()
+    out = await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, logdir)
+    assert out.review.verdict == "approve"
+
+
+async def test_log_write_failure_suppressed_on_error(codex_sdk, tmp_path):
+    # Same on the error path: a failed error-log write surfaces the AdapterError, not the OSError.
+    logdir = tmp_path / "logdir"
+    logdir.mkdir()
+    codex_sdk.set_exc(RuntimeError("boom"))
+    with pytest.raises(AdapterError):
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, logdir)
+
+
 def test_sdk_call_kwargs_match_the_real_sdk():
     # The SDK boundary is faked elsewhere; pin the kwarg names the adapter passes against the REAL
     # SDK so an upgrade that renames one fails here rather than at runtime.
@@ -379,6 +427,19 @@ def test_preflight_fails_when_bundle_unavailable(monkeypatch):
     import codex_cli_bin
 
     monkeypatch.setattr(codex_cli_bin, "bundled_codex_path", lambda: Path("/no/bundle/codex"))
+    pf = codex.CodexAdapter().preflight()
+    assert pf.status == "fail"
+
+
+def test_preflight_fails_when_bundle_resolution_raises(monkeypatch):
+    # If the bundled runtime can't be resolved at all (import/lookup raises), doctor FAILS rather
+    # than crashing — exercises the except branch in _resolve_codex_bin.
+    import codex_cli_bin
+
+    def boom():
+        raise ImportError("runtime missing")
+
+    monkeypatch.setattr(codex_cli_bin, "bundled_codex_path", boom)
     pf = codex.CodexAdapter().preflight()
     assert pf.status == "fail"
 
