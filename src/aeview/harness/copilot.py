@@ -215,54 +215,55 @@ class CopilotAdapter:
         mask a valid parsed result (we don't disconnect the session explicitly: client.stop()
         destroys it, and force_stop() is the hard-kill fallback). On the daemon thread a wedged
         teardown can't block aeview; the subprocess finishes (subtree-kill is deferred I6b-2)."""
-        sw_timeout = timeout if timeout is not None else _UNBOUNDED_TIMEOUT
         collector = _UsageCollector()
         client: CopilotClient | None = None
         try:
-            try:
-                async with asyncio.timeout(timeout):
-                    # Construct inside the try so a "Copilot CLI not found" RuntimeError (raised in
-                    # CopilotClient.__init__) is normalized to AdapterError like any other failure.
-                    client = CopilotClient(working_directory=cwd, connection=connection)
-                    await client.start()
-                    session = await client.create_session(
-                        model=model or None,
-                        reasoning_effort=effort,
-                        on_permission_request=_deny_by_default_permission,
-                        working_directory=cwd,
+            async with asyncio.timeout(timeout):
+                # Construct inside the try so a "Copilot CLI not found" RuntimeError (raised in
+                # CopilotClient.__init__) is normalized to AdapterError like any other failure.
+                client = CopilotClient(working_directory=cwd, connection=connection)
+                await client.start()
+                session = await client.create_session(
+                    model=model or None,
+                    reasoning_effort=effort,
+                    on_permission_request=_deny_by_default_permission,
+                    working_directory=cwd,
+                )
+                unsubscribe = session.on(collector.handle)
+                try:
+                    # The outer asyncio.timeout is the SOLE per-review bound (it spans startup + the
+                    # turns, so the total stays ≤ `timeout`). send_and_wait's per-call timeout is
+                    # set to _UNBOUNDED only to defeat its 60s default — not a second live timer.
+                    payload, raw = await _run_turns(
+                        session, base_prompt, schema, _UNBOUNDED_TIMEOUT, validate
                     )
-                    unsubscribe = session.on(collector.handle)
-                    try:
-                        payload, raw = await _run_turns(
-                            session, base_prompt, schema, sw_timeout, validate
-                        )
-                    finally:
-                        unsubscribe()
-                    # Built + returned here so payload/raw are in scope; the outer finally's bounded
-                    # teardown runs on the way out and can't mask this result (it never raises).
-                    return _TurnResult(
-                        payload=payload,
-                        raw=raw,
-                        usage=Usage(
-                            input_tokens=collector.input_tokens,
-                            output_tokens=collector.output_tokens,
-                            cost_usd=0.0,  # see _UsageCollector: the SDK's `cost` is ignored
-                        ),
-                    )
-            except AdapterError:
-                # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
-                raise
-            except TimeoutError as exc:
-                raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
-            except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
-                # The SDK has no public base error or retryable helper, so classify transient by
-                # text (rate-limit/overload still retries), matching the old CLI path. The dedup
-                # path catches only AdapterError, so an escape strands the run non-terminal.
-                # (CancelledError is a BaseException, not Exception — cancellation isn't caught.)
-                detail = str(exc)
-                raise AdapterError(
-                    f"copilot run failed: {detail}", transient=looks_transient(detail)
-                ) from exc
+                finally:
+                    unsubscribe()
+                # Built + returned here so payload/raw are in scope; the finally's bounded teardown
+                # runs on the way out and can't mask this result (it never raises).
+                return _TurnResult(
+                    payload=payload,
+                    raw=raw,
+                    usage=Usage(
+                        input_tokens=collector.input_tokens,
+                        output_tokens=collector.output_tokens,
+                        cost_usd=0.0,  # see _UsageCollector: the SDK's `cost` is ignored
+                    ),
+                )
+        except AdapterError:
+            # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
+            raise
+        except TimeoutError as exc:
+            raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
+        except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
+            # The SDK has no public base error or retryable helper, so classify transient by text
+            # (rate-limit/overload still retries), matching the old CLI path. The dedup path catches
+            # only AdapterError, so an escape strands the run non-terminal. (CancelledError is a
+            # BaseException, not Exception — cancellation isn't caught.)
+            detail = str(exc)
+            raise AdapterError(
+                f"copilot run failed: {detail}", transient=looks_transient(detail)
+            ) from exc
         finally:
             if client is not None:
                 await _teardown_client(client)
@@ -277,13 +278,14 @@ class CopilotAdapter:
         return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
 
     def _build_connection(self) -> RuntimeConnection | None:
-        # No override → SDK resolves its bundled copilot binary. With an override, resolve a bare
-        # command name or path via which (so "copilot" on PATH works); pass it through even when
-        # which can't resolve it so the SDK fails loud (spawn error) rather than silently falling
-        # back to the bundled binary.
+        # No override → SDK resolves its bundled copilot binary. With an override, resolve it the
+        # same way preflight predicts (_resolve_via_sdk_rule: exists-and-executable, else PATH);
+        # pass the raw override through when that fails so the SDK fails loud (spawn error) rather
+        # than silently falling back to the bundled binary.
         if self._copilot_bin is None:
             return None
-        return RuntimeConnection.for_stdio(path=which(self._copilot_bin) or self._copilot_bin)
+        resolved = _resolve_via_sdk_rule(self._copilot_bin) or self._copilot_bin
+        return RuntimeConnection.for_stdio(path=resolved)
 
     def _resolve_copilot_bin(self) -> str | None:
         # Predict the SDK's resolution so doctor can't report OK while the run would fail. The SDK's
@@ -362,10 +364,11 @@ def _deny_by_default_permission(
 
 
 def _resolve_via_sdk_rule(path: str) -> str | None:
-    # Mirror the SDK's spawn-time resolution (client.py): use the path verbatim if it exists, else
-    # shutil.which(path) (PATH search by name) — so an abs path AND a bare command on PATH both
-    # resolve, and only a value that is neither an existing path nor on PATH stays unresolved.
-    if os.path.exists(path):
+    # Predict the SDK's spawn OUTCOME (client.py uses the path verbatim if it exists, else
+    # shutil.which(path), then Popen). We require an existing path to be an executable FILE (a dir
+    # or non-exec file would resolve for the SDK but fail at Popen, so doctor must reject it too),
+    # and fall back to which() (which itself enforces executability) for a bare command on PATH.
+    if os.path.isfile(path) and os.access(path, os.X_OK):
         return path
     return which(path)
 

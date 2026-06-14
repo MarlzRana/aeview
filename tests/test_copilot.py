@@ -82,6 +82,7 @@ def copilot_sdk(monkeypatch):
         "started": 0,
         "stopped": 0,
         "force_stopped": 0,
+        "unsubscribed": 0,
         "client_kwargs": None,
         "create_kwargs": None,
         "send_calls": [],
@@ -102,6 +103,7 @@ def copilot_sdk(monkeypatch):
             self._handlers.append(handler)
 
             def unsubscribe() -> None:
+                captured["unsubscribed"] += 1
                 if handler in self._handlers:
                     self._handlers.remove(handler)
 
@@ -200,7 +202,9 @@ async def test_run_structured_delivers_given_schema(copilot_sdk, tmp_path):
     )
     assert out.payload == {"duplicate_groups": []}
     assert "duplicate_groups" in copilot_sdk.captured["send_calls"][0]["prompt"]  # schema embedded
-    assert copilot_sdk.captured["send_calls"][0]["timeout"] == 5.0  # forwarded to send_and_wait
+    # The outer asyncio.timeout(5.0) is the bound; send_and_wait gets _UNBOUNDED (defeats its 60s
+    # default) so it isn't a second live timer.
+    assert copilot_sdk.captured["send_calls"][0]["timeout"] == copilot._UNBOUNDED_TIMEOUT
 
 
 # --- thinking / effort -----------------------------------------------------------------
@@ -295,21 +299,22 @@ def test_empty_override_is_treated_as_bundled():
 # --- timeout / teardown / isolation / cancellation -------------------------------------
 
 
-async def test_forwards_timeout_to_send_and_wait(copilot_sdk, tmp_path):
+async def test_send_and_wait_gets_unbounded_so_outer_timeout_governs(copilot_sdk, tmp_path):
+    # The per-review timeout is enforced by the OUTER asyncio.timeout (sole bound). send_and_wait's
+    # per-call timeout is set to _UNBOUNDED — to defeat its 60s default AND so it isn't a second
+    # live timer (a per-turn timeout would let a 2-turn review run up to 2× the per-review bound).
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 90.0)
-    assert copilot_sdk.captured["send_calls"][0]["timeout"] == 90.0
+    assert copilot_sdk.captured["send_calls"][0]["timeout"] == copilot._UNBOUNDED_TIMEOUT
 
 
-async def test_unset_timeout_passes_unbounded_to_send_and_wait(copilot_sdk, tmp_path):
-    # send_and_wait defaults to 60s; with no per-review timeout we must override it so a long review
-    # isn't cut off at 60s — pass the effectively-unbounded sentinel.
+async def test_unset_timeout_also_passes_unbounded_to_send_and_wait(copilot_sdk, tmp_path):
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, None)
     assert copilot_sdk.captured["send_calls"][0]["timeout"] == copilot._UNBOUNDED_TIMEOUT
 
 
 async def test_timeout_is_non_transient_and_tears_down(copilot_sdk, tmp_path):
-    # A per-review timeout is fail-fast AND must tear down the client: send_and_wait's own timeout
-    # doesn't kill the subprocess, so the async-with stop() is what does (here: the captured count).
+    # A per-review timeout is fail-fast AND must tear down the client: the outer asyncio.timeout
+    # fires, and _teardown_client (outer finally) is what stops the subprocess (captured count).
     copilot_sdk.queue_turn(json.dumps(_VALID), delay=10.0)
     with pytest.raises(AdapterError) as ei:
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 0.01)
@@ -736,7 +741,7 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     # SDK so an upgrade that renames one fails here rather than at runtime.
     import inspect
 
-    from copilot import CopilotClient, CopilotSession
+    from copilot import CopilotClient, CopilotSession, RuntimeConnection
 
     init = inspect.signature(CopilotClient.__init__).parameters
     for kw in ("working_directory", "connection"):
@@ -746,6 +751,9 @@ def test_sdk_call_kwargs_match_the_real_sdk():
         assert kw in create, f"CopilotClient.create_session no longer accepts {kw}"
     send = inspect.signature(CopilotSession.send_and_wait).parameters
     assert "timeout" in send, "CopilotSession.send_and_wait no longer accepts timeout"
+    # The override path depends on for_stdio(path=...); the usage path on session.on(handler).
+    assert "path" in inspect.signature(RuntimeConnection.for_stdio).parameters
+    assert "handler" in inspect.signature(CopilotSession.on).parameters
 
 
 # --- preflight -------------------------------------------------------------------------
@@ -837,13 +845,15 @@ async def test_none_answer_both_attempts_fails(copilot_sdk, tmp_path):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
 
 
-async def test_retry_turn_also_gets_the_configured_timeout(copilot_sdk, tmp_path):
-    # Both the first turn AND the same-session retry must carry the per-review timeout, not the
-    # SDK's 60s default.
+async def test_both_turns_get_unbounded_send_timeout(copilot_sdk, tmp_path):
+    # Neither the first turn NOR the same-session retry may fall back to send_and_wait's 60s default
+    # (a long review must not be cut off mid-turn); both get _UNBOUNDED. The outer timeout bounds
+    # the whole review.
     copilot_sdk.queue_turn("no json")  # forces a re-prompt
     copilot_sdk.queue_turn(json.dumps(_VALID))
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 77.0)
-    assert [c["timeout"] for c in copilot_sdk.captured["send_calls"]] == [77.0, 77.0]
+    timeouts = [c["timeout"] for c in copilot_sdk.captured["send_calls"]]
+    assert timeouts == [copilot._UNBOUNDED_TIMEOUT, copilot._UNBOUNDED_TIMEOUT]
 
 
 async def test_none_input_tokens_counted_as_zero(copilot_sdk, tmp_path):
@@ -863,6 +873,7 @@ def test_preflight_honors_copilot_cli_path(monkeypatch, tmp_path):
     monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)  # no bundle
     binp = tmp_path / "copilot"
     binp.write_text("#!/bin/sh\n")
+    binp.chmod(0o755)  # an executable file resolves; preflight predicts the spawn outcome
     monkeypatch.setenv("COPILOT_CLI_PATH", str(binp))
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
@@ -965,6 +976,25 @@ async def test_narrowed_effort_set_rejects_none_and_max(copilot_sdk, tmp_path, v
     # those now fail-fast so a revert to the broader hardcoded set is caught.
     with pytest.raises(AdapterError, match="thinking"):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", value)
+
+
+async def test_unsubscribe_runs_after_the_turn(copilot_sdk, tmp_path):
+    # The usage handler is unsubscribed in a finally so it can't fire after we've read the usage.
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert copilot_sdk.captured["unsubscribed"] == 1
+
+
+def test_preflight_existing_non_executable_path_fails(monkeypatch, tmp_path):
+    # An existing-but-non-executable COPILOT_CLI_PATH (e.g. a 0644 file) resolves for the SDK but
+    # fails at Popen, so preflight must predict the spawn failure (NOT report warn/ready).
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
+    nonexec = tmp_path / "copilot"
+    nonexec.write_text("not executable\n")  # exists, but no +x bit
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(nonexec))
+    monkeypatch.setattr(copilot, "which", lambda b: None)  # and not resolvable on PATH either
+    assert copilot.CopilotAdapter().preflight().status == "fail"
 
 
 # --- registry + capability -------------------------------------------------------------
