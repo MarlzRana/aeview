@@ -23,11 +23,19 @@ described by your output schema."""
 
 
 def compose_prompt(reviewer: Reviewer, bundle: Bundle, full_diff_path: Path | None = None) -> str:
-    sections = [reviewer.body.rstrip(), READ_ONLY_GUARD]
+    sections = [_resource_base(reviewer.source), reviewer.body.rstrip(), READ_ONLY_GUARD]
     if bundle.commits.strip():
         sections.append("## Commits in this change\n\n```\n" + bundle.commits.rstrip() + "\n```")
     sections.append(_change_section(bundle, full_diff_path))
     return "\n\n".join(sections)
+
+
+def _resource_base(source: Path) -> str:
+    # Reviewers may keep references/, checklists, or scripts beside their REVIEWER.md and link to
+    # them relatively; the harness resolves those against this absolute dir and reads them with its
+    # read-only file tools (reads outside cwd are allowed — only writes are blocked). Leads the
+    # prompt so the base path is established before the instructions that use it.
+    return f"All relative paths in this reviewer's instructions are relative to:\n  {source}"
 
 
 def _change_section(bundle: Bundle, full_diff_path: Path | None) -> str:

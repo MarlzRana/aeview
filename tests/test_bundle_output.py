@@ -65,3 +65,41 @@ def test_compose_prompt_self_collect_path_fallback():
     bundle = _self_collect_bundle()
     prompt = compose_prompt(_reviewer(), bundle, None)
     assert "see the run's bundle/ directory" in prompt
+
+
+_RESOURCE_LEAD = "All relative paths in this reviewer's instructions are relative to:"
+
+
+def _inline_bundle():
+    resolved = ResolvedScope(
+        spec=ScopeSpec(type="working-tree", base="HEAD"),
+        diff="diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n",
+        summary="1 file(s) changed:\n  x.py  +1 -1",
+        inspect=["git diff HEAD"],
+        commits="",
+    )
+    bundle = build_bundle(resolved)
+    assert bundle.is_inline  # precondition
+    return bundle
+
+
+def test_compose_prompt_leads_with_reviewer_resource_base(tmp_path):
+    # N4: the reviewer's own dir is injected at the TOP so relative links in the body resolve there,
+    # ahead of the body and the read-only guard.
+    src = tmp_path / ".aeview" / "reviewers" / "r"
+    reviewer = Reviewer(name="r", description="d", body="REVIEW BODY", source=src, harnesses=[])
+    prompt = compose_prompt(reviewer, _inline_bundle())
+
+    assert prompt.startswith(_RESOURCE_LEAD)
+    assert str(src) in prompt  # the reviewer's absolute dir, not the repo cwd
+    assert prompt.index(str(src)) < prompt.index("REVIEW BODY")
+    assert prompt.index(str(src)) < prompt.index("Operating rules (read-only)")
+
+
+def test_compose_prompt_resource_base_present_in_self_collect(tmp_path):
+    # The base path leads regardless of bundle mode.
+    src = tmp_path / "rev"
+    reviewer = Reviewer(name="r", description="d", body="B", source=src, harnesses=[])
+    prompt = compose_prompt(reviewer, _self_collect_bundle(), tmp_path / "self_collect.diff")
+    assert prompt.startswith(_RESOURCE_LEAD)
+    assert str(src) in prompt
