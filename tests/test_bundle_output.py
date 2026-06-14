@@ -28,10 +28,8 @@ def _self_collect_bundle():
     return bundle
 
 
-def _reviewer():
-    return Reviewer(
-        name="default", description="d", body="REVIEW BODY", source=Path("."), harnesses=[]
-    )
+def _reviewer(*, source: Path = Path("."), body: str = "REVIEW BODY") -> Reviewer:
+    return Reviewer(name="default", description="d", body=body, source=source, harnesses=[])
 
 
 def test_write_bundle_self_collect_writes_artifacts_and_returns_path(aeview_home):
@@ -67,7 +65,10 @@ def test_compose_prompt_self_collect_path_fallback():
     assert "see the run's bundle/ directory" in prompt
 
 
-_RESOURCE_LEAD = "All relative paths in this reviewer's instructions are relative to:"
+def _resource_lead(src: Path) -> str:
+    # The exact block compose_prompt must lead with: pins the base path to the reviewer DIRECTORY
+    # (not the REVIEWER.md file or a subpath) and its termination before the body.
+    return f"All relative paths in this reviewer's instructions are relative to:\n  {src}\n\n"
 
 
 def _inline_bundle():
@@ -87,11 +88,9 @@ def test_compose_prompt_leads_with_reviewer_resource_base(tmp_path):
     # N4: the reviewer's own dir is injected at the TOP so relative links in the body resolve there,
     # ahead of the body and the read-only guard.
     src = tmp_path / ".aeview" / "reviewers" / "r"
-    reviewer = Reviewer(name="r", description="d", body="REVIEW BODY", source=src, harnesses=[])
-    prompt = compose_prompt(reviewer, _inline_bundle())
+    prompt = compose_prompt(_reviewer(source=src), _inline_bundle())
 
-    assert prompt.startswith(_RESOURCE_LEAD)
-    assert str(src) in prompt  # the reviewer's absolute dir, not the repo cwd
+    assert prompt.startswith(_resource_lead(src))  # exact dir, not a substring/file path
     assert prompt.index(str(src)) < prompt.index("REVIEW BODY")
     assert prompt.index(str(src)) < prompt.index("Operating rules (read-only)")
 
@@ -99,7 +98,5 @@ def test_compose_prompt_leads_with_reviewer_resource_base(tmp_path):
 def test_compose_prompt_resource_base_present_in_self_collect(tmp_path):
     # The base path leads regardless of bundle mode.
     src = tmp_path / "rev"
-    reviewer = Reviewer(name="r", description="d", body="B", source=src, harnesses=[])
-    prompt = compose_prompt(reviewer, _self_collect_bundle(), tmp_path / "self_collect.diff")
-    assert prompt.startswith(_RESOURCE_LEAD)
-    assert str(src) in prompt
+    prompt = compose_prompt(_reviewer(source=src, body="B"), _self_collect_bundle(), tmp_path / "x")
+    assert prompt.startswith(_resource_lead(src))
