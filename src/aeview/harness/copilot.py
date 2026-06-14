@@ -223,6 +223,12 @@ class CopilotAdapter:
                 # CopilotClient.__init__) is normalized to AdapterError like any other failure.
                 client = CopilotClient(working_directory=cwd, connection=connection)
                 await client.start()
+                # Minimal session by design: read-only is enforced SOLELY by on_permission_request
+                # (deny-by-default, approve only kind="read"). Every mutating/exec/network action
+                # routes through that callback (the headless runtime hangs without one), so leaving
+                # the SDK's feature flags (host git ops, skills, MCP, file hooks, config discovery —
+                # all None/off here) at their defaults can't bypass it. We deliberately do NOT add a
+                # second tool-gating layer (the user chose handler-only); live-proven write-nowhere.
                 session = await client.create_session(
                     model=model or None,
                     reasoning_effort=effort,
@@ -231,12 +237,7 @@ class CopilotAdapter:
                 )
                 unsubscribe = session.on(collector.handle)
                 try:
-                    # The outer asyncio.timeout is the SOLE per-review bound (it spans startup + the
-                    # turns, so the total stays ≤ `timeout`). send_and_wait's per-call timeout is
-                    # set to _UNBOUNDED only to defeat its 60s default — not a second live timer.
-                    payload, raw = await _run_turns(
-                        session, base_prompt, schema, _UNBOUNDED_TIMEOUT, validate
-                    )
+                    payload, raw = await _run_turns(session, base_prompt, schema, validate)
                 finally:
                     unsubscribe()
                 # Built + returned here so payload/raw are in scope; the finally's bounded teardown
@@ -351,7 +352,7 @@ class _UsageCollector:
 
 
 def _deny_by_default_permission(
-    request: PermissionRequest, invocation: dict[str, str]
+    request: PermissionRequest, _invocation: dict[str, str]
 ) -> PermissionRequestResult:
     # Read-anywhere / write-nowhere, deny-by-default: approve ONLY file reads (any path — fencing is
     # deferred to the operator/MDM, per the project's read-scope decision); deny every other kind
@@ -382,15 +383,15 @@ async def _teardown_client(client: CopilotClient) -> None:
     try:
         await asyncio.wait_for(client.stop(), timeout=_TEARDOWN_GRACE)
     except Exception:  # noqa: BLE001 - bounded; fall back to the hard kill, never propagate
+        # force_stop() can also hang on a stuck transport, so bound it too (and suppress errors).
         with contextlib.suppress(Exception):
-            await client.force_stop()
+            await asyncio.wait_for(client.force_stop(), timeout=_TEARDOWN_GRACE)
 
 
 async def _run_turns(
     session: CopilotSession,
     base_prompt: str,
     schema: dict,
-    sw_timeout: float,
     validate: Callable[[dict], object] | None,
 ) -> tuple[dict, str]:
     """Send the prompt and parse the schema-conforming object out of copilot's answer; on invalid
@@ -399,7 +400,9 @@ async def _run_turns(
     last_error = "copilot produced no valid output"
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         text = base_prompt if attempt == 1 else _RETRY_SUFFIX
-        event = await session.send_and_wait(text, timeout=sw_timeout)
+        # _UNBOUNDED only defeats send_and_wait's 60s default; the per-review bound is _consume's
+        # outer asyncio.timeout (which spans both turns), so a long review isn't cut off mid-turn.
+        event = await session.send_and_wait(text, timeout=_UNBOUNDED_TIMEOUT)
         answer = _final_text(event)
         # _extract_json returns None for an empty answer too (no `{` to scan), so no answer, a
         # JSON-less answer, and an unparseable answer all funnel to the same re-prompt path.

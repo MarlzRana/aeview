@@ -32,9 +32,9 @@ def _message_event(content: str) -> SessionEvent:
     )
 
 
-def _usage_event(inp: int, out: int) -> SessionEvent:
+def _usage_event(inp: int | None, out: int | None, *, cost: float | None = None) -> SessionEvent:
     return SessionEvent(
-        data=AssistantUsageData(model="gpt-5.4", input_tokens=inp, output_tokens=out),
+        data=AssistantUsageData(model="gpt-5.4", input_tokens=inp, output_tokens=out, cost=cost),
         id=uuid.uuid4(),
         timestamp=datetime.now(UTC),
         type=SessionEventType.ASSISTANT_USAGE,
@@ -67,6 +67,18 @@ class _Controller:
         # Make client.stop() hang so _teardown_client's wait_for must bound it → force_stop().
         self._state["stop_delay"] = seconds
 
+    def set_force_stop_error(self, exc: BaseException) -> None:
+        # Make force_stop() ALSO raise so _teardown_client's suppress must swallow it.
+        self._state["force_stop_error"] = exc
+
+    def set_start_error(self, exc: BaseException) -> None:
+        # Make client.start() raise (e.g. spawn/handshake failure).
+        self._state["start_error"] = exc
+
+    def set_create_error(self, exc: BaseException) -> None:
+        # Make client.create_session() raise (e.g. auth/handshake failure after start).
+        self._state["create_error"] = exc
+
 
 @pytest.fixture
 def copilot_sdk(monkeypatch):
@@ -76,10 +88,19 @@ def copilot_sdk(monkeypatch):
     controller exposes the client + session kwargs, the send_and_wait calls, and teardown counts
     (start/stop/force_stop on the client, disconnect on the session — explicit lifecycle, no
     context managers)."""
-    state: dict = {"turns": [], "client_init_exc": None, "stop_error": None, "stop_delay": 0.0}
+    state: dict = {
+        "turns": [],
+        "client_init_exc": None,
+        "stop_error": None,
+        "stop_delay": 0.0,
+        "force_stop_error": None,
+        "start_error": None,
+        "create_error": None,
+    }
     captured: dict = {
         "clients": 0,
         "started": 0,
+        "created": 0,
         "stopped": 0,
         "force_stopped": 0,
         "unsubscribed": 0,
@@ -132,6 +153,8 @@ def copilot_sdk(monkeypatch):
 
         async def start(self):
             captured["started"] += 1
+            if state["start_error"] is not None:
+                raise state["start_error"]
 
         async def stop(self):
             captured["stopped"] += 1
@@ -142,8 +165,13 @@ def copilot_sdk(monkeypatch):
 
         async def force_stop(self):
             captured["force_stopped"] += 1
+            if state["force_stop_error"] is not None:
+                raise state["force_stop_error"]
 
         async def create_session(self, **kwargs):
+            captured["created"] += 1
+            if state["create_error"] is not None:
+                raise state["create_error"]
             return FakeSession(kwargs)
 
     monkeypatch.setattr(copilot, "CopilotClient", FakeClient)
@@ -995,6 +1023,72 @@ def test_preflight_existing_non_executable_path_fails(monkeypatch, tmp_path):
     monkeypatch.setenv("COPILOT_CLI_PATH", str(nonexec))
     monkeypatch.setattr(copilot, "which", lambda b: None)  # and not resolvable on PATH either
     assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+# --- dogfood r4: setup-failure normalization, force_stop robustness, same-session, cost ----
+
+
+async def test_start_failure_is_normalized_and_torn_down(copilot_sdk, tmp_path):
+    # client.start() can fail (spawn/handshake) before any turn; it must normalize to AdapterError
+    # (transient by text) and still tear the client down.
+    copilot_sdk.set_start_error(RuntimeError("the server is overloaded, try again"))
+    with pytest.raises(AdapterError) as ei:
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert ei.value.transient is True
+    assert copilot_sdk.captured["stopped"] == 1  # torn down after a failed start
+
+
+async def test_create_session_failure_is_normalized_and_torn_down(copilot_sdk, tmp_path):
+    copilot_sdk.set_create_error(RuntimeError("invalid request: bad model"))
+    with pytest.raises(AdapterError) as ei:
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
+    assert copilot_sdk.captured["stopped"] == 1
+
+
+async def test_raising_force_stop_does_not_break_the_result(copilot_sdk, tmp_path):
+    # When BOTH stop() and force_stop() raise (a dead connection can fail both), _teardown_client's
+    # suppress must swallow them so a valid parsed result still returns.
+    copilot_sdk.set_stop_error(RuntimeError("stop boom"))
+    copilot_sdk.set_force_stop_error(RuntimeError("force boom"))
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # result survives both teardown failures
+    assert copilot_sdk.captured["force_stopped"] == 1
+
+
+def test_preflight_executable_directory_path_fails(monkeypatch, tmp_path):
+    # _resolve_via_sdk_rule requires an executable FILE; an executable DIRECTORY (isfile False)
+    # resolves for the SDK but fails at Popen, so doctor must reject it (not report ready).
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
+    d = tmp_path / "copilotdir"
+    d.mkdir()  # a directory (the executable bit is set, but it is not a file)
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(d))
+    monkeypatch.setattr(copilot, "which", lambda b: None)
+    assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+async def test_retry_reuses_the_same_session(copilot_sdk, tmp_path):
+    # The re-prompt sends only _RETRY_SUFFIX, which is correct only if it reuses the ONE session
+    # (created once) still holding the original prompt + schema + first bad answer — NOT a new
+    # session per turn. (Behavioral history-retention is the SDK's session contract, proven live.)
+    copilot_sdk.queue_turn("no json")  # attempt 1 invalid → re-prompt
+    copilot_sdk.queue_turn(json.dumps(_VALID))  # attempt 2 valid
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"
+    assert len(copilot_sdk.captured["send_calls"]) == 2  # two turns
+    assert copilot_sdk.captured["created"] == 1  # ...on ONE session, not session-per-turn
+
+
+def test_usage_collector_ignores_experimental_cost():
+    # AssistantUsageData.cost is experimental; the collector reads only input/output tokens (so a
+    # present cost never feeds Usage), and _consume hardcodes cost_usd=0.0. Pin the ignore.
+    collector = copilot._UsageCollector()
+    collector.handle(_usage_event(7, 12, cost=9.99))
+    assert collector.input_tokens == 7
+    assert collector.output_tokens == 12
+    assert not hasattr(collector, "cost")  # cost is never accumulated
 
 
 # --- registry + capability -------------------------------------------------------------
