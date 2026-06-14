@@ -672,11 +672,14 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     import aeview.cli as cli
 
     aeview_home.mkdir(parents=True, exist_ok=True)
-    (aeview_home / "settings.json").write_text(json.dumps({"reviewTimeoutSeconds": 777}))
+    (aeview_home / "settings.json").write_text(
+        json.dumps({"reviewTimeoutSeconds": 777, "harnessBinaries": {"claude-code": "/z/claude"}})
+    )
     captured: dict = {}
 
     async def fake_fan_out(store, roster, prompts, cwd, timeout=None, harness_binaries=None):
         captured["timeout"] = timeout
+        captured["harness_binaries"] = harness_binaries
         return []
 
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
@@ -696,6 +699,7 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     store.write_review(_review("default__a", "running"))
     runner.invoke(app, ["resume", "t"])
     assert captured["timeout"] == 777  # the configured per-review timeout reaches the fan-out
+    assert captured["harness_binaries"] == {"claude-code": "/z/claude"}  # override threads too
 
 
 def test_resume_missing_prompt_exits_error(aeview_home):

@@ -230,6 +230,29 @@ def test_resolve_cli_override_unresolvable_is_none(monkeypatch):
     assert claude_code.ClaudeCodeAdapter()._resolve_cli("/nope/claude") is None
 
 
+def test_resolve_cli_default_resolves_the_bundled_binary():
+    # No override → the SDK's bundled binary (a reliable installed-dep artifact), resolved
+    # deterministically as <sdk>/_bundled/claude.
+    resolved = claude_code.ClaudeCodeAdapter()._resolve_cli(None)
+    assert resolved is not None and resolved.endswith("/_bundled/claude")
+
+
+async def test_unexpected_transient_text_error_is_retried(monkeypatch, tmp_path):
+    # An unexpected (non-ProcessError) error whose text looks transient is classified transient,
+    # so the fan-out retries it rather than failing fast on a masked overload.
+    _install_raising_query(monkeypatch, RuntimeError("service overloaded, please try again"))
+    with pytest.raises(AdapterError) as ei:
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert ei.value.transient is True
+
+
+async def test_cancelled_error_is_not_swallowed(monkeypatch, tmp_path):
+    # CancelledError is a BaseException, not Exception — the catch-all must let it propagate.
+    _install_raising_query(monkeypatch, asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+
+
 async def test_run_rejects_schema_invalid_structured_output(capture_query, tmp_path):
     capture_query["messages"] = _messages(_result(structured_output={"summary": "no verdict"}))
     with pytest.raises(AdapterError, match="schema validation"):

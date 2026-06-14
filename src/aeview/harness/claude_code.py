@@ -76,6 +76,8 @@ _TRANSIENT_STATUS = {429, 500, 502, 503, 529}
 class ClaudeCodeAdapter:
     name: str = "claude-code"
     schema_support: SchemaSupport = "validated"
+    # The binary NAME (for PATH/bundled resolution in _resolve_cli), not argv[0] — unlike
+    # codex/copilot the SDK owns the argv; an override threads to the SDK via cli_path.
     binary: str = "claude"
     auth_status_args: list[str] = ["auth", "status"]  # noqa: RUF012
 
@@ -119,7 +121,10 @@ class ClaudeCodeAdapter:
         try:
             result, transcript = await self._consume(prompt, options, timeout)
         except AdapterError as exc:
-            log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
+            # Best-effort log; a log-write failure must not mask the AdapterError or break the
+            # adapter's AdapterError-only failure contract.
+            with contextlib.suppress(OSError):
+                log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
             raise
         self._write_log(log_path, transcript, result)
         return self._interpret(result, transcript)
@@ -176,9 +181,13 @@ class ClaudeCodeAdapter:
             # Malformed JSON, SDK/anyio internals, any unexpected error → AdapterError, so the
             # adapter's only failure type is AdapterError. The dedup path (run_dedup) catches only
             # AdapterError/ValidationError, so an unnormalized exception would abort the merge and
-            # leave the run stuck non-terminal. Non-transient: these aren't rate-limits.
+            # leave the run stuck non-terminal. Classify transient by text so an overload that
+            # surfaces as some non-ProcessError exception still retries rather than failing fast.
             # (CancelledError is a BaseException, not Exception, so cancellation is not swallowed.)
-            raise AdapterError(f"claude SDK call failed: {exc}", transient=False) from exc
+            detail = str(exc)
+            raise AdapterError(
+                f"claude SDK call failed: {detail}", transient=looks_transient(detail)
+            ) from exc
         finally:
             # PEP 533: an `async for` does not close its iterator when the body/await raises, so on
             # timeout/cancel the SDK's transport (the claude subprocess) would leak. aclose() runs
@@ -239,7 +248,9 @@ class ClaudeCodeAdapter:
                 "structured_output": result.structured_output,
             }
             lines += ["--- result ---", json.dumps(summary, default=str)]
-        log_path.write_text("\n".join(lines), encoding="utf-8")
+        # Best-effort: a failed log write must not break the AdapterError-only failure contract.
+        with contextlib.suppress(OSError):
+            log_path.write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def _usage(result: ResultMessage) -> Usage:

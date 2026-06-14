@@ -48,6 +48,10 @@ def run_sync(args: list[str], cwd: Path | None = None, timeout: float | None = N
     except subprocess.TimeoutExpired:
         # A wedged command (e.g. a hanging auth probe) becomes a failed result, not a hang.
         return ProcResult(TIMED_OUT, "", f"{args[0]}: timed out after {timeout}s")
+    except OSError as exc:
+        # Any other spawn failure (e.g. PermissionError when a binary override points at a
+        # non-executable file) is a failed command, not a crash — doctor probes it via a path.
+        return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: {exc}")
     return ProcResult(proc.returncode, proc.stdout, proc.stderr)
 
 
@@ -83,6 +87,10 @@ async def run_async(
         # A missing harness binary/cwd becomes a failed result the adapter turns into an
         # AdapterError, so one absent CLI fails just that review instead of crashing the run.
         return _spawn_failure(args, cwd)
+    except OSError as exc:
+        # Other spawn failures (e.g. a non-executable binary override) also degrade to a failed
+        # result rather than crashing the fan-out.
+        return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: {exc}")
     stdin_b = input_text.encode("utf-8") if input_text is not None else None
     try:
         stdout_b, stderr_b = await _communicate(proc, stdin_b, timeout)

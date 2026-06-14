@@ -13,6 +13,15 @@ def test_run_sync_missing_binary(tmp_path):
     assert "command not found" in res.stderr
 
 
+def test_run_sync_non_executable_binary(tmp_path):
+    # A path that exists but isn't executable (e.g. a bad harnessBinaries override) is a failed
+    # spawn (PermissionError), not an uncaught crash — doctor probes binaries by path.
+    f = tmp_path / "not-exec"
+    f.write_text("data")  # mode 644: no execute bit
+    res = run_sync([str(f)], cwd=tmp_path)
+    assert res.returncode == 127
+
+
 def test_run_sync_missing_cwd():
     # A real binary, but a bad cwd -> the cwd is named as the cause, not the binary.
     res = run_sync(["git", "status"], cwd=_BAD_CWD)

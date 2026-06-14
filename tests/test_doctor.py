@@ -149,3 +149,46 @@ def test_doctor_copilot_warns_without_a_billed_auth_call(tmp_path, monkeypatch):
     assert check.status == "warn"
     assert "auth not verifiable" in check.detail
     assert base_run_sync_calls == []  # copilot's empty auth args -> never probed
+
+
+def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
+    # settings.harnessBinaries reaches the harness check: codex's default_preflight gates on the
+    # OVERRIDE path, not the default "codex".
+    from aeview.harness import base
+
+    make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
+    checked: list[str] = []
+
+    def which_fn(binary):
+        checked.append(binary)
+        return f"/usr/bin/{binary}"
+
+    monkeypatch.setattr(base, "which", which_fn)
+    monkeypatch.setattr(base, "run_sync", _run_sync_rc(0))
+    monkeypatch.setattr(doctor, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
+    settings = Settings(
+        deduplication_harness=HarnessInstance(harness="codex", model="sonnet"),
+        harness_binaries={"codex": "/opt/codex"},
+    )
+    doctor.run_doctor(tmp_path, settings)
+    assert "/opt/codex" in checked  # the override path is what was probed on PATH
+
+
+def test_doctor_default_preflight_auth_probe_is_bounded(tmp_path, monkeypatch):
+    # codex/copilot default_preflight must bound the auth probe so a wedged CLI can't hang doctor.
+    from aeview.harness import base
+
+    make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
+    seen_timeouts: list = []
+
+    def record(args, cwd=None, timeout=None):
+        seen_timeouts.append(timeout)
+        return ProcResult(0, "", "")
+
+    monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(base, "run_sync", record)
+    monkeypatch.setattr(doctor, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
+    doctor.run_doctor(tmp_path, _settings(dedup_harness="codex"))
+    assert seen_timeouts and all(t is not None and t > 0 for t in seen_timeouts)

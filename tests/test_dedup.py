@@ -44,6 +44,21 @@ class _StubAdapter:
         return StructuredOutput(payload=self._payload, usage=Usage(cost_usd=0.02), raw="{}")
 
 
+async def test_run_dedup_threads_override_to_get_adapter(aeview_home, monkeypatch, tmp_path):
+    # The dedup harness honors settings.harnessBinaries too (run_dedup → get_adapter).
+    seen: dict = {}
+
+    def fake_get_adapter(harness, override=None):
+        seen["override"] = override
+        return _StubAdapter(payload={"duplicate_groups": []})
+
+    monkeypatch.setattr(dedup_mod, "get_adapter", fake_get_adapter)
+    await run_dedup(
+        _pool(), _instance(), RunStore.create(new_run_id()), tmp_path, binary_override="/x/claude"
+    )
+    assert seen["override"] == "/x/claude"
+
+
 async def test_run_dedup_ok_writes_artifacts_and_returns_groups(aeview_home, monkeypatch, tmp_path):
     payload = {"duplicate_groups": [{"survivor": "f2", "duplicates": ["f1"]}]}
     monkeypatch.setattr(
