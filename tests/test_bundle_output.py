@@ -28,8 +28,10 @@ def _self_collect_bundle():
     return bundle
 
 
-def _reviewer(*, source: Path = Path("."), body: str = "REVIEW BODY") -> Reviewer:
-    return Reviewer(name="default", description="d", body=body, source=source, harnesses=[])
+def _reviewer(*, source: Path = Path(".")) -> Reviewer:
+    return Reviewer(
+        name="default", description="d", body="REVIEW BODY", source=source, harnesses=[]
+    )
 
 
 def test_write_bundle_self_collect_writes_artifacts_and_returns_path(aeview_home):
