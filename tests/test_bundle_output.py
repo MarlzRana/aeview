@@ -92,9 +92,9 @@ def test_compose_prompt_leads_with_reviewer_resource_base(tmp_path):
     src = tmp_path / ".aeview" / "reviewers" / "r"
     prompt = compose_prompt(_reviewer(source=src), _inline_bundle())
 
-    assert prompt.startswith(_resource_lead(src))  # exact dir, not a substring/file path
-    assert prompt.index(str(src)) < prompt.index("REVIEW BODY")
-    assert prompt.index(str(src)) < prompt.index("Operating rules (read-only)")
+    # startswith pins both facts at once: the exact dir (not a substring/file path), and that it
+    # leads — at offset 0 it is necessarily ahead of the body and the read-only guard.
+    assert prompt.startswith(_resource_lead(src))
 
 
 def test_compose_prompt_resource_base_present_in_self_collect(tmp_path):
