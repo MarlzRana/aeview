@@ -128,7 +128,15 @@ class CodexAdapter:
             except BaseException as exc:  # noqa: BLE001 - marshal every outcome to the awaiting loop
                 outcome.set_exception(exc)
 
-        threading.Thread(target=_runner, name="aeview-codex-turn", daemon=True).start()
+        try:
+            threading.Thread(target=_runner, name="aeview-codex-turn", daemon=True).start()
+        except RuntimeError as exc:
+            # OS thread-limit exhaustion under heavy fan-out: normalize to a transient AdapterError
+            # (the adapter's only failure type; a retry may succeed as sibling reviews finish) so a
+            # raw RuntimeError can't break the dedup path's AdapterError-only contract.
+            raise AdapterError(
+                f"codex worker thread failed to start: {exc}", transient=True
+            ) from exc
         return await asyncio.wrap_future(outcome)
 
     async def run(
@@ -268,7 +276,7 @@ class CodexAdapter:
     def _write_log(self, log_path: Path, result: TurnResult) -> None:
         usage = self._usage(result)
         summary = {
-            "status": result.status.value if result.status is not None else None,
+            "status": result.status.value,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
         }
@@ -281,7 +289,7 @@ class CodexAdapter:
     def _usage(result: TurnResult) -> Usage:
         # codex reports no USD cost; usage is optional (the tokenUsage event may not arrive).
         if result.usage is None:
-            return Usage(cost_usd=0.0)
+            return Usage()
         total = result.usage.total
         return Usage(
             input_tokens=total.input_tokens, output_tokens=total.output_tokens, cost_usd=0.0

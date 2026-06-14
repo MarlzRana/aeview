@@ -25,14 +25,18 @@ _VALID = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": [
 
 
 def _usage(inp: int, out: int) -> ThreadTokenUsage:
-    block = {
-        "cachedInputTokens": 0,
-        "inputTokens": inp,
-        "outputTokens": out,
-        "reasoningOutputTokens": 0,
-        "totalTokens": inp + out,
-    }
-    return ThreadTokenUsage.model_validate({"last": block, "total": block})
+    def block(i: int, o: int) -> dict:
+        return {
+            "cachedInputTokens": 0,
+            "inputTokens": i,
+            "outputTokens": o,
+            "reasoningOutputTokens": 0,
+            "totalTokens": i + o,
+        }
+
+    # `last` deliberately differs from `total` so a test asserting inp/out pins that the adapter
+    # reads `.total` (the whole-turn tally), not `.last` (the most recent step).
+    return ThreadTokenUsage.model_validate({"last": block(7, 7), "total": block(inp, out)})
 
 
 def _result(
@@ -348,6 +352,22 @@ async def test_cancellation_does_not_error_in_worker_thread(codex_sdk, tmp_path,
         await task
     await asyncio.sleep(0.5)  # let the daemon thread set the result on the (now-running) future
     assert thread_errors == []  # no InvalidStateError escaped the worker thread
+    assert codex_sdk.captured["closed"] == 1  # teardown still ran after the cancel
+
+
+async def test_thread_start_failure_is_transient_adapter_error(codex_sdk, tmp_path, monkeypatch):
+    # OS thread-limit exhaustion: Thread.start() raising RuntimeError must normalize to a transient
+    # AdapterError, not escape raw (the dedup path catches only AdapterError).
+    class _BoomThread:
+        def __init__(self, *args, **kwargs) -> None: ...
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(codex.threading, "Thread", _BoomThread)
+    with pytest.raises(AdapterError) as ei:
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert ei.value.transient is True
 
 
 async def test_log_write_failure_suppressed_on_success(codex_sdk, tmp_path):
