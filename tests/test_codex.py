@@ -401,6 +401,31 @@ async def test_collector_receives_turn_id(codex_sdk, tmp_path):
     assert codex_sdk.captured["turn_id"] == "t1"  # FakeTurnHandle.id
 
 
+async def test_tee_stream_yields_all_and_logs_all(tmp_path):
+    # Pin the tee directly (the fixture mocks the collector): every notification must pass through
+    # UNCHANGED and be logged, in order — a corrupted/dropped notification would diverge the two.
+    from aeview.harness.eventlog import EventLogWriter
+
+    events = [_FakeEvent("a", {"i": 1}), _FakeEvent("b", {"i": 2}), _FakeEvent("c", {"i": 3})]
+
+    async def src():
+        for e in events:
+            yield e
+
+    log = tmp_path / "review.log"
+    writer = EventLogWriter(log, harness="codex", model="m")
+    # _FakeEvent stands in for a Notification (the writer serializes any dataclass verbatim).
+    seen = [e async for e in codex._tee_stream(src(), writer)]  # type: ignore[arg-type]
+    writer.close()
+    assert seen == events  # passed through unchanged
+    logged = [
+        json.loads(ln)["event"]["method"]
+        for ln in log.read_text().splitlines()
+        if json.loads(ln)["kind"] == "event"
+    ]
+    assert logged == ["a", "b", "c"]  # and each was logged, in order
+
+
 async def test_sdk_runs_off_the_caller_thread(codex_sdk, tmp_path):
     # The SDK interaction runs on a dedicated daemon thread + its own event loop; that isolation is
     # what keeps close() from being starved (no teardown deadlock). Pin it so a revert to an inline
@@ -484,6 +509,7 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     for kw in ("input", "output_schema", "effort"):
         assert kw in turn, f"AsyncThread.turn no longer accepts {kw}"
     assert hasattr(AsyncTurnHandle, "stream")
+    assert "id" in {f.name for f in dataclasses.fields(AsyncTurnHandle)}  # adapter uses turn.id
     assert hasattr(codex, "_collect")  # our lazy wrapper around the SDK's collector
     # Pin the private SDK symbol the wrapper imports, so a future pin bump that moves it fails here.
     from openai_codex._run import _collect_async_turn_result

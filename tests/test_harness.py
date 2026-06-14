@@ -239,6 +239,18 @@ async def test_partial_event_log_survives_timeout(monkeypatch, tmp_path):
     assert lines[-1]["kind"] == "error"
 
 
+async def test_validation_failure_logs_terminal_error(capture_query, tmp_path):
+    # Regression (sibling of the codex fix): a schema-invalid review must log a terminal error, not
+    # a false success — review validation now runs inside the writer's scope, not after it closes.
+    capture_query["messages"] = _messages(_result(structured_output={"summary": "no verdict"}))
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="schema validation"):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log)
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[-1]["kind"] == "error"
+    assert "schema validation" in lines[-1]["event"]["detail"]
+
+
 def test_resolve_cli_override_executable_absolute_path(tmp_path):
     binpath = tmp_path / "claude"
     binpath.write_text("#!/bin/sh\n")

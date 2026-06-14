@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from shutil import which
 from typing import cast
@@ -37,7 +37,6 @@ from claude_agent_sdk import (
     TextBlock,
     query,
 )
-from pydantic import ValidationError
 
 from ..process import run_sync
 from ..schema import ReviewOutput, Usage, review_output_json_schema
@@ -96,6 +95,7 @@ class ClaudeCodeAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
         # `effort` rides on extra_args (== the `--effort` flag) rather than the typed `effort`
         # field, so a passthrough value matches the CLI exactly and needs no cast. "default"/None
@@ -129,6 +129,14 @@ class ClaudeCodeAdapter:
         try:
             result, transcript = await self._consume(prompt, options, timeout, writer)
             out = self._interpret(result, transcript)
+            if validate is not None:
+                # Validate INSIDE the writer's scope so a schema-invalid review logs a terminal
+                # error, not a false success (the SDK's structured_output can be present but
+                # off-schema). The generic dedup caller omits this.
+                try:
+                    validate(out.payload)
+                except Exception as exc:  # noqa: BLE001 - any validation failure fails fast
+                    raise AdapterError(f"claude output failed schema validation: {exc}") from exc
         except AdapterError as exc:
             writer.error(str(exc))
             raise
@@ -148,12 +156,16 @@ class ClaudeCodeAdapter:
         timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout
+            prompt,
+            review_output_json_schema(),
+            model,
+            cwd,
+            log_path,
+            thinking,
+            timeout,
+            validate=ReviewOutput.model_validate,
         )
-        try:
-            review = ReviewOutput.model_validate(out.payload)
-        except ValidationError as exc:
-            raise AdapterError(f"claude output failed schema validation: {exc}") from exc
+        review = ReviewOutput.model_validate(out.payload)
         return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
 
     async def _consume(

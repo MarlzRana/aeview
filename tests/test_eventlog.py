@@ -187,3 +187,21 @@ def test_json_default_model_dump_raises_falls_back_to_str():
             return "M-as-str"
 
     assert _json_default(M()) == "M-as-str"  # raising model_dump degrades to str, never propagates
+
+
+def test_repr_raising_fallback_does_not_propagate(tmp_path):
+    # The unserializable fallback's repr() is itself guarded: an event whose __repr__ raises must
+    # not break the never-raises contract — the line degrades to "<unrepresentable>".
+    class Boom:
+        def __repr__(self) -> str:
+            raise RuntimeError("repr boom")
+
+    log = tmp_path / "review.log"
+    w = EventLogWriter(log, harness="x", model="m")
+    w.append(Boom())  # must not raise despite a raising __repr__/__str__
+    w.append(_Event("after", _Inner("y", datetime.now(UTC)), []))
+    w.close()
+    lines = _lines(log)
+    assert lines[1]["event"]["type"] == "aeview.unserializable"
+    assert lines[1]["event"]["repr"] == "<unrepresentable>"
+    assert lines[2]["event"]["method"] == "after"  # the stream continued past the bad event

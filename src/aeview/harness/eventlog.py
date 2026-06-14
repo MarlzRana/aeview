@@ -31,7 +31,7 @@ from typing import IO, Any, Literal
 _REPR_CAP = 4096
 
 
-def _json_default(obj: object) -> Any:
+def _json_default(obj: object) -> object:
     # json.dumps calls this for anything it can't natively serialize. A dataclass (the raw SDK
     # events) → asdict, which recurses (nested dataclasses become dicts; enum/datetime/UUID leaves
     # fall to a later default call). Enum → its value; a nested pydantic model → its json dict;

@@ -226,7 +226,10 @@ class CodexAdapter:
                 try:
                     result = await _collect(_tee_stream(stream, writer), turn_id=turn.id)
                 finally:
-                    await stream.aclose()
+                    # Suppress: a raising aclose() must not mask the real error from _collect
+                    # (claude suppresses its generator aclose() for the same reason).
+                    with contextlib.suppress(Exception):
+                        await stream.aclose()
                 # Interpret + validate INSIDE the writer's scope so a non-completed turn, a non-JSON
                 # final, or a schema-invalid payload logs a terminal error, never a false success.
                 out = self._interpret(result)
