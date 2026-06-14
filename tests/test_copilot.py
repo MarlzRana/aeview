@@ -807,6 +807,10 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     # The override path depends on for_stdio(path=...); the usage path on session.on(handler).
     assert "path" in inspect.signature(RuntimeConnection.for_stdio).parameters
     assert "handler" in inspect.signature(CopilotSession.on).parameters
+    # The live-log tee + the 'answer in log' assertion assume the assistant message reaches
+    # session.on subscribers (verified live), not only send_and_wait's return. Pin the event type so
+    # a regression that stops broadcasting it fails here instead of silently dropping the answer.
+    assert hasattr(SessionEventType, "ASSISTANT_MESSAGE")
 
 
 # --- preflight -------------------------------------------------------------------------

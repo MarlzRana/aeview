@@ -25,7 +25,7 @@ import json
 import time
 from enum import Enum
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 # Cap only the unserializable-fallback repr — real events are full-fidelity by design.
 _REPR_CAP = 4096
@@ -81,7 +81,7 @@ class EventLogWriter:
                 self._fh.close()
             self._fh = None
 
-    def _write(self, kind: str, event: object) -> None:
+    def _write(self, kind: Literal["meta", "event", "result", "error"], event: object) -> None:
         if self._fh is None:
             return
         seq = self._seq
@@ -90,7 +90,11 @@ class EventLogWriter:
         try:
             text = json.dumps(record, default=_json_default)
         except Exception:  # noqa: BLE001 - one unserializable event must not break the stream
-            record["event"] = {"type": "aeview.unserializable", "repr": repr(event)[:_REPR_CAP]}
+            try:
+                detail = repr(event)[:_REPR_CAP]
+            except Exception:  # noqa: BLE001 - a raising __repr__ must not break never-raises
+                detail = "<unrepresentable>"
+            record["event"] = {"type": "aeview.unserializable", "repr": detail}
             text = json.dumps(record, default=str)
         with contextlib.suppress(OSError):
             self._fh.write(text + "\n")

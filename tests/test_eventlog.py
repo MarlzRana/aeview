@@ -165,3 +165,25 @@ def test_json_default_leaf_types():
     u = uuid.uuid4()
     assert _json_default(u) == str(u)
     assert isinstance(_json_default(datetime.now(UTC)), str)
+
+
+def test_creates_missing_parent_dir(tmp_path):
+    # The writer opens at review start, possibly before any other artifact in the review dir, so it
+    # creates the parent dir itself rather than silently disabling logging.
+    log = tmp_path / "nope" / "deeper" / "review.log"
+    w = EventLogWriter(log, harness="x", model="m")
+    w.append(_Event("e", _Inner("a", datetime.now(UTC)), []))
+    w.close()
+    assert log.exists()
+    assert _lines(log)[0]["kind"] == "meta"
+
+
+def test_json_default_model_dump_raises_falls_back_to_str():
+    class M:
+        def model_dump(self, *a, **k):
+            raise RuntimeError("boom")
+
+        def __str__(self):
+            return "M-as-str"
+
+    assert _json_default(M()) == "M-as-str"  # raising model_dump degrades to str, never propagates

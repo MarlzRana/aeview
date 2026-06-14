@@ -1,7 +1,8 @@
 """codex adapter: schema-constrained final message via the OpenAI Codex Python SDK.
 
-Runs Codex through the `openai-codex` SDK (`AsyncCodex().thread_start(...).run(...)`) instead of
-shelling out to `codex exec`. The SDK resolves its own bundled `codex` binary by default (the
+Runs Codex through the `openai-codex` SDK (`AsyncCodex().thread_start(...)` + a streamed `turn()`,
+so every notification tees to the live event log) instead of shelling out to `codex exec`. The SDK
+resolves its own bundled `codex` binary by default (the
 `openai-codex-cli-bin` dep wheel); a `settings.harnessBinaries["codex"]` entry overrides it via
 `CodexConfig.codex_bin`.
 
@@ -35,9 +36,7 @@ from openai_codex import (
     Sandbox,
     is_retryable_error,
 )
-from openai_codex._run import _collect_async_turn_result
 from openai_codex.types import ReasoningEffort, TurnStatus
-from pydantic import ValidationError
 
 from ..process import run_sync
 from ..schema import ReviewOutput, Usage, make_strict_schema, review_output_json_schema
@@ -53,7 +52,7 @@ from .base import (
 from .eventlog import EventLogWriter
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from openai_codex import TurnResult
     from openai_codex.models import Notification
@@ -66,6 +65,16 @@ async def _tee_stream(
     async for notif in stream:
         writer.append(notif)
         yield notif
+
+
+async def _collect(stream: AsyncIterator[Notification], *, turn_id: str) -> TurnResult:
+    # Reuse the SDK's own turn-result collector (no public API both streams a turn and collects its
+    # result). Imported lazily so a future SDK that moves this private symbol fails only codex runs,
+    # not module import — which, via the adapter registry, would otherwise break every harness. A
+    # test pins the symbol against the pinned SDK so a bump fails loudly before shipping.
+    from openai_codex._run import _collect_async_turn_result
+
+    return await _collect_async_turn_result(stream, turn_id=turn_id)
 
 
 class CodexAdapter:
@@ -88,10 +97,14 @@ class CodexAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
+        """`validate` (optional) deep-checks the payload (ReviewOutput.model_validate) inside the
+        writer's scope so a schema-invalid result logs a terminal error, not a false success; the
+        generic dedup caller omits it."""
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
         effort = self._resolve_effort(thinking)
-        result = await self._run_isolated(
+        return await self._run_isolated(
             self._build_config(),
             prompt,
             make_strict_schema(schema),
@@ -100,8 +113,8 @@ class CodexAdapter:
             effort,
             timeout,
             log_path,
+            validate,
         )
-        return self._interpret(result)
 
     async def _run_isolated(
         self,
@@ -113,7 +126,8 @@ class CodexAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
         log_path: Path,
-    ) -> TurnResult:
+        validate: Callable[[dict], object] | None,
+    ) -> StructuredOutput:
         # The SDK runs its blocking RPC (incl. close()) on the shared asyncio.to_thread pool;
         # under aeview's unbounded fan-out a saturated pool could starve a timed-out review's
         # close() and deadlock teardown. So run each review's SDK work in its OWN event loop on a
@@ -123,14 +137,16 @@ class CodexAdapter:
         # finishes on its own; a clean subtree-kill is deferred I6b-2 work). The inner
         # asyncio.timeout bounds the work; cancelling the awaiter detaches from (but can't abort)
         # the still-running inner loop.
-        outcome: concurrent.futures.Future[TurnResult] = concurrent.futures.Future()
+        outcome: concurrent.futures.Future[StructuredOutput] = concurrent.futures.Future()
 
         def _runner() -> None:
             # Claim the future before running so a wrap_future cancel() from the awaiting loop
             # can't race set_result into InvalidStateError; if already cancelled, skip the run.
             if not outcome.set_running_or_notify_cancel():
                 return
-            coro = self._consume(config, prompt, schema, model, cwd, effort, timeout, log_path)
+            coro = self._consume(
+                config, prompt, schema, model, cwd, effort, timeout, log_path, validate
+            )
             try:
                 outcome.set_result(asyncio.run(coro))
             except BaseException as exc:  # noqa: BLE001 - marshal every outcome to the awaiting loop
@@ -157,12 +173,16 @@ class CodexAdapter:
         timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout
+            prompt,
+            review_output_json_schema(),
+            model,
+            cwd,
+            log_path,
+            thinking,
+            timeout,
+            validate=ReviewOutput.model_validate,
         )
-        try:
-            review = ReviewOutput.model_validate(out.payload)
-        except ValidationError as exc:
-            raise AdapterError(f"codex output failed schema validation: {exc}") from exc
+        review = ReviewOutput.model_validate(out.payload)
         return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
 
     async def _consume(
@@ -175,7 +195,8 @@ class CodexAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
         log_path: Path,
-    ) -> TurnResult:
+        validate: Callable[[dict], object] | None,
+    ) -> StructuredOutput:
         """Run one read-only turn to completion inside the caller's (isolated) event loop.
         `asyncio.timeout(None)` is a no-op, so this bounds the run only when a timeout is set; a
         timeout is fail-fast (non-transient), matching every other adapter. The finally ALWAYS
@@ -203,13 +224,23 @@ class CodexAdapter:
                 # (the SDK's own run() calls .aclose() on it); cast so the teardown is well-typed.
                 stream = cast("AsyncGenerator[Notification]", turn.stream())
                 try:
-                    result = await _collect_async_turn_result(
-                        _tee_stream(stream, writer), turn_id=turn.id
-                    )
+                    result = await _collect(_tee_stream(stream, writer), turn_id=turn.id)
                 finally:
                     await stream.aclose()
+                # Interpret + validate INSIDE the writer's scope so a non-completed turn, a non-JSON
+                # final, or a schema-invalid payload logs a terminal error, never a false success.
+                out = self._interpret(result)
+                if validate is not None:
+                    try:
+                        validate(out.payload)
+                    except Exception as exc:  # noqa: BLE001 - any validation failure fails fast
+                        raise AdapterError(f"codex output failed schema validation: {exc}") from exc
                 writer.result()
-                return result
+                return out
+        except AdapterError as exc:
+            # _interpret / validate failures (already classified) — log the error, then re-raise.
+            writer.error(str(exc))
+            raise
         except TimeoutError as exc:
             writer.error(f"codex timed out after {timeout}s")
             raise AdapterError(f"codex timed out after {timeout}s", transient=False) from exc

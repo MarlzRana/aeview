@@ -148,6 +148,7 @@ def codex_sdk(monkeypatch):
         # Drain the tee'd stream so the writer logs every event, then honor delay/exc/result. We
         # don't rebuild a TurnResult from notifications (the SDK owns that); the fixture supplies it
         # directly, so the delay/exception now surface from collection (inside the review timeout).
+        captured["turn_id"] = turn_id
         async for _ in stream:
             pass
         if state["run_delay"]:
@@ -157,7 +158,7 @@ def codex_sdk(monkeypatch):
         return state["result"]
 
     monkeypatch.setattr(codex, "AsyncCodex", FakeAsyncCodex)
-    monkeypatch.setattr(codex, "_collect_async_turn_result", fake_collect)
+    monkeypatch.setattr(codex, "_collect", fake_collect)
     return _Controller(state, captured)
 
 
@@ -372,6 +373,34 @@ async def test_partial_event_log_survives_timeout(codex_sdk, tmp_path):
     assert lines[-1]["kind"] == "error"  # terminal error is recorded even on a timeout
 
 
+async def test_validation_failure_logs_terminal_error(codex_sdk, tmp_path):
+    # Regression: a valid-JSON-but-schema-invalid result must log a terminal ERROR, not a false
+    # success — interpret + validate now run inside the writer's scope (not after it closes).
+    bad = json.dumps({"verdict": "maybe", "summary": "x", "findings": [], "next_steps": []})
+    codex_sdk.set_raw_result(_result(bad, usage=_usage(1, 1)))
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="schema validation"):
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[-1]["kind"] == "error"
+    assert "schema validation" in lines[-1]["event"]["detail"]
+
+
+async def test_non_json_final_logs_terminal_error(codex_sdk, tmp_path):
+    # Same scope guarantee for an interpret failure (non-JSON final), via the generic path.
+    codex_sdk.set_raw_result(_result("not json", usage=_usage(1, 1)))
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="not JSON"):
+        await codex.CodexAdapter().run_structured("p", {}, "gpt-5.5", tmp_path, log)
+    assert json.loads(log.read_text().splitlines()[-1])["kind"] == "error"
+
+
+async def test_collector_receives_turn_id(codex_sdk, tmp_path):
+    # The streamed-turn refactor must pass turn.id to the collector (matches notifications by turn).
+    await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert codex_sdk.captured["turn_id"] == "t1"  # FakeTurnHandle.id
+
+
 async def test_sdk_runs_off_the_caller_thread(codex_sdk, tmp_path):
     # The SDK interaction runs on a dedicated daemon thread + its own event loop; that isolation is
     # what keeps close() from being starved (no teardown deadlock). Pin it so a revert to an inline
@@ -455,7 +484,11 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     for kw in ("input", "output_schema", "effort"):
         assert kw in turn, f"AsyncThread.turn no longer accepts {kw}"
     assert hasattr(AsyncTurnHandle, "stream")
-    assert hasattr(codex, "_collect_async_turn_result")
+    assert hasattr(codex, "_collect")  # our lazy wrapper around the SDK's collector
+    # Pin the private SDK symbol the wrapper imports, so a future pin bump that moves it fails here.
+    from openai_codex._run import _collect_async_turn_result
+
+    assert callable(_collect_async_turn_result)
 
 
 def test_preflight_no_override_resolves_bundled_and_probes_bounded(monkeypatch):
