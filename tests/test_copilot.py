@@ -71,7 +71,15 @@ async def test_read_only_blocklist_argv_and_stdin(fake_copilot, tmp_path):
     assert "--disable-builtin-mcps" in args and "--no-ask-user" in args
     assert _flag_value(args, "--model") == "gpt-5.4"
     assert "REVIEW" not in args  # prompt is not an argv element
-    assert "REVIEW" in fake_copilot.calls[0]["input_text"]  # it's on stdin
+
+
+async def test_copilot_binary_override_used_as_argv0(fake_copilot, tmp_path):
+    # settings.harnessBinaries["copilot"] overrides argv[0] (the executable copilot shells out to).
+    await copilot.CopilotAdapter("/custom/copilot").run(
+        "REVIEW", "gpt-5.4", tmp_path, tmp_path / "log"
+    )
+    assert fake_copilot.calls[0]["args"][0] == "/custom/copilot"
+    assert "REVIEW" in fake_copilot.calls[0]["input_text"]  # prompt still on stdin
 
 
 async def test_schema_embedded_in_prompt(fake_copilot, tmp_path):
@@ -278,10 +286,21 @@ async def test_wrapped_answer_is_recovered_by_descent(fake_copilot, tmp_path):
 async def test_descent_does_not_match_findings_subobjects(fake_copilot, tmp_path):
     # Descent must find the wrapped review, not a finding sub-object (findings lack verdict/
     # summary, so they never match) — guards against grabbing the wrong nested dict.
-    review = dict(_VALID, verdict="needs-attention", findings=[
-        {"title": "t", "body": "b", "severity": "high", "category": "bug", "confidence": 0.5,
-         "location": {"file": "a.py", "line_start": 1, "line_end": 1}, "recommendation": "r"}
-    ])
+    review = dict(
+        _VALID,
+        verdict="needs-attention",
+        findings=[
+            {
+                "title": "t",
+                "body": "b",
+                "severity": "high",
+                "category": "bug",
+                "confidence": 0.5,
+                "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+                "recommendation": "r",
+            }
+        ],
+    )
     fake_copilot.queue(_stream(json.dumps({"result": review})))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "needs-attention"

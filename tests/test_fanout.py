@@ -121,3 +121,25 @@ async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
     on_disk = json.loads(store.review_path(_ENTRY.reviewer, _ENTRY.id).read_text())
     assert on_disk["status"] == "failed"
     assert "bad auth" in on_disk["error"]
+
+
+async def test_fan_out_resolves_binary_override_per_harness(aeview_home, monkeypatch):
+    # fan_out resolves harness_binaries[entry.harness] once and passes the resolved path to
+    # get_adapter — workers carry the resolved override, not the whole map.
+    seen: dict = {}
+
+    def fake_get_adapter(harness, override=None):
+        seen["harness"], seen["override"] = harness, override
+        return _CaptureTimeoutAdapter()
+
+    monkeypatch.setattr(fanout, "get_adapter", fake_get_adapter)
+    store = RunStore.create(new_run_id())
+    await fanout.fan_out(
+        store,
+        [_ENTRY],
+        {"default": "p"},
+        aeview_home,
+        harness_binaries={_ENTRY.harness: "/custom/bin"},
+    )
+    assert seen["harness"] == _ENTRY.harness
+    assert seen["override"] == "/custom/bin"

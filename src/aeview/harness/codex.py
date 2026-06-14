@@ -34,7 +34,7 @@ _EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 class CodexAdapter:
     name: str = "codex"
     schema_support: SchemaSupport = "constrained"
-    auth_status_args: list[str] = ["codex", "login", "status"]  # noqa: RUF012
+    auth_status_args: list[str] = ["login", "status"]  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
         # settings.harnessBinaries["codex"] → argv[0]. None → "codex" on PATH. (Still shells out;

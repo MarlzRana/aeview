@@ -92,7 +92,7 @@ class Adapter(Protocol):
     name: str
     schema_support: SchemaSupport
     binary: str  # the CLI executable, for doctor's PATH check
-    auth_status_args: list[str]  # a no-cost auth/status command; rc==0 means authenticated
+    auth_status_args: list[str]  # no-cost auth-probe subcommand (prepended with binary); [] = none
 
     async def run_structured(
         self,
@@ -133,7 +133,7 @@ def default_preflight(adapter: Adapter) -> Preflight:
         return Preflight("fail", f"{binary} not found on PATH")
     if not adapter.auth_status_args:
         return Preflight("warn", f"{binary} present; auth not verifiable")
-    probe = [binary, *adapter.auth_status_args[1:]]
+    probe = [binary, *adapter.auth_status_args]
     if run_sync(probe, timeout=AUTH_PROBE_TIMEOUT).returncode == 0:
         return Preflight("ok", f"{binary} present and authenticated")
     return Preflight("warn", f"{binary} present but auth could not be verified")

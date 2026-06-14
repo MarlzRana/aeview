@@ -30,8 +30,6 @@ import claude_agent_sdk
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKError,
-    CLIJSONDecodeError,
     CLINotFoundError,
     Message,
     ProcessError,
@@ -79,12 +77,12 @@ class ClaudeCodeAdapter:
     name: str = "claude-code"
     schema_support: SchemaSupport = "validated"
     binary: str = "claude"
-    auth_status_args: list[str] = ["claude", "auth", "status"]  # noqa: RUF012
+    auth_status_args: list[str] = ["auth", "status"]  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
-        # settings.harnessBinaries["claude-code"], threaded to the SDK as cli_path. None → the
-        # SDK's own resolution (bundled binary, then PATH).
-        self._cli_path = binary_override
+        # settings.harnessBinaries["claude-code"], threaded to the SDK as cli_path. None (incl. an
+        # empty string) → the SDK's own resolution (bundled binary, then PATH).
+        self._cli_path = binary_override or None
 
     async def run_structured(
         self,
@@ -107,11 +105,11 @@ class ClaudeCodeAdapter:
             cwd=str(cwd),
             permission_mode="dontAsk",
             disallowed_tools=list(_DISALLOWED_TOOLS),
-            # Read-anywhere: under dontAsk the Read tool is denied for paths outside cwd (a
-            # permission-layer gate, separate from the write sandbox). Granting the filesystem root
-            # as an accessible dir lets reviewers read references kept outside the repo (the N4
-            # contract). Writes stay blocked by the sandbox + disallowed tools; dontAsk still denies
-            # network. Live-verified: a read outside cwd succeeds, a write is blocked.
+            # Read-anywhere (user-confirmed policy: read any file, write nothing). Under dontAsk
+            # the Read tool is denied outside cwd (a permission-layer gate, separate from the write
+            # sandbox), so grant the filesystem root as readable — the deliberate read-anywhere
+            # contract (N4): reviewers read references kept outside the repo. Writes stay blocked by
+            # the sandbox + disallowed tools; dontAsk still denies network. Live-verified.
             add_dirs=["/"],
             output_format={"type": "json_schema", "schema": schema},
             settings=_SANDBOX_SETTINGS,
@@ -174,13 +172,13 @@ class ClaudeCodeAdapter:
                 f"claude process failed: {detail}",
                 transient=classify_transient(exc.exit_code or 1, detail),
             ) from exc
-        except CLIJSONDecodeError as exc:
-            raise AdapterError(
-                f"claude output could not be parsed: {exc}", transient=False
-            ) from exc
-        except ClaudeSDKError as exc:
-            # Any other SDK failure (message-parse, connection) — not a rate-limit, so fail fast.
-            raise AdapterError(f"claude SDK error: {exc}", transient=False) from exc
+        except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
+            # Malformed JSON, SDK/anyio internals, any unexpected error → AdapterError, so the
+            # adapter's only failure type is AdapterError. The dedup path (run_dedup) catches only
+            # AdapterError/ValidationError, so an unnormalized exception would abort the merge and
+            # leave the run stuck non-terminal. Non-transient: these aren't rate-limits.
+            # (CancelledError is a BaseException, not Exception, so cancellation is not swallowed.)
+            raise AdapterError(f"claude SDK call failed: {exc}", transient=False) from exc
         finally:
             # PEP 533: an `async for` does not close its iterator when the body/await raises, so on
             # timeout/cancel the SDK's transport (the claude subprocess) would leak. aclose() runs
@@ -210,15 +208,18 @@ class ClaudeCodeAdapter:
         binary = self._resolve_cli(self._cli_path)
         if binary is None:
             return Preflight("fail", "claude binary not resolvable (no override, bundle, or PATH)")
-        probe = [binary, *self.auth_status_args[1:]]
+        probe = [binary, *self.auth_status_args]
         if run_sync(probe, timeout=AUTH_PROBE_TIMEOUT).returncode == 0:
             return Preflight("ok", f"claude SDK ready ({binary})")
         return Preflight("warn", f"claude SDK present ({binary}); auth could not be verified")
 
     def _resolve_cli(self, override: str | None) -> str | None:
-        # Mirror the SDK's resolution order for doctor: explicit override → bundled → PATH.
+        # Mirror the SDK's resolution order for doctor: explicit override → bundled → PATH. An
+        # override may be an absolute path or a bare command name, so fall back to PATH lookup.
         if override:
-            return override if Path(override).exists() else None
+            return override if Path(override).exists() else which(override)
+        # Reach into the SDK's bundled-binary location; if that private layout ever changes,
+        # exists() is False and we degrade to PATH rather than breaking.
         bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / self.binary
         if bundled.exists():
             return str(bundled)

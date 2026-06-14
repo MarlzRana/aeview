@@ -13,15 +13,11 @@ _USAGE_JSONL = "\n".join(
     [
         json.dumps({"type": "thread.started", "thread_id": "x"}),
         json.dumps({"type": "turn.started"}),
-        json.dumps(
-            {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 20}}
-        ),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 20}}),
     ]
 )
 
-_VALID_FINAL = json.dumps(
-    {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
-)
+_VALID_FINAL = json.dumps({"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []})
 
 
 def _find(args: list[str], flag: str) -> str:
@@ -58,10 +54,16 @@ async def test_codex_runs_read_only_constrained(capture_codex, tmp_path):
     assert args[:2] == ["codex", "exec"]
     assert _find(args, "--sandbox") == "read-only"
     assert _find(args, "--model") == "gpt-5.5"
-    assert '-c' in args and 'approval_policy="never"' in args
+    assert "-c" in args and 'approval_policy="never"' in args
     assert "--output-schema" in args and "--output-last-message" in args
     assert "--ephemeral" in args and "--json" in args
-    assert capture_codex["input_text"] == "PROMPT"  # prompt on stdin
+
+
+async def test_codex_binary_override_used_as_argv0(capture_codex, tmp_path):
+    # settings.harnessBinaries["codex"] overrides argv[0] (the executable codex shells out to).
+    await codex.CodexAdapter("/custom/codex").run("PROMPT", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert capture_codex["args"][0] == "/custom/codex"
+    assert capture_codex["input_text"] == "PROMPT"  # prompt still on stdin
 
 
 async def test_run_structured_delivers_strict_form_of_given_schema(capture_codex, tmp_path):

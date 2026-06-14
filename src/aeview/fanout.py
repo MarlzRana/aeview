@@ -34,7 +34,7 @@ async def _run_review(
     prompt: str,
     cwd: Path,
     timeout: float | None,
-    harness_binaries: dict[str, str],
+    binary_override: str | None,
 ) -> ReviewResult:
     result = ReviewResult(
         id=entry.id,
@@ -48,7 +48,7 @@ async def _run_review(
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        return await _attempt_review(store, result, entry, prompt, cwd, timeout, harness_binaries)
+        return await _attempt_review(store, result, entry, prompt, cwd, timeout, binary_override)
     except AdapterError as exc:
         return _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
@@ -62,9 +62,9 @@ async def _attempt_review(
     prompt: str,
     cwd: Path,
     timeout: float | None,
-    harness_binaries: dict[str, str],
+    binary_override: str | None,
 ) -> ReviewResult:
-    adapter = get_adapter(entry.harness, harness_binaries.get(entry.harness))
+    adapter = get_adapter(entry.harness, binary_override)
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -115,9 +115,18 @@ async def fan_out(
     harness_binaries: dict[str, str] | None = None,
 ) -> list[ReviewResult]:
     overrides = harness_binaries or {}
+    # Resolve each entry's binary override here (per harness) so the workers carry just the
+    # resolved path, not the whole map.
     tasks = [
         asyncio.create_task(
-            _run_review(store, entry, prompt_by_reviewer[entry.reviewer], cwd, timeout, overrides)
+            _run_review(
+                store,
+                entry,
+                prompt_by_reviewer[entry.reviewer],
+                cwd,
+                timeout,
+                overrides.get(entry.harness),
+            )
         )
         for entry in roster
     ]

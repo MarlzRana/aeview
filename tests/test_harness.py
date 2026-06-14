@@ -165,12 +165,18 @@ async def test_process_error_generic_is_non_transient(monkeypatch, tmp_path):
     assert ei.value.transient is False
 
 
-async def test_timeout_is_non_transient_and_fails_fast(monkeypatch, tmp_path):
-    # asyncio.timeout fires while the generator is still producing -> non-transient (fail-fast), and
-    # the generator is aclosed in the finally so the subprocess can't leak.
+async def test_timeout_fails_fast_and_closes_the_generator(monkeypatch, tmp_path):
+    # asyncio.timeout fires while the generator is still producing -> non-transient (fail-fast).
+    # The finally aclose() must run the generator's cleanup (PEP 533: an async-for won't close it
+    # on exception) — that teardown is what kills the SDK subprocess, so assert it actually runs.
+    closed = {"aclosed": False}
+
     async def slow_query(*, prompt, options, transport=None):
-        await asyncio.sleep(10)
-        yield  # pragma: no cover - never reached; the timeout fires first
+        try:
+            await asyncio.sleep(10)
+            yield  # pragma: no cover - never reached; the timeout fires first
+        finally:
+            closed["aclosed"] = True  # GeneratorExit raised by aclose() runs this
 
     monkeypatch.setattr(claude_code, "query", slow_query)
     with pytest.raises(AdapterError) as ei:
@@ -178,6 +184,50 @@ async def test_timeout_is_non_transient_and_fails_fast(monkeypatch, tmp_path):
             "p", "opus", tmp_path, tmp_path / "log", timeout=0.05
         )
     assert ei.value.transient is False
+    assert closed["aclosed"] is True  # the generator (hence the subprocess) was torn down
+
+
+async def test_unexpected_sdk_error_is_normalized_to_adapter_error(monkeypatch, tmp_path):
+    # Any non-AdapterError from the SDK (malformed JSON, anyio/internal) must surface as a
+    # non-transient AdapterError — run_dedup only catches AdapterError, so an unnormalized error
+    # would abort the merge and strand the run non-terminal.
+    _install_raising_query(monkeypatch, RuntimeError("anyio task group exploded"))
+    with pytest.raises(AdapterError) as ei:
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
+
+
+async def test_run_writes_transcript_and_result_to_log(capture_query, tmp_path):
+    log = tmp_path / "review.log"
+    await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log)
+    text = log.read_text()
+    assert "reviewed" in text  # the assistant transcript
+    assert "--- result ---" in text  # the result summary footer
+
+
+async def test_error_path_writes_an_error_log(monkeypatch, tmp_path):
+    _install_raising_query(monkeypatch, CLINotFoundError("nope"))
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log)
+    assert "--- error ---" in log.read_text()
+
+
+def test_resolve_cli_override_absolute_path(tmp_path):
+    binpath = tmp_path / "claude"
+    binpath.write_text("#!/bin/sh\n")
+    assert claude_code.ClaudeCodeAdapter()._resolve_cli(str(binpath)) == str(binpath)
+
+
+def test_resolve_cli_override_command_name_resolves_via_path(monkeypatch):
+    # A bare command-name override (not an absolute path) resolves via PATH, not a fail.
+    monkeypatch.setattr(claude_code, "which", lambda b: f"/usr/bin/{b}")
+    assert claude_code.ClaudeCodeAdapter()._resolve_cli("my-claude") == "/usr/bin/my-claude"
+
+
+def test_resolve_cli_override_unresolvable_is_none(monkeypatch):
+    monkeypatch.setattr(claude_code, "which", lambda b: None)
+    assert claude_code.ClaudeCodeAdapter()._resolve_cli("/nope/claude") is None
 
 
 async def test_run_rejects_schema_invalid_structured_output(capture_query, tmp_path):

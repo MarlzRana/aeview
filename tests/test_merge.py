@@ -151,6 +151,23 @@ async def test_dedup_groups_collapse_to_one_survivor(aeview_home, monkeypatch):
     assert report.usage.total.cost_usd == 0.04  # 2 reviews x 0.01 + dedup 0.02
 
 
+async def test_merge_threads_binary_override_to_dedup(aeview_home, monkeypatch):
+    # The live harnessBinaries override reaches the dedup harness call (via _merge_settings).
+    captured: dict = {}
+
+    async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
+        captured["override"] = binary_override
+        return DedupOutcome("ok", [], Usage(), instance.descriptor_id)
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_dedup)
+    settings = Settings(
+        deduplication_harness=HarnessInstance(harness="claude-code", model="opus"),
+        harness_binaries={"claude-code": "/custom/claude"},
+    )
+    await _merge(_two_reviews(), aeview_home, settings=settings)
+    assert captured["override"] == "/custom/claude"
+
+
 async def test_dedup_failure_emits_raw_union_with_notice(aeview_home, monkeypatch):
     async def fake_dedup(pool, instance, store, cwd, timeout=600.0, binary_override=None):
         return DedupOutcome(
