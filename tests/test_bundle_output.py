@@ -98,5 +98,5 @@ def test_compose_prompt_leads_with_reviewer_resource_base(tmp_path):
 def test_compose_prompt_resource_base_present_in_self_collect(tmp_path):
     # The base path leads regardless of bundle mode.
     src = tmp_path / "rev"
-    prompt = compose_prompt(_reviewer(source=src, body="B"), _self_collect_bundle(), tmp_path / "x")
+    prompt = compose_prompt(_reviewer(source=src), _self_collect_bundle(), tmp_path / "x")
     assert prompt.startswith(_resource_lead(src))
