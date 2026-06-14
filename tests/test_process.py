@@ -22,6 +22,14 @@ def test_run_sync_non_executable_binary(tmp_path):
     assert res.returncode == 127
 
 
+async def test_run_async_non_executable_binary(tmp_path):
+    # Async twin: the review fan-out path also degrades a non-executable binary to a failed result.
+    f = tmp_path / "not-exec"
+    f.write_text("data")
+    res = await run_async([str(f)], cwd=tmp_path)
+    assert res.returncode == 127
+
+
 def test_run_sync_missing_cwd():
     # A real binary, but a bad cwd -> the cwd is named as the cause, not the binary.
     res = run_sync(["git", "status"], cwd=_BAD_CWD)

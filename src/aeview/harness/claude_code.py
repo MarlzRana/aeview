@@ -223,10 +223,11 @@ class ClaudeCodeAdapter:
         return Preflight("warn", f"claude SDK present ({binary}); auth could not be verified")
 
     def _resolve_cli(self, override: str | None) -> str | None:
-        # Mirror the SDK's resolution order for doctor: explicit override → bundled → PATH. An
-        # override may be an absolute path or a bare command name, so fall back to PATH lookup.
+        # Mirror the SDK's resolution order for doctor: explicit override → bundled → PATH. which()
+        # handles an absolute path OR a bare command name AND verifies it's executable, so a
+        # non-executable override resolves to None (doctor fails it) instead of a broken probe.
         if override:
-            return override if Path(override).exists() else which(override)
+            return which(override)
         # Reach into the SDK's bundled-binary location; if that private layout ever changes,
         # exists() is False and we degrade to PATH rather than breaking.
         bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / self.binary

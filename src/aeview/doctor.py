@@ -61,16 +61,16 @@ def run_doctor(cwd: Path, settings: Settings) -> DoctorReport:
         checks.append(Check("dedup", "warn", "no deduplicationHarness configured"))
 
     for harness in sorted(harness_types):
-        checks.append(_check_harness(harness, settings))
+        checks.append(_check_harness(harness, settings.harness_binaries.get(harness)))
 
     checks.append(_check_gh())
     return DoctorReport(checks)
 
 
-def _check_harness(harness: str, settings: Settings) -> Check:
+def _check_harness(harness: str, binary_override: str | None) -> Check:
     name = f"harness:{harness}"
     try:
-        adapter = get_adapter(harness, settings.harness_binaries.get(harness))
+        adapter = get_adapter(harness, binary_override)
     except AdapterError as exc:
         return Check(name, "fail", str(exc))
     # Each adapter owns its check: claude verifies its SDK-resolved (possibly bundled) binary;

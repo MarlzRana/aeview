@@ -91,7 +91,7 @@ class StructuredOutput:
 class Adapter(Protocol):
     name: str
     schema_support: SchemaSupport
-    binary: str  # the CLI executable, for doctor's PATH check
+    binary: str  # the harness binary NAME/path: codex/copilot argv[0]; claude's resolution name
     auth_status_args: list[str]  # no-cost auth-probe subcommand (prepended with binary); [] = none
 
     async def run_structured(

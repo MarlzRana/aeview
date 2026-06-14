@@ -180,10 +180,10 @@ def test_doctor_default_preflight_auth_probe_is_bounded(tmp_path, monkeypatch):
     from aeview.harness import base
 
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
-    seen_timeouts: list = []
+    calls: list = []
 
     def record(args, cwd=None, timeout=None):
-        seen_timeouts.append(timeout)
+        calls.append((args, timeout))
         return ProcResult(0, "", "")
 
     monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
@@ -191,4 +191,6 @@ def test_doctor_default_preflight_auth_probe_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     doctor.run_doctor(tmp_path, _settings(dedup_harness="codex"))
-    assert seen_timeouts and all(t is not None and t > 0 for t in seen_timeouts)
+    assert calls and all(t is not None and t > 0 for _, t in calls)  # every probe bounded
+    # the probe is the binary (PATH-resolved at spawn) + its auth subcommand, not a bare subcommand
+    assert any(args == ["codex", "login", "status"] for args, _ in calls)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from claude_agent_sdk import (
@@ -213,10 +214,17 @@ async def test_error_path_writes_an_error_log(monkeypatch, tmp_path):
     assert "--- error ---" in log.read_text()
 
 
-def test_resolve_cli_override_absolute_path(tmp_path):
+def test_resolve_cli_override_executable_absolute_path(tmp_path):
     binpath = tmp_path / "claude"
     binpath.write_text("#!/bin/sh\n")
+    binpath.chmod(0o755)  # which() requires it to be executable
     assert claude_code.ClaudeCodeAdapter()._resolve_cli(str(binpath)) == str(binpath)
+
+
+def test_resolve_cli_override_non_executable_is_none(tmp_path):
+    f = tmp_path / "claude"
+    f.write_text("not exec")  # mode 644 — exists but not executable -> doctor must fail it
+    assert claude_code.ClaudeCodeAdapter()._resolve_cli(str(f)) is None
 
 
 def test_resolve_cli_override_command_name_resolves_via_path(monkeypatch):
@@ -230,11 +238,17 @@ def test_resolve_cli_override_unresolvable_is_none(monkeypatch):
     assert claude_code.ClaudeCodeAdapter()._resolve_cli("/nope/claude") is None
 
 
-def test_resolve_cli_default_resolves_the_bundled_binary():
-    # No override → the SDK's bundled binary (a reliable installed-dep artifact), resolved
-    # deterministically as <sdk>/_bundled/claude.
+def test_resolve_cli_default_resolves_a_real_binary():
+    # No override → a resolvable bundled binary (a real installed-dep artifact). Don't couple to
+    # the SDK's private layout name; assert it resolves to an existing path.
     resolved = claude_code.ClaudeCodeAdapter()._resolve_cli(None)
-    assert resolved is not None and resolved.endswith("/_bundled/claude")
+    assert resolved is not None and Path(resolved).exists()
+
+
+def test_empty_override_normalizes_to_sdk_default():
+    # An empty harnessBinaries entry must not become cli_path="" (which the SDK treats as a path);
+    # it coerces to None so the SDK uses its own resolution.
+    assert claude_code.ClaudeCodeAdapter("")._cli_path is None
 
 
 async def test_unexpected_transient_text_error_is_retried(monkeypatch, tmp_path):
