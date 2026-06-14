@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6",
     "pathspec>=0.12",
     "claude-agent-sdk>=0.2.101",
+    "openai-codex>=0.1.0b2",
 ]
 
 [project.scripts]

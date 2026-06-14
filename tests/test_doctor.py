@@ -27,11 +27,11 @@ def _run_sync_rc(rc: int):
 
 
 def _mock_seams(monkeypatch, *, present=True, authed=True):
-    """Mock all three preflight seams: base.which/run_sync (codex/copilot default_preflight),
-    claude_code.run_sync (claude's bundled-binary auth probe), and doctor.which/run_sync (gh). The
-    claude adapter resolves its bundled binary regardless of `present`, so a missing-binary case
-    must use codex/copilot (which gate on PATH)."""
-    from aeview.harness import base, claude_code
+    """Mock every preflight seam: base.which/run_sync (copilot default_preflight),
+    claude_code.run_sync (claude's bundled-binary auth probe), codex.which/run_sync (codex's
+    bundled/override resolution + probe), and doctor.which/run_sync (gh). claude AND codex resolve
+    their bundled binaries regardless of `present`, so a missing-binary case must use copilot."""
+    from aeview.harness import base, claude_code, codex
 
     def which_fn(binary):
         return f"/usr/bin/{binary}" if present else None
@@ -40,6 +40,8 @@ def _mock_seams(monkeypatch, *, present=True, authed=True):
     monkeypatch.setattr(base, "which", which_fn)
     monkeypatch.setattr(base, "run_sync", rs)
     monkeypatch.setattr(claude_code, "run_sync", rs)
+    monkeypatch.setattr(codex, "which", which_fn)
+    monkeypatch.setattr(codex, "run_sync", rs)
     monkeypatch.setattr(doctor, "which", which_fn)
     monkeypatch.setattr(doctor, "run_sync", rs)
 
@@ -58,7 +60,7 @@ def test_doctor_all_ok(tmp_path, monkeypatch):
 
 
 def test_doctor_codex_ok(tmp_path, monkeypatch):
-    # codex uses the shared PATH+auth default_preflight: present binary + rc0 auth -> ok.
+    # codex resolves its bundled binary (need not be on PATH) and probes auth: rc0 -> ok.
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
     _mock_seams(monkeypatch)
     report = doctor.run_doctor(tmp_path, _settings(dedup_harness="codex"))
@@ -66,12 +68,13 @@ def test_doctor_codex_ok(tmp_path, monkeypatch):
 
 
 def test_doctor_missing_binary_fails(tmp_path, monkeypatch):
-    # codex (PATH-gated) is the one that can fail on a missing binary; claude resolves its bundle.
-    make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
+    # copilot (PATH-gated default_preflight) fails on a missing binary; claude and codex resolve
+    # their bundled binaries regardless of PATH.
+    make_reviewer(tmp_path, "cop", harnesses=[{"harness": "copilot", "model": "gpt-5.4"}])
     _mock_seams(monkeypatch, present=False)
-    report = doctor.run_doctor(tmp_path, _settings(dedup_harness="codex"))
+    report = doctor.run_doctor(tmp_path, _settings(dedup_harness="copilot"))
     assert not report.ok
-    assert _check(report, "harness:codex").status == "fail"
+    assert _check(report, "harness:copilot").status == "fail"
 
 
 def test_doctor_invalid_reviewer_config_fails(tmp_path, monkeypatch):
@@ -152,19 +155,19 @@ def test_doctor_copilot_warns_without_a_billed_auth_call(tmp_path, monkeypatch):
 
 
 def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
-    # settings.harnessBinaries reaches the harness check: codex's default_preflight gates on the
-    # OVERRIDE path, not the default "codex".
-    from aeview.harness import base
+    # settings.harnessBinaries reaches the harness check: codex's preflight resolves the OVERRIDE
+    # path (via which), not the bundled binary.
+    from aeview.harness import codex
 
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
     checked: list[str] = []
 
     def which_fn(binary):
         checked.append(binary)
-        return f"/usr/bin/{binary}"
+        return f"/usr/bin{binary}"
 
-    monkeypatch.setattr(base, "which", which_fn)
-    monkeypatch.setattr(base, "run_sync", _run_sync_rc(0))
+    monkeypatch.setattr(codex, "which", which_fn)
+    monkeypatch.setattr(codex, "run_sync", _run_sync_rc(0))
     monkeypatch.setattr(doctor, "which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     settings = Settings(
@@ -172,12 +175,12 @@ def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
         harness_binaries={"codex": "/opt/codex"},
     )
     doctor.run_doctor(tmp_path, settings)
-    assert "/opt/codex" in checked  # the override path is what was probed on PATH
+    assert "/opt/codex" in checked  # the override path is what was resolved
 
 
-def test_doctor_default_preflight_auth_probe_is_bounded(tmp_path, monkeypatch):
-    # codex/copilot default_preflight must bound the auth probe so a wedged CLI can't hang doctor.
-    from aeview.harness import base
+def test_doctor_codex_auth_probe_is_bounded(tmp_path, monkeypatch):
+    # codex's preflight must bound its auth probe so a wedged CLI can't hang doctor.
+    from aeview.harness import codex
 
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
     calls: list = []
@@ -186,11 +189,10 @@ def test_doctor_default_preflight_auth_probe_is_bounded(tmp_path, monkeypatch):
         calls.append((args, timeout))
         return ProcResult(0, "", "")
 
-    monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
-    monkeypatch.setattr(base, "run_sync", record)
+    monkeypatch.setattr(codex, "run_sync", record)
     monkeypatch.setattr(doctor, "which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     doctor.run_doctor(tmp_path, _settings(dedup_harness="codex"))
     assert calls and all(t is not None and t > 0 for _, t in calls)  # every probe bounded
-    # the probe is the binary (PATH-resolved at spawn) + its auth subcommand, not a bare subcommand
-    assert any(args == ["codex", "login", "status"] for args, _ in calls)
+    # the probe is the resolved binary + its auth subcommand, not a bare subcommand
+    assert all(args[-2:] == ["login", "status"] for args, _ in calls)
