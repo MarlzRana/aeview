@@ -27,7 +27,7 @@ import json
 import os
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, NamedTuple, cast, get_args
@@ -210,11 +210,11 @@ class CopilotAdapter:
         """Run one read-only review (with one re-prompt on invalid output) to completion inside the
         caller's (isolated) event loop. `asyncio.timeout(None)` is a no-op, so this bounds the run
         only when a timeout is set; a timeout is fail-fast (non-transient), matching every other
-        adapter. Teardown is explicit + best-effort (NOT `async with`): the result is built and
-        returned only after `_teardown_client`, which is bounded and never raises — so a valid
-        parsed answer survives a teardown that stalls or errors (an `async with` exit would let it
-        mask the result). On the daemon thread a wedged teardown can't block aeview; the subprocess
-        finishes on its own (clean subtree-kill is deferred I6b-2)."""
+        adapter. ALL teardown is `_teardown_client` in the outer finally — OUTSIDE the review
+        timeout and bounded — so a slow/hung teardown can neither consume the review timeout nor
+        mask a valid parsed result (we don't disconnect the session explicitly: client.stop()
+        destroys it, and force_stop() is the hard-kill fallback). On the daemon thread a wedged
+        teardown can't block aeview; the subprocess finishes (subtree-kill is deferred I6b-2)."""
         sw_timeout = timeout if timeout is not None else _UNBOUNDED_TIMEOUT
         collector = _UsageCollector()
         client: CopilotClient | None = None
@@ -231,17 +231,24 @@ class CopilotAdapter:
                         on_permission_request=_deny_by_default_permission,
                         working_directory=cwd,
                     )
+                    unsubscribe = session.on(collector.handle)
                     try:
-                        unsubscribe = session.on(collector.handle)
-                        try:
-                            payload, raw = await _run_turns(
-                                session, base_prompt, schema, sw_timeout, validate
-                            )
-                        finally:
-                            unsubscribe()
+                        payload, raw = await _run_turns(
+                            session, base_prompt, schema, sw_timeout, validate
+                        )
                     finally:
-                        with contextlib.suppress(Exception):
-                            await session.disconnect()
+                        unsubscribe()
+                    # Built + returned here so payload/raw are in scope; the outer finally's bounded
+                    # teardown runs on the way out and can't mask this result (it never raises).
+                    return _TurnResult(
+                        payload=payload,
+                        raw=raw,
+                        usage=Usage(
+                            input_tokens=collector.input_tokens,
+                            output_tokens=collector.output_tokens,
+                            cost_usd=0.0,  # see _UsageCollector: the SDK's `cost` is ignored
+                        ),
+                    )
             except AdapterError:
                 # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
                 raise
@@ -256,14 +263,6 @@ class CopilotAdapter:
                 raise AdapterError(
                     f"copilot run failed: {detail}", transient=looks_transient(detail)
                 ) from exc
-            # Reached only when the inner try completed (every except re-raises), so payload/raw are
-            # bound. Built after teardown (the finally below) so teardown can't mask the result.
-            usage = Usage(
-                input_tokens=collector.input_tokens,
-                output_tokens=collector.output_tokens,
-                cost_usd=0.0,
-            )
-            return _TurnResult(payload=payload, raw=raw, usage=usage)
         finally:
             if client is not None:
                 await _teardown_client(client)
@@ -287,22 +286,24 @@ class CopilotAdapter:
         return RuntimeConnection.for_stdio(path=which(self._copilot_bin) or self._copilot_bin)
 
     def _resolve_copilot_bin(self) -> str | None:
-        # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail. An
-        # aeview override resolves via which (abs path or bare name, executability-checked). With NO
-        # override the SDK's order is COPILOT_CLI_PATH env (used verbatim, no PATH search) → bundled
-        # binary; there is no `which("copilot")` fallback, so neither do we.
+        # Predict the SDK's resolution so doctor can't report OK while the run would fail. The SDK's
+        # ORDER is: aeview override (our connection.path) → COPILOT_CLI_PATH env → bundled binary;
+        # it then resolves whichever wins with `os.path.exists(p) or shutil.which(p)` at spawn (so a
+        # bare command on PATH works), and FAILS if neither hits. We mirror that per-candidate rule
+        # via `_resolve_via_sdk_rule`. There is no `which("copilot")` fallback for an unconfigured
+        # bare binary, so an empty (no override / no env / no bundle) case stays unresolved → fail.
         if self._copilot_bin:
-            return which(self._copilot_bin)
+            return _resolve_via_sdk_rule(self._copilot_bin)
         env_path = os.environ.get("COPILOT_CLI_PATH")
         if env_path:
-            return env_path if Path(env_path).exists() else None
+            return _resolve_via_sdk_rule(env_path)
         try:
             from copilot.client import _get_bundled_cli_path
 
             bundled = _get_bundled_cli_path()
         except Exception:  # noqa: BLE001 - bundle missing/renamed → unresolved (doctor fails)
             return None
-        return bundled if bundled and Path(bundled).exists() else None
+        return _resolve_via_sdk_rule(bundled) if bundled else None
 
     def _resolve_effort(self, thinking: str | None) -> ReasoningEffort | None:
         # thinking maps to copilot's reasoning effort; "default"/None leaves it unset. Validate
@@ -329,7 +330,12 @@ class CopilotAdapter:
 class _UsageCollector:
     """Accumulates copilot token usage across a turn's assistant.usage events (there can be several
     per turn — one per model call, and the re-prompt adds more — so accumulate; send_and_wait does
-    not expose usage in its return, so we subscribe via session.on). copilot reports no USD cost."""
+    not expose usage in its return, so we subscribe via session.on).
+
+    AssistantUsageData also carries an EXPERIMENTAL `cost` field; we intentionally ignore it and
+    report cost_usd=0.0 (matching codex). USD cost accounting is claude-only (its SDK reports a
+    stable total_cost_usd); copilot's `cost` is experimental/unreliable, so folding it in would make
+    the per-harness cost inconsistent. Revisit if/when the SDK marks `cost` stable."""
 
     def __init__(self) -> None:
         self.input_tokens = 0
@@ -353,6 +359,15 @@ def _deny_by_default_permission(
     if request.kind == "read":
         return PermissionDecisionApproveOnce()
     return PermissionDecisionReject()
+
+
+def _resolve_via_sdk_rule(path: str) -> str | None:
+    # Mirror the SDK's spawn-time resolution (client.py): use the path verbatim if it exists, else
+    # shutil.which(path) (PATH search by name) — so an abs path AND a bare command on PATH both
+    # resolve, and only a value that is neither an existing path nor on PATH stays unresolved.
+    if os.path.exists(path):
+        return path
+    return which(path)
 
 
 async def _teardown_client(client: CopilotClient) -> None:
@@ -459,15 +474,17 @@ def _find_nested_match(value: object, required: set[str], properties: set[str]) 
     while queue:
         current = queue.popleft()
         if isinstance(current, dict):
-            children: list[object] = list(current.values())
+            children: Iterable[object] = current.values()
         elif isinstance(current, list):
             children = current
         else:
             continue
+        # One pass: match each child, else enqueue it for deeper search (no copy / second scan).
         for child in children:
             if isinstance(child, dict) and _matches(child, required, properties):
                 return child
-        queue.extend(c for c in children if isinstance(c, (dict, list)))
+            if isinstance(child, (dict, list)):
+                queue.append(child)
     return None
 
 

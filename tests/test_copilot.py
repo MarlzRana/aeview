@@ -7,6 +7,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from copilot import SessionEvent, SessionEventType
@@ -15,6 +16,9 @@ from copilot.session_events import AssistantMessageData, AssistantUsageData
 
 from aeview.harness import copilot, get_adapter
 from aeview.harness.base import AdapterError
+
+if TYPE_CHECKING:
+    from copilot import PermissionRequest
 
 _VALID = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
 
@@ -59,6 +63,10 @@ class _Controller:
         # Make client.stop() raise so _teardown_client must fall back to force_stop().
         self._state["stop_error"] = exc
 
+    def set_stop_delay(self, seconds: float) -> None:
+        # Make client.stop() hang so _teardown_client's wait_for must bound it → force_stop().
+        self._state["stop_delay"] = seconds
+
 
 @pytest.fixture
 def copilot_sdk(monkeypatch):
@@ -68,13 +76,12 @@ def copilot_sdk(monkeypatch):
     controller exposes the client + session kwargs, the send_and_wait calls, and teardown counts
     (start/stop/force_stop on the client, disconnect on the session — explicit lifecycle, no
     context managers)."""
-    state: dict = {"turns": [], "client_init_exc": None, "stop_error": None}
+    state: dict = {"turns": [], "client_init_exc": None, "stop_error": None, "stop_delay": 0.0}
     captured: dict = {
         "clients": 0,
         "started": 0,
         "stopped": 0,
         "force_stopped": 0,
-        "disconnected": 0,
         "client_kwargs": None,
         "create_kwargs": None,
         "send_calls": [],
@@ -91,12 +98,14 @@ def copilot_sdk(monkeypatch):
             self._handlers: list = []
             captured["create_kwargs"] = create_kwargs
 
-        async def disconnect(self):
-            captured["disconnected"] += 1
-
         def on(self, handler):
             self._handlers.append(handler)
-            return lambda: self._handlers.remove(handler) if handler in self._handlers else None
+
+            def unsubscribe() -> None:
+                if handler in self._handlers:
+                    self._handlers.remove(handler)
+
+            return unsubscribe
 
         async def send_and_wait(self, prompt, *, timeout=60.0, **kwargs):
             captured["send_calls"].append({"prompt": prompt, "timeout": timeout})
@@ -124,6 +133,8 @@ def copilot_sdk(monkeypatch):
 
         async def stop(self):
             captured["stopped"] += 1
+            if state["stop_delay"]:
+                await asyncio.sleep(state["stop_delay"])
             if state["stop_error"] is not None:
                 raise state["stop_error"]
 
@@ -154,8 +165,10 @@ async def test_copilot_runs_read_only_via_sdk(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["client_kwargs"]["working_directory"] == str(tmp_path)
     assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # no override → bundled
     assert "PROMPT" in copilot_sdk.captured["send_calls"][0]["prompt"]  # prompt + embedded schema
-    assert copilot_sdk.captured["stopped"] == 1  # client torn down on the happy path
-    assert copilot_sdk.captured["disconnected"] == 1  # session disconnected too
+    assert copilot_sdk.captured["started"] == 1  # client started
+    assert (
+        copilot_sdk.captured["stopped"] == 1
+    )  # client torn down on the happy path (destroys session)
 
 
 async def test_permission_handler_approves_read_denies_everything_else(copilot_sdk, tmp_path):
@@ -883,6 +896,75 @@ def test_bundled_cli_path_symbol_exists_in_real_sdk():
     import copilot.client as cc
 
     assert callable(cc._get_bundled_cli_path)
+
+
+# --- dogfood r2: real permission-kind pin, COPILOT_CLI_PATH which-resolution, teardown hang ---
+
+
+def test_permission_request_kinds_match_the_real_sdk():
+    # _deny_by_default_permission's correctness rests on request.kind == "read" being the real SDK
+    # discriminator (and write/shell/url being NOT "read"). The other tests fake the request with
+    # SimpleNamespace, so pin the discriminator values against the REAL PermissionRequest union here
+    # — an SDK rename of "read" would silently break the read-only boundary otherwise.
+    from copilot.session_events import (
+        PermissionRequestRead,
+        PermissionRequestShell,
+        PermissionRequestUrl,
+        PermissionRequestWrite,
+    )
+
+    assert PermissionRequestRead.kind == "read"  # the one kind we approve
+    denied_kinds = {
+        PermissionRequestWrite.kind,
+        PermissionRequestShell.kind,
+        PermissionRequestUrl.kind,
+    }
+    assert "read" not in denied_kinds  # every denied kind is distinct from the approved one
+    # the handler reacts correctly to those real kind values (it only reads .kind, so a stand-in
+    # with the real kind string is faithful; cast satisfies the typed PermissionRequest param)
+    assert isinstance(_call_permission(PermissionRequestRead.kind), PermissionDecisionApproveOnce)
+    for kind in denied_kinds:
+        assert isinstance(_call_permission(kind), PermissionDecisionReject)
+
+
+def _call_permission(kind: str):
+    request = cast("PermissionRequest", SimpleNamespace(kind=kind))
+    return copilot._deny_by_default_permission(request, {})
+
+
+def test_preflight_copilot_cli_path_bare_command_on_path_resolves(monkeypatch):
+    # COPILOT_CLI_PATH may be a bare command name; the SDK does `os.path.exists(p) or which(p)` at
+    # spawn, so a command on PATH resolves. preflight must mirror that (else doctor would FAIL a run
+    # that would start) — an existence-only check would wrongly reject the bare command.
+    import copilot.client as cc
+
+    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
+    monkeypatch.setenv("COPILOT_CLI_PATH", "copilotcmd")  # a bare name, not an existing path
+    monkeypatch.setattr(
+        copilot, "which", lambda b: "/usr/bin/copilotcmd" if b == "copilotcmd" else None
+    )
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "/usr/bin/copilotcmd" in pf.detail
+
+
+async def test_teardown_hang_is_bounded_then_force_stops(copilot_sdk, tmp_path, monkeypatch):
+    # _TEARDOWN_GRACE exists because stop() can hang on a dead connection; a hung stop() must be
+    # bounded by wait_for and fall back to force_stop(), and must NOT block the run or mask the
+    # result. (The stop()-RAISES path is covered separately; this is the stop()-HANGS path.)
+    monkeypatch.setattr(copilot, "_TEARDOWN_GRACE", 0.05)
+    copilot_sdk.set_stop_delay(10.0)  # stop() hangs well past the grace
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # result returned despite the hung stop()
+    assert copilot_sdk.captured["force_stopped"] == 1  # wait_for fired → hard-kill fallback ran
+
+
+@pytest.mark.parametrize("value", ["none", "max"])
+async def test_narrowed_effort_set_rejects_none_and_max(copilot_sdk, tmp_path, value):
+    # The SDK's effort set is low/medium/high/xhigh; the old CLI also accepted none/max. Pin that
+    # those now fail-fast so a revert to the broader hardcoded set is caught.
+    with pytest.raises(AdapterError, match="thinking"):
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", value)
 
 
 # --- registry + capability -------------------------------------------------------------
