@@ -142,7 +142,14 @@ def copilot_sdk(monkeypatch):
                     handler(event)
             if turn["exc"] is not None:
                 raise turn["exc"]
-            return None if turn["answer"] is None else _message_event(turn["answer"])
+            if turn["answer"] is None:
+                return None
+            message = _message_event(turn["answer"])
+            # The assistant message also arrives as a session event (not just the return value),
+            # so handlers — including the live-log tee — see it, matching the real SDK.
+            for handler in list(self._handlers):
+                handler(message)
+            return message
 
     class FakeClient:
         def __init__(self, **kwargs) -> None:
@@ -727,13 +734,17 @@ def test_matches_zero_required_accepts_partial_not_just_full():
 
 
 async def test_writes_success_log(copilot_sdk, tmp_path):
+    # review.log is a JSONL event stream: a meta opener, one line per SDK SessionEvent (usage +
+    # assistant message, tee'd verbatim), then a terminal result line. Every line carries seq + ts.
     log = tmp_path / "review.log"
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
-    text = log.read_text()
-    assert "--- result ---" in text
-    assert '"input_tokens": 100' in text  # token accounting is logged
-    assert '"output_tokens": 20' in text
-    assert "approve" in text  # the answer text (review JSON) is logged
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta"
+    assert lines[0]["event"] == {"harness": "copilot", "model": "gpt-5.4"}
+    assert any(ln["kind"] == "event" for ln in lines)  # SessionEvents are tee'd
+    assert "approve" in log.read_text()  # the assistant message (review JSON) is in the stream
+    assert lines[-1]["kind"] == "result"
+    assert all("seq" in ln and "ts" in ln for ln in lines)
 
 
 async def test_writes_error_log_on_failure(copilot_sdk, tmp_path):
@@ -741,7 +752,21 @@ async def test_writes_error_log_on_failure(copilot_sdk, tmp_path):
     log = tmp_path / "review.log"
     with pytest.raises(AdapterError):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
-    assert "--- error ---" in log.read_text()
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[-1]["kind"] == "error"
+    assert "boom" in lines[-1]["event"]["detail"]
+
+
+async def test_log_records_terminal_error_on_timeout(copilot_sdk, tmp_path):
+    # A timed-out review still leaves a live log: the meta opener (written at start) + a terminal
+    # error line (written on the timeout path), not an empty/absent file.
+    copilot_sdk.queue_turn(json.dumps(_VALID), delay=10.0)
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="timed out"):
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log, None, 0.05)
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta"
+    assert lines[-1]["kind"] == "error"
 
 
 async def test_log_write_failure_suppressed_on_success(copilot_sdk, tmp_path):

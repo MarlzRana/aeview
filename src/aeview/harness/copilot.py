@@ -46,6 +46,7 @@ from .base import (
     StructuredOutput,
     looks_transient,
 )
+from .eventlog import EventLogWriter
 
 if TYPE_CHECKING:
     from copilot import CopilotSession, PermissionRequest, PermissionRequestResult, SessionEvent
@@ -109,24 +110,17 @@ class CopilotAdapter:
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
         effort = self._resolve_effort(thinking)
         base_prompt = _embed_schema(prompt, schema)
-        try:
-            result = await self._run_isolated(
-                self._build_connection(),
-                base_prompt,
-                schema,
-                model,
-                str(cwd),
-                effort,
-                timeout,
-                validate,
-            )
-        except AdapterError as exc:
-            # Best-effort log; a log-write failure must not mask the AdapterError or break the
-            # adapter's AdapterError-only failure contract.
-            with contextlib.suppress(OSError):
-                log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
-            raise
-        self._write_log(log_path, result)
+        result = await self._run_isolated(
+            self._build_connection(),
+            base_prompt,
+            schema,
+            model,
+            str(cwd),
+            effort,
+            timeout,
+            validate,
+            log_path,
+        )
         return StructuredOutput(payload=result.payload, usage=result.usage, raw=result.raw)
 
     async def _run_isolated(
@@ -139,6 +133,7 @@ class CopilotAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
         validate: Callable[[dict], object] | None,
+        log_path: Path,
     ) -> _TurnResult:
         # The SDK runs its JSON-RPC writes on the loop's default executor and teardown (stop()'s
         # session.destroy) awaits an RPC too; under aeview's unbounded fan-out a saturated shared
@@ -156,7 +151,7 @@ class CopilotAdapter:
             if not outcome.set_running_or_notify_cancel():
                 return
             coro = self._consume(
-                connection, base_prompt, schema, model, cwd, effort, timeout, validate
+                connection, base_prompt, schema, model, cwd, effort, timeout, validate, log_path
             )
             try:
                 outcome.set_result(asyncio.run(coro))
@@ -206,6 +201,7 @@ class CopilotAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
         validate: Callable[[dict], object] | None,
+        log_path: Path,
     ) -> _TurnResult:
         """Run one read-only review (with one re-prompt on invalid output) to completion inside the
         caller's (isolated) event loop. `asyncio.timeout(None)` is a no-op, so this bounds the run
@@ -216,6 +212,7 @@ class CopilotAdapter:
         destroys it, and force_stop() is the hard-kill fallback). On the daemon thread a wedged
         teardown can't block aeview; the subprocess finishes (subtree-kill is deferred I6b-2)."""
         collector = _UsageCollector()
+        writer = EventLogWriter(log_path, harness=self.name, model=model)
         client: CopilotClient | None = None
         try:
             async with asyncio.timeout(timeout):
@@ -235,11 +232,20 @@ class CopilotAdapter:
                     on_permission_request=_deny_by_default_permission,
                     working_directory=cwd,
                 )
-                unsubscribe = session.on(collector.handle)
+
+                # One subscription tees every SessionEvent to the live log AND feeds the usage
+                # collector — session.on already delivers the full event stream (we previously kept
+                # only usage from it).
+                def _on_event(event: SessionEvent) -> None:
+                    writer.append(event)
+                    collector.handle(event)
+
+                unsubscribe = session.on(_on_event)
                 try:
                     payload, raw = await _run_turns(session, base_prompt, schema, validate)
                 finally:
                     unsubscribe()
+                writer.result()
                 # Built + returned here so payload/raw are in scope; the finally's bounded teardown
                 # runs on the way out and can't mask this result (it never raises).
                 return _TurnResult(
@@ -251,10 +257,12 @@ class CopilotAdapter:
                         cost_usd=0.0,  # see _UsageCollector: the SDK's `cost` is ignored
                     ),
                 )
-        except AdapterError:
+        except AdapterError as exc:
             # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
+            writer.error(str(exc))
             raise
         except TimeoutError as exc:
+            writer.error(f"copilot timed out after {timeout}s")
             raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
             # The SDK has no public base error or retryable helper, so classify transient by text
@@ -262,10 +270,12 @@ class CopilotAdapter:
             # only AdapterError, so an escape strands the run non-terminal. (CancelledError is a
             # BaseException, not Exception — cancellation isn't caught.)
             detail = str(exc)
+            writer.error(f"copilot run failed: {detail}")
             raise AdapterError(
                 f"copilot run failed: {detail}", transient=looks_transient(detail)
             ) from exc
         finally:
+            writer.close()
             if client is not None:
                 await _teardown_client(client)
 
@@ -318,16 +328,6 @@ class CopilotAdapter:
                 f"copilot thinking '{thinking}' invalid; use one of {sorted(_EFFORT_LEVELS)}"
             )
         return cast(ReasoningEffort, thinking)
-
-    def _write_log(self, log_path: Path, result: _TurnResult) -> None:
-        summary = {
-            "input_tokens": result.usage.input_tokens,
-            "output_tokens": result.usage.output_tokens,
-        }
-        lines = [result.raw or "", "--- result ---", json.dumps(summary)]
-        # Best-effort: a failed log write must not break the AdapterError-only failure contract.
-        with contextlib.suppress(OSError):
-            log_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 class _UsageCollector:

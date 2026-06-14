@@ -51,6 +51,7 @@ from .base import (
     classify_transient,
     looks_transient,
 )
+from .eventlog import EventLogWriter
 
 # The proven OS-sandbox block, passed via the SDK `settings=` field (inline JSON == --settings).
 # denyWrite:["/"] blocks all writes; failIfUnavailable fails closed; the mutating built-in tools
@@ -121,16 +122,21 @@ class ClaudeCodeAdapter:
             extra_args=extra_args,
             cli_path=self._cli_path,
         )
+        # Live JSONL event log: tee every SDK message as it arrives, then a terminal result/error
+        # line. Write-only diagnostic (the report reads review.json, never this), so a log failure
+        # is best-effort inside the writer and can't mask the AdapterError-only failure contract.
+        writer = EventLogWriter(log_path, harness=self.name, model=model)
         try:
-            result, transcript = await self._consume(prompt, options, timeout)
+            result, transcript = await self._consume(prompt, options, timeout, writer)
+            out = self._interpret(result, transcript)
         except AdapterError as exc:
-            # Best-effort log; a log-write failure must not mask the AdapterError or break the
-            # adapter's AdapterError-only failure contract.
-            with contextlib.suppress(OSError):
-                log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
+            writer.error(str(exc))
             raise
-        self._write_log(log_path, transcript, result)
-        return self._interpret(result, transcript)
+        else:
+            writer.result()
+            return out
+        finally:
+            writer.close()
 
     async def run(
         self,
@@ -151,7 +157,11 @@ class ClaudeCodeAdapter:
         return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
 
     async def _consume(
-        self, prompt: str, options: ClaudeAgentOptions, timeout: float | None
+        self,
+        prompt: str,
+        options: ClaudeAgentOptions,
+        timeout: float | None,
+        writer: EventLogWriter,
     ) -> tuple[ResultMessage | None, list[str]]:
         """Drive the query generator to completion, capturing the assistant transcript and the
         terminal ResultMessage. `asyncio.timeout(None)` is a no-op, so this bounds the run only
@@ -164,6 +174,7 @@ class ClaudeCodeAdapter:
         try:
             async with asyncio.timeout(timeout):
                 async for message in agen:
+                    writer.append(message)  # tee every SDK message to the live JSONL log
                     if isinstance(message, AssistantMessage):
                         transcript.extend(
                             b.text for b in message.content if isinstance(b, TextBlock)
@@ -237,24 +248,6 @@ class ClaudeCodeAdapter:
         if bundled.exists():
             return str(bundled)
         return which(self.binary)
-
-    def _write_log(
-        self, log_path: Path, transcript: list[str], result: ResultMessage | None
-    ) -> None:
-        lines = list(transcript)
-        if result is not None:
-            summary = {
-                "is_error": result.is_error,
-                "subtype": result.subtype,
-                "api_error_status": result.api_error_status,
-                "total_cost_usd": result.total_cost_usd,
-                "usage": result.usage,
-                "structured_output": result.structured_output,
-            }
-            lines += ["--- result ---", json.dumps(summary, default=str)]
-        # Best-effort: a failed log write must not break the AdapterError-only failure contract.
-        with contextlib.suppress(OSError):
-            log_path.write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def _usage(result: ResultMessage) -> Usage:

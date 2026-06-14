@@ -199,12 +199,18 @@ async def test_unexpected_sdk_error_is_normalized_to_adapter_error(monkeypatch, 
     assert ei.value.transient is False
 
 
-async def test_run_writes_transcript_and_result_to_log(capture_query, tmp_path):
+async def test_run_writes_event_stream_to_log(capture_query, tmp_path):
+    # review.log is a JSONL event stream: a meta opener, one line per SDK message (tee'd verbatim,
+    # so the assistant text is present), then a terminal result line. Every line carries seq + ts.
     log = tmp_path / "review.log"
     await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log)
-    text = log.read_text()
-    assert "reviewed" in text  # the assistant transcript
-    assert "--- result ---" in text  # the result summary footer
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta"
+    assert lines[0]["event"] == {"harness": "claude-code", "model": "opus"}
+    assert "reviewed" in log.read_text()  # the assistant TextBlock text is in the stream
+    assert any(ln["kind"] == "event" for ln in lines)
+    assert lines[-1]["kind"] == "result"
+    assert all("seq" in ln and "ts" in ln for ln in lines)
 
 
 async def test_error_path_writes_an_error_log(monkeypatch, tmp_path):
@@ -212,7 +218,25 @@ async def test_error_path_writes_an_error_log(monkeypatch, tmp_path):
     log = tmp_path / "review.log"
     with pytest.raises(AdapterError):
         await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log)
-    assert "--- error ---" in log.read_text()
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[-1]["kind"] == "error"
+    assert "nope" in lines[-1]["event"]["detail"]
+
+
+async def test_partial_event_log_survives_timeout(monkeypatch, tmp_path):
+    # The motivating case: a review that times out mid-stream still leaves the messages that
+    # arrived (flushed live), plus a terminal error line — not an empty/absent log.
+    async def slow_query(*, prompt, options, transport=None):
+        yield AssistantMessage(content=[TextBlock(text="partial")], model="m")
+        await asyncio.sleep(10)  # then hang until the review timeout fires
+
+    monkeypatch.setattr(claude_code, "query", slow_query)
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="timed out"):
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, log, timeout=0.05)
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert any(ln["kind"] == "event" for ln in lines)  # the message that arrived is on disk
+    assert lines[-1]["kind"] == "error"
 
 
 def test_resolve_cli_override_executable_absolute_path(tmp_path):
