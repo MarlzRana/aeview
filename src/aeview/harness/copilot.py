@@ -255,18 +255,18 @@ class CopilotAdapter:
             writer.error(str(exc))
             raise
         except TimeoutError as exc:
-            writer.error(f"copilot timed out after {timeout}s")
-            raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
+            msg = f"copilot timed out after {timeout}s"
+            writer.error(msg)
+            raise AdapterError(msg, transient=False) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
             # The SDK has no public base error or retryable helper, so classify transient by text
             # (rate-limit/overload still retries), matching the old CLI path. The dedup path catches
             # only AdapterError, so an escape strands the run non-terminal. (CancelledError is a
             # BaseException, not Exception — cancellation isn't caught.)
             detail = str(exc)
-            writer.error(f"copilot run failed: {detail}")
-            raise AdapterError(
-                f"copilot run failed: {detail}", transient=looks_transient(detail)
-            ) from exc
+            msg = f"copilot run failed: {detail}"
+            writer.error(msg)
+            raise AdapterError(msg, transient=looks_transient(detail)) from exc
         finally:
             writer.close()
             if client is not None:

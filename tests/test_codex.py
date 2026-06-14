@@ -418,12 +418,34 @@ async def test_tee_stream_yields_all_and_logs_all(tmp_path):
     seen = [e async for e in codex._tee_stream(src(), writer)]  # type: ignore[arg-type]
     writer.close()
     assert seen == events  # passed through unchanged
-    logged = [
-        json.loads(ln)["event"]["method"]
-        for ln in log.read_text().splitlines()
-        if json.loads(ln)["kind"] == "event"
-    ]
+    recs = [json.loads(ln) for ln in log.read_text().splitlines()]
+    logged = [r["event"]["method"] for r in recs if r["kind"] == "event"]
     assert logged == ["a", "b", "c"]  # and each was logged, in order
+
+
+async def test_tee_stream_closes_underlying_stream(tmp_path):
+    # The tee owns closing the underlying stream (leak prevention): aclosing the tee must aclose it,
+    # even when iteration stops early (the case the manual try/finally used to miss).
+    from contextlib import aclosing
+
+    from aeview.harness.eventlog import EventLogWriter
+
+    closed = {"v": False}
+
+    async def src():
+        try:
+            yield _FakeEvent("a", {})
+            yield _FakeEvent("b", {})
+        finally:
+            closed["v"] = True  # GeneratorExit from aclose() runs this
+
+    log = tmp_path / "review.log"
+    writer = EventLogWriter(log, harness="codex", model="m")
+    async with aclosing(codex._tee_stream(src(), writer)) as tee:  # type: ignore[arg-type]
+        async for _ in tee:
+            break  # stop early — the tee + underlying stream must still be closed on exit
+    writer.close()
+    assert closed["v"] is True  # underlying stream was aclosed via the tee's finally
 
 
 async def test_sdk_runs_off_the_caller_thread(codex_sdk, tmp_path):

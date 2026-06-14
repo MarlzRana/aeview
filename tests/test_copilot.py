@@ -786,6 +786,17 @@ async def test_log_write_failure_suppressed_on_error(copilot_sdk, tmp_path):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, logdir)
 
 
+async def test_invalid_after_retries_logs_terminal_error(copilot_sdk, tmp_path):
+    # The except-AdapterError path (invalid output after BOTH attempts → _run_turns raises) must
+    # also log a terminal error line, not just the generic-exception path.
+    copilot_sdk.queue_turn("no json")  # attempt 1 invalid
+    copilot_sdk.queue_turn("still no json")  # attempt 2 invalid → AdapterError
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError):
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
+    assert json.loads(log.read_text().splitlines()[-1])["kind"] == "error"
+
+
 # --- SDK signature pin -----------------------------------------------------------------
 
 
