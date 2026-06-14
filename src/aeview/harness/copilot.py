@@ -1,29 +1,41 @@
-"""copilot adapter: prompt-embedded schema, blocklist read-only, JSONL output parsing.
+"""copilot adapter: prompt-embedded schema, deny-by-default read-only, via the Copilot SDK.
 
-Copilot has no schema flag (`schema_support="prompt"`): the wanted JSON Schema is appended to
-the prompt with a strict "return ONLY this JSON" instruction, and aeview validates + re-prompts
-once on invalid output — the one place `schema_support` drives the reaction.
+Runs GitHub Copilot through the `github-copilot-sdk` (`CopilotClient().create_session(...)` +
+`session.send_and_wait(...)`) instead of shelling out to the `copilot` CLI. The SDK resolves its
+own bundled `copilot` binary by default (shipped in the platform wheel); a
+`settings.harnessBinaries["copilot"]` entry overrides it via `RuntimeConnection.for_stdio`.
 
-Output is `--output-format json` = JSONL events; the model's answer is the `data.content` of the
-final `assistant.message` event (a `result` event closes the stream). Copilot reports no input
-tokens and no USD cost, so usage carries only output tokens (like codex).
+Copilot has no schema flag (`schema_support="prompt"`): the wanted JSON Schema is appended to the
+prompt with a strict "return ONLY this JSON" instruction, and aeview validates + re-prompts once on
+invalid output — the one place `schema_support` drives the reaction. The model's answer is the final
+`AssistantMessageData.content` (a plain string) returned by `send_and_wait`; usage arrives as
+`AssistantUsageData` events (input + output tokens, no USD cost) captured via `session.on`.
 
-Read-only is a blocklist, not an allowlist, so new read tools auto-enable without a config
-change: `--allow-all-tools` runs every tool without a prompt (headless-safe), while `--deny-tool`
-blocks the write vectors (`write`, `shell`) and network (`url`) — denial takes precedence over
-`--allow-all-tools`. Mutating tools also need approval that can't be granted headlessly, a
-backstop for any novel kind. (Copilot's native local sandbox has no per-invocation toggle yet;
-revisit when it does — see the implementation log's deferred item.)
+Read-only is enforced entirely by the `on_permission_request` callback, deny-by-default: it approves
+ONLY file reads (any path) and denies every other kind (write/shell/url/mcp/...). Copilot has no
+native read-only sandbox and HANGS headless without a handler, so this is the boundary — a new
+mutating tool-kind is blocked automatically, while new read tools auto-enable. (Native sandbox is
+coming to Copilot — migrate to it when it ships.)
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import contextlib
 import json
+import threading
 from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from shutil import which
+from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
-from ..process import run_async
+from copilot import CopilotClient, RuntimeConnection
+from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
+from copilot.session import ReasoningEffort
+from copilot.session_events import AssistantMessageData, AssistantUsageData
+
 from ..schema import ReviewOutput, Usage, review_output_json_schema
 from .base import (
     AdapterError,
@@ -31,47 +43,48 @@ from .base import (
     Preflight,
     SchemaSupport,
     StructuredOutput,
-    classify_transient,
-    default_preflight,
+    looks_transient,
 )
 
-# copilot reasoning-effort levels (--effort); "default"/None -> leave unset.
-_EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh", "max"}
+if TYPE_CHECKING:
+    from copilot import PermissionRequest, PermissionRequestResult, SessionEvent
+
+# copilot reasoning-effort levels, derived from the SDK's ReasoningEffort Literal so the accepted
+# set tracks the SDK; "default"/None leaves it unset. (Narrower than the old CLI set — no none/max.)
+_EFFORT_LEVELS = frozenset(get_args(ReasoningEffort))
 
 # Prompt-only can't guarantee conformance, so re-prompt once on invalid output, then fail.
 _MAX_ATTEMPTS = 2
 
-_READ_ONLY_ARGS = [
-    "--output-format", "json",
-    "--stream", "off",
-    "--allow-all-tools",
-    "--deny-tool=write",
-    "--deny-tool=shell",
-    "--deny-tool=url",
-    "--disable-builtin-mcps",
-    "--no-ask-user",
-]
+# send_and_wait requires a float timeout (defaults to 60s, which would fire prematurely). When no
+# per-review timeout is set, pass an effectively-unbounded value and let the caller's bound (none)
+# govern — in practice reviewTimeoutSeconds is always set, so this only covers the None path.
+_UNBOUNDED_TIMEOUT = 365 * 24 * 60 * 60
 
-# Each attempt is a fresh stateless process, so this can't reference a "previous response" —
-# it just re-states the format requirement more forcefully.
+# The retry turn rides the SAME session, so the model still sees its first (bad) answer + the schema
+# above it — this just re-states the format requirement more forcefully.
 _RETRY_SUFFIX = (
-    "\n\nIMPORTANT: Respond with ONLY the JSON object described above — no prose, no explanation, "
-    "no markdown fence, nothing before or after the object."
+    "Respond with ONLY the JSON object described above — no prose, no explanation, no markdown "
+    "fence, nothing before or after the object."
 )
+
+
+class _TurnResult(NamedTuple):
+    payload: dict
+    raw: str
+    usage: Usage
 
 
 class CopilotAdapter:
     name: str = "copilot"
     schema_support: SchemaSupport = "prompt"
-    auth_status_args: list[str] = []  # no no-cost auth probe; doctor warns  # noqa: RUF012
+    auth_status_args: list[str] = []  # no no-cost auth probe; preflight warns  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
-        # settings.harnessBinaries["copilot"] → argv[0]. None → "copilot" on PATH. (Still shells
-        # out; the SDK migration is N5c.)
-        self.binary = binary_override or "copilot"
-
-    def preflight(self) -> Preflight:
-        return default_preflight(self)
+        # settings.harnessBinaries["copilot"], threaded to the SDK via RuntimeConnection.for_stdio.
+        # None (incl. an empty string) → the SDK's bundled copilot binary.
+        self._copilot_bin = binary_override or None
+        self.binary = binary_override or "copilot"  # protocol attr / doctor display
 
     async def run_structured(
         self,
@@ -84,51 +97,77 @@ class CopilotAdapter:
         timeout: float | None = None,
         validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
-        """`validate` (optional) is a deep schema check (e.g. ReviewOutput.model_validate) used
-        by the review path (`run`): it raises on a structurally-present-but-invalid payload
-        (wrong enum/type) so that case re-prompts too. The generic dedup caller intentionally
-        omits it and one-shots — a deep-invalid dedup payload degrades to the raw-union path."""
+        """`validate` (optional) is a deep schema check (e.g. ReviewOutput.model_validate) used by
+        the review path (`run`): it raises on a structurally-present-but-invalid payload (wrong
+        enum/type) so that case re-prompts too. The generic dedup caller omits it and one-shots — a
+        deep-invalid dedup payload degrades to the raw-union path."""
+        # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
+        effort = self._resolve_effort(thinking)
         base_prompt = _embed_schema(prompt, schema)
-        args = [self.binary, *_READ_ONLY_ARGS]
-        if model:
-            args += ["--model", model]
-        if thinking and thinking != "default":
-            if thinking not in _EFFORT_LEVELS:
-                raise AdapterError(
-                    f"copilot thinking '{thinking}' invalid; use one of {sorted(_EFFORT_LEVELS)}"
-                )
-            args += ["--effort", thinking]
-
-        last_error = "copilot produced no valid output"
-        output_tokens = 0  # accumulate across attempts so a re-prompt isn't under-counted
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            text = base_prompt if attempt == 1 else base_prompt + _RETRY_SUFFIX
-            res = await run_async(
-                args, cwd=cwd, log_path=log_path, input_text=text, timeout=timeout
+        try:
+            result = await self._run_isolated(
+                self._build_connection(),
+                base_prompt,
+                schema,
+                model,
+                str(cwd),
+                effort,
+                timeout,
+                validate,
             )
-            if res.returncode != 0:
-                # A non-zero exit is a hard failure (bad auth, crash, timeout) — re-prompting
-                # won't help, so fail fast (transient-aware so the fan-out can retry overload, but
-                # a per-review timeout stays non-transient so it isn't retried).
-                detail = res.stderr.strip() or res.stdout.strip() or "no output"
-                raise AdapterError(
-                    f"copilot exited {res.returncode}: {detail}",
-                    transient=classify_transient(res.returncode, detail),
-                )
-            output_tokens += _output_tokens(res.stdout)
-            payload = _extract_json(res.stdout, schema)
-            if payload is None:
-                last_error = "copilot did not return a JSON object matching the schema"
-                continue
-            if validate is not None:
-                try:
-                    validate(payload)
-                except Exception as exc:  # noqa: BLE001 - any validation failure should re-prompt
-                    last_error = f"copilot output failed schema validation: {exc}"
-                    continue
-            usage = Usage(input_tokens=0, output_tokens=output_tokens, cost_usd=0.0)
-            return StructuredOutput(payload=payload, usage=usage, raw=res.stdout)
-        raise AdapterError(last_error)
+        except AdapterError as exc:
+            # Best-effort log; a log-write failure must not mask the AdapterError or break the
+            # adapter's AdapterError-only failure contract.
+            with contextlib.suppress(OSError):
+                log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
+            raise
+        self._write_log(log_path, result)
+        return StructuredOutput(payload=result.payload, usage=result.usage, raw=result.raw)
+
+    async def _run_isolated(
+        self,
+        connection: RuntimeConnection | None,
+        base_prompt: str,
+        schema: dict,
+        model: str,
+        cwd: str,
+        effort: ReasoningEffort | None,
+        timeout: float | None,
+        validate: Callable[[dict], object] | None,
+    ) -> _TurnResult:
+        # The SDK runs its JSON-RPC writes on the loop's default executor and teardown (stop()'s
+        # session.destroy) awaits an RPC too; under aeview's unbounded fan-out a saturated shared
+        # pool could starve a timed-out review's teardown → deadlock. So run each review's SDK work
+        # in its OWN event loop on a DEDICATED daemon thread: a private executor keeps teardown from
+        # being starved; one thread per review (unbounded, like the fan-out) avoids a shared
+        # cap/queue wait; and as a daemon it can't wedge interpreter exit on Ctrl-C (an abandoned
+        # read-only turn finishes on its own; a clean subtree-kill is deferred I6b-2 work). Mirrors
+        # the codex adapter's teardown isolation (same blocking-I/O-on-the-shared-executor shape).
+        outcome: concurrent.futures.Future[_TurnResult] = concurrent.futures.Future()
+
+        def _runner() -> None:
+            # Claim the future before running so a wrap_future cancel() from the awaiting loop can't
+            # race set_result into InvalidStateError; if already cancelled, skip the run.
+            if not outcome.set_running_or_notify_cancel():
+                return
+            coro = self._consume(
+                connection, base_prompt, schema, model, cwd, effort, timeout, validate
+            )
+            try:
+                outcome.set_result(asyncio.run(coro))
+            except BaseException as exc:  # noqa: BLE001 - marshal every outcome to the awaiting loop
+                outcome.set_exception(exc)
+
+        try:
+            threading.Thread(target=_runner, name="aeview-copilot-turn", daemon=True).start()
+        except RuntimeError as exc:
+            # OS thread-limit exhaustion under heavy fan-out: normalize to a transient AdapterError
+            # (the adapter's only failure type; a retry may succeed as sibling reviews finish) so a
+            # raw RuntimeError can't break the dedup path's AdapterError-only contract.
+            raise AdapterError(
+                f"copilot worker thread failed to start: {exc}", transient=True
+            ) from exc
+        return await asyncio.wrap_future(outcome)
 
     async def run(
         self,
@@ -140,11 +179,194 @@ class CopilotAdapter:
         timeout: float | None = None,
     ) -> HarnessOutput:
         out = await self.run_structured(
-            prompt, review_output_json_schema(), model, cwd, log_path, thinking, timeout,
+            prompt,
+            review_output_json_schema(),
+            model,
+            cwd,
+            log_path,
+            thinking,
+            timeout,
             validate=ReviewOutput.model_validate,
         )
         review = ReviewOutput.model_validate(out.payload)
         return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+
+    async def _consume(
+        self,
+        connection: RuntimeConnection | None,
+        base_prompt: str,
+        schema: dict,
+        model: str,
+        cwd: str,
+        effort: ReasoningEffort | None,
+        timeout: float | None,
+        validate: Callable[[dict], object] | None,
+    ) -> _TurnResult:
+        """Run one read-only review (with one re-prompt on invalid output) to completion inside the
+        caller's (isolated) event loop. `asyncio.timeout(None)` is a no-op, so this bounds the run
+        only when a timeout is set; a timeout is fail-fast (non-transient), matching every other
+        adapter. The async-with blocks ALWAYS tear down the client (stop(): terminate → 5s → kill),
+        so the copilot subprocess can't leak; the error chosen below already wins."""
+        sw_timeout = timeout if timeout is not None else _UNBOUNDED_TIMEOUT
+        collector = _UsageCollector()
+        try:
+            async with asyncio.timeout(timeout):
+                async with CopilotClient(working_directory=cwd, connection=connection) as client:
+                    async with await client.create_session(
+                        model=model or None,
+                        reasoning_effort=effort,
+                        on_permission_request=_deny_by_default_permission,
+                        working_directory=cwd,
+                    ) as session:
+                        unsubscribe = session.on(collector.handle)
+                        try:
+                            payload, raw = await _run_turns(
+                                session, base_prompt, schema, sw_timeout, validate
+                            )
+                        finally:
+                            unsubscribe()
+                        usage = Usage(
+                            input_tokens=collector.input_tokens,
+                            output_tokens=collector.output_tokens,
+                            cost_usd=0.0,
+                        )
+                        return _TurnResult(payload=payload, raw=raw, usage=usage)
+        except AdapterError:
+            # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.
+            raise
+        except TimeoutError as exc:
+            raise AdapterError(f"copilot timed out after {timeout}s", transient=False) from exc
+        except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
+            # The SDK has no public base error or retryable helper, so classify transient by text
+            # (rate-limit/overload still retries), matching the old CLI path. The dedup path catches
+            # only AdapterError, so an escape strands the run non-terminal. (CancelledError is a
+            # BaseException, not Exception, so cancellation is not swallowed.)
+            detail = str(exc)
+            raise AdapterError(
+                f"copilot run failed: {detail}", transient=looks_transient(detail)
+            ) from exc
+
+    def preflight(self) -> Preflight:
+        # The SDK resolves a bundled `copilot` not necessarily on PATH, so don't gate on PATH.
+        # Resolve exactly as the run path does (override → which; else bundled-only) so doctor can't
+        # report OK while the run would fail. Copilot has no no-cost auth probe → we can only warn.
+        binary = self._resolve_copilot_bin()
+        if binary is None:
+            return Preflight("fail", "copilot binary not resolvable (bad override or no bundle)")
+        return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
+
+    def _build_connection(self) -> RuntimeConnection | None:
+        # No override → SDK resolves its bundled copilot binary. With an override, resolve a bare
+        # command name or path via which (so "copilot" on PATH works); pass it through even when
+        # which can't resolve it so the SDK fails loud (spawn error) rather than silently falling
+        # back to the bundled binary.
+        if self._copilot_bin is None:
+            return None
+        return RuntimeConnection.for_stdio(path=which(self._copilot_bin) or self._copilot_bin)
+
+    def _resolve_copilot_bin(self) -> str | None:
+        # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail: an
+        # override resolves via which (abs path or bare name, executability-checked); with NO
+        # override the SDK uses ONLY its bundled binary (no PATH fallback), so neither do we.
+        if self._copilot_bin:
+            return which(self._copilot_bin)
+        try:
+            from copilot.client import _get_bundled_cli_path
+
+            bundled = _get_bundled_cli_path()
+        except Exception:  # noqa: BLE001 - bundle missing/renamed → unresolved (doctor fails)
+            return None
+        return bundled if bundled and Path(bundled).exists() else None
+
+    def _resolve_effort(self, thinking: str | None) -> ReasoningEffort | None:
+        # thinking maps to copilot's reasoning effort; "default"/None leaves it unset. Validate
+        # against the SDK's level set so the accepted values track the SDK.
+        if not thinking or thinking == "default":
+            return None
+        if thinking not in _EFFORT_LEVELS:
+            raise AdapterError(
+                f"copilot thinking '{thinking}' invalid; use one of {sorted(_EFFORT_LEVELS)}"
+            )
+        return cast(ReasoningEffort, thinking)
+
+    def _write_log(self, log_path: Path, result: _TurnResult) -> None:
+        summary = {
+            "input_tokens": result.usage.input_tokens,
+            "output_tokens": result.usage.output_tokens,
+        }
+        lines = [result.raw or "", "--- result ---", json.dumps(summary)]
+        # Best-effort: a failed log write must not break the AdapterError-only failure contract.
+        with contextlib.suppress(OSError):
+            log_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+class _UsageCollector:
+    """Accumulates copilot token usage across a turn's assistant.usage events (there can be several
+    per turn — one per model call, and the re-prompt adds more — so accumulate; send_and_wait does
+    not expose usage in its return, so we subscribe via session.on). copilot reports no USD cost."""
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def handle(self, event: SessionEvent) -> None:
+        data = event.data
+        if isinstance(data, AssistantUsageData):
+            self.input_tokens += data.input_tokens or 0
+            self.output_tokens += data.output_tokens or 0
+
+
+def _deny_by_default_permission(
+    request: PermissionRequest, invocation: dict[str, str]
+) -> PermissionRequestResult:
+    # Read-anywhere / write-nowhere, deny-by-default: approve ONLY file reads (any path — fencing is
+    # deferred to the operator/MDM, per the project's read-scope decision); deny every other kind
+    # (write/shell/url/mcp/memory/hook/...). copilot has no native read-only sandbox and HANGS
+    # headless without a handler, so this is THE enforcement boundary; deny-by-default means a new
+    # mutating tool-kind is blocked automatically. (Native sandbox is coming — migrate to it then.)
+    if request.kind == "read":
+        return PermissionDecisionApproveOnce()
+    return PermissionDecisionReject()
+
+
+async def _run_turns(
+    session: object,
+    base_prompt: str,
+    schema: dict,
+    sw_timeout: float,
+    validate: Callable[[dict], object] | None,
+) -> tuple[dict, str]:
+    """Send the prompt and parse the schema-conforming object out of copilot's answer; on invalid
+    output re-prompt once on the SAME session (the model still sees its first answer + the schema),
+    then fail. Returns (payload, raw-answer-text)."""
+    last_error = "copilot produced no valid output"
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        text = base_prompt if attempt == 1 else _RETRY_SUFFIX
+        event = await session.send_and_wait(text, timeout=sw_timeout)  # type: ignore[attr-defined]
+        answer = _final_text(event)
+        payload = _extract_json(answer, schema) if answer else None
+        if payload is None:
+            last_error = "copilot did not return a JSON object matching the schema"
+            continue
+        if validate is not None:
+            try:
+                validate(payload)
+            except Exception as exc:  # noqa: BLE001 - any validation failure should re-prompt
+                last_error = f"copilot output failed schema validation: {exc}"
+                continue
+        return payload, answer
+    raise AdapterError(last_error)
+
+
+def _final_text(event: SessionEvent | None) -> str:
+    # send_and_wait returns the last assistant.message event (or None on no answer); the model's
+    # text is its AssistantMessageData.content (a plain string).
+    if event is None:
+        return ""
+    data = event.data
+    if isinstance(data, AssistantMessageData) and isinstance(data.content, str):
+        return data.content
+    return ""
 
 
 def _embed_schema(prompt: str, schema: dict) -> str:
@@ -157,47 +379,41 @@ def _embed_schema(prompt: str, schema: dict) -> str:
     )
 
 
-# Bound each decode to a window slice and cap the number of candidate `{` starts so a
-# pathological brace-heavy / unterminated-string response can't make the inline (synchronous)
-# scan block the shared event loop. The window is far larger than any real review/dedup object,
-# so a complete answer is never truncated, while one decode can't scan an arbitrarily large
-# output. We bound the per-attempt window (a slice) rather than trusting exc.pos — an
-# unterminated string reports the string's start, not how far raw_decode scanned.
+# Bound each decode to a window slice and cap the number of candidate `{` starts so a pathological
+# brace-heavy / unterminated-string response can't make the inline (synchronous) scan block the
+# event loop. The window is far larger than any real review/dedup object, so a complete answer is
+# never truncated, while one decode can't scan an arbitrarily large output. We bound the per-attempt
+# window (a slice) rather than trusting exc.pos — an unterminated string reports the string's start,
+# not how far raw_decode scanned.
 _MAX_SCAN_CHARS = 1_000_000
 _MAX_JSON_STARTS = 256
 
 _DECODER = json.JSONDecoder()
 
 
-def _extract_json(stdout: str, schema: dict) -> dict | None:
-    """Pull the schema-conforming object out of copilot's JSONL stream.
+def _extract_json(answer: str, schema: dict) -> dict | None:
+    """Pull the schema-conforming object out of copilot's answer text.
 
-    The answer is the final `assistant.message`'s `data.content` (tried first, then the raw
-    stream). Within a source, scan each `{` with json.raw_decode — the real parser, so it
-    handles strings/escapes/nesting correctly and ignores trailing prose/fences — and keep the
-    first object that matches the schema.
+    Scan each `{` with json.raw_decode — the real parser, so it handles strings/escapes/nesting
+    correctly and ignores trailing prose/fences — and keep the first object that matches the schema.
+    A prompt-only model may wrap the answer (e.g. {"output": {...}}); keep the first nested match as
+    a fallback. We retain only one candidate, so a many-object response can't spike memory.
     """
     required = set(schema.get("required", []))
     properties = set(schema.get("properties", {}))
-    content = _final_assistant_content(stdout)
-    sources = [content, stdout] if content else [stdout]  # fall back to scanning the raw stream
-    # A top-level match wins. Failing that, a prompt-only model may have wrapped the answer
-    # (e.g. {"output": {...}}); keep the first nested match as a fallback. We don't retain every
-    # parsed object — only one candidate — so a many-object response can't spike memory.
     nested_fallback: dict | None = None
-    for text in sources:
-        for obj in _json_objects(text):
-            if _matches(obj, required, properties):
-                return obj
-            if nested_fallback is None:
-                nested_fallback = _find_nested_match(obj, required, properties)
+    for obj in _json_objects(answer):
+        if _matches(obj, required, properties):
+            return obj
+        if nested_fallback is None:
+            nested_fallback = _find_nested_match(obj, required, properties)
     return nested_fallback
 
 
 def _find_nested_match(value: object, required: set[str], properties: set[str]) -> dict | None:
     """Breadth-first search of a parsed value's nested dicts/lists for the first schema-matching
-    object. Iterative (not recursive) so a deeply nested parsed object can't hit Python's
-    recursion limit and crash extraction."""
+    object. Iterative (not recursive) so a deeply nested parsed object can't hit Python's recursion
+    limit and crash extraction."""
     queue: deque[object] = deque([value])
     while queue:
         current = queue.popleft()
@@ -217,10 +433,10 @@ def _find_nested_match(value: object, required: set[str], properties: set[str]) 
 def _json_objects(text: str) -> Iterator[dict]:
     """Yield each parseable JSON object in `text`, in document order, via raw_decode.
 
-    Each candidate `{` is decoded from a bounded window slice — so even the first/clean decode
-    can't scan an arbitrarily large output inline — advancing past each parsed object so its
-    interior braces aren't rescanned. The window dwarfs any real answer (no truncation in
-    practice); the start cap bounds the pathological brace-heavy case.
+    Each candidate `{` is decoded from a bounded window slice — so even the first/clean decode can't
+    scan an arbitrarily large output inline — advancing past each parsed object so its interior
+    braces aren't rescanned. The window dwarfs any real answer (no truncation); the start
+    cap bounds the pathological brace-heavy case.
     """
     i = 0
     for _ in range(_MAX_JSON_STARTS):
@@ -237,8 +453,8 @@ def _json_objects(text: str) -> Iterator[dict]:
 
 
 def _decode(window: str) -> tuple[dict, int] | None:
-    # raw_decode at a `{` yields an object (dict) or raises JSONDecodeError. The C scanner does
-    # not raise RecursionError even on very deep nesting (it reports a JSONDecodeError at the
+    # raw_decode at a `{` yields an object (dict) or raises JSONDecodeError. The C scanner does not
+    # raise RecursionError even on very deep nesting (it reports a JSONDecodeError at the
     # unterminated end instead), so JSONDecodeError is the only failure to handle here.
     try:
         obj, end = _DECODER.raw_decode(window, 0)
@@ -251,40 +467,8 @@ def _matches(obj: object, required: set[str], properties: set[str]) -> bool:
     if not isinstance(obj, dict) or not required <= obj.keys():
         return False
     # An all-defaulted schema (no required keys, e.g. DuplicateGroups) would otherwise accept a
-    # stray `{}` before the real answer. Demand at least one of the schema's own properties —
-    # not all of them, so a payload that legitimately omits optional fields still matches.
+    # stray `{}` before the real answer. Demand at least one of the schema's own properties — not
+    # all of them, so a payload that legitimately omits optional fields still matches.
     if not required and properties:
         return bool(obj.keys() & properties)
     return True
-
-
-def _final_assistant_content(stdout: str) -> str | None:
-    content: str | None = None
-    for event in _events(stdout):
-        if event.get("type") == "assistant.message":
-            data = event.get("data")
-            if isinstance(data, dict) and isinstance(data.get("content"), str):
-                content = data["content"]  # keep the last one
-    return content
-
-
-def _output_tokens(stdout: str) -> int:
-    """Sum output tokens across assistant.message events; copilot reports no input/USD cost."""
-    return sum(
-        int(event.get("data", {}).get("outputTokens", 0) or 0)
-        for event in _events(stdout)
-        if event.get("type") == "assistant.message" and isinstance(event.get("data"), dict)
-    )
-
-
-def _events(stdout: str) -> Iterator[dict]:
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            yield event

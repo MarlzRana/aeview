@@ -24,6 +24,7 @@ dependencies = [
     # alpha pydantic etc.). Drop once openai-codex pins a stable manylinux runtime (0.137.0a4 ->
     # stable looks imminent on PyPI). uv.lock holds the resolved exact version.
     "openai-codex-cli-bin>=0.137.0a4",
+    "github-copilot-sdk>=1.0.1",
 ]
 
 [project.scripts]

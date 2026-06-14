@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from aeview import doctor
@@ -27,18 +29,17 @@ def _run_sync_rc(rc: int):
 
 
 def _mock_seams(monkeypatch, *, present=True, authed=True):
-    """Mock every preflight seam: base.which/run_sync (copilot default_preflight),
-    claude_code.run_sync (claude's bundled-binary auth probe), codex.which/run_sync (codex's
-    bundled/override resolution + probe), and doctor.which/run_sync (gh). claude AND codex resolve
-    their bundled binaries regardless of `present`, so a missing-binary case must use copilot."""
-    from aeview.harness import base, claude_code, codex
+    """Mock the SDK-resolving adapters' preflight seams: claude_code.run_sync (claude's bundled-
+    binary auth probe), codex.which/run_sync (codex's override/bundled resolution + probe), and
+    doctor.which/run_sync (gh). claude, codex AND copilot all resolve their bundled binaries
+    regardless of `present` (so a missing-binary case must use a bad override — see
+    test_doctor_bad_override_fails); copilot has no auth probe, so its real bundle → warn."""
+    from aeview.harness import claude_code, codex
 
     def which_fn(binary):
         return f"/usr/bin/{binary}" if present else None
 
     rs = _run_sync_rc(0 if authed else 1)
-    monkeypatch.setattr(base, "which", which_fn)
-    monkeypatch.setattr(base, "run_sync", rs)
     monkeypatch.setattr(claude_code, "run_sync", rs)
     monkeypatch.setattr(codex, "which", which_fn)
     monkeypatch.setattr(codex, "run_sync", rs)
@@ -67,12 +68,21 @@ def test_doctor_codex_ok(tmp_path, monkeypatch):
     assert _check(report, "harness:codex").status == "ok"
 
 
-def test_doctor_missing_binary_fails(tmp_path, monkeypatch):
-    # copilot (PATH-gated default_preflight) fails on a missing binary; claude and codex resolve
-    # their bundled binaries regardless of PATH.
+def test_doctor_bad_override_fails(tmp_path, monkeypatch):
+    # Post-N5c no adapter is PATH-gated (claude/codex/copilot all resolve bundled binaries), so a
+    # missing binary now means a bad OVERRIDE that doesn't resolve: copilot's preflight resolves the
+    # override via which → None → fail.
+    from aeview.harness import copilot
+
     make_reviewer(tmp_path, "cop", harnesses=[{"harness": "copilot", "model": "gpt-5.4"}])
-    _mock_seams(monkeypatch, present=False)
-    report = doctor.run_doctor(tmp_path, _settings(dedup_harness="copilot"))
+    monkeypatch.setattr(copilot, "which", lambda b: None)  # the override doesn't resolve
+    monkeypatch.setattr(doctor, "which", lambda b: f"/b/{b}")
+    monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
+    settings = Settings(
+        deduplication_harness=HarnessInstance(harness="copilot", model="gpt-5.4"),
+        harness_binaries={"copilot": "/nonexistent/copilot"},
+    )
+    report = doctor.run_doctor(tmp_path, settings)
     assert not report.ok
     assert _check(report, "harness:copilot").status == "fail"
 
@@ -129,20 +139,11 @@ def test_doctor_only_checks_referenced_harnesses(tmp_path, monkeypatch):
     assert not any(c.name == "harness:codex" for c in report.checks)
 
 
-def test_doctor_copilot_warns_without_a_billed_auth_call(tmp_path, monkeypatch):
-    # copilot has no no-cost auth-status command (empty auth_status_args). default_preflight must
-    # warn it's present-but-unverifiable WITHOUT invoking run_sync (which would be a billed call).
+def test_doctor_copilot_warns_present_but_unverifiable(tmp_path, monkeypatch):
+    # copilot has no no-cost auth-status command, so its SDK-aware preflight resolves the bundled
+    # binary and warns (present, auth unverifiable) — there is no run_sync in copilot's path at all,
+    # so the "no billed call" property is structural, not asserted on a spy.
     make_reviewer(tmp_path, "cop", harnesses=[{"harness": "copilot", "model": "gpt-5.4"}])
-    from aeview.harness import base
-
-    monkeypatch.setattr(base, "which", lambda binary: f"/usr/bin/{binary}")
-    base_run_sync_calls = []
-
-    def record(args, cwd=None, timeout=None):
-        base_run_sync_calls.append(args)
-        return ProcResult(0, "", "")
-
-    monkeypatch.setattr(base, "run_sync", record)
     monkeypatch.setattr(doctor, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
 
@@ -151,7 +152,6 @@ def test_doctor_copilot_warns_without_a_billed_auth_call(tmp_path, monkeypatch):
     check = _check(report, "harness:copilot")
     assert check.status == "warn"
     assert "auth not verifiable" in check.detail
-    assert base_run_sync_calls == []  # copilot's empty auth args -> never probed
 
 
 def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
@@ -196,3 +196,52 @@ def test_doctor_codex_auth_probe_is_bounded(tmp_path, monkeypatch):
     assert calls and all(t is not None and t > 0 for _, t in calls)  # every probe bounded
     # the probe is the resolved binary + its auth subcommand, not a bare subcommand
     assert all(args[-2:] == ["login", "status"] for args, _ in calls)
+
+
+# --- default_preflight (retained for the planned N6 Gemini CLI; no SDK adapter calls it now) ---
+
+
+class _PathGatedAdapter:
+    """The PATH-gated adapter shape the planned Gemini CLI adapter will use: a named binary that
+    must be on PATH + an optional no-cost auth probe. default_preflight reads only these two."""
+
+    def __init__(self, binary: str = "gemini", auth_status_args: list[str] | None = None) -> None:
+        self.binary = binary
+        self.auth_status_args = auth_status_args or []
+
+
+def _preflight(adapter: _PathGatedAdapter):
+    from aeview.harness import base
+
+    return base.default_preflight(cast("base.Adapter", adapter))
+
+
+def test_default_preflight_present_and_authed_is_ok(monkeypatch):
+    from aeview.harness import base
+
+    monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(base, "run_sync", _run_sync_rc(0))
+    assert _preflight(_PathGatedAdapter(auth_status_args=["auth", "status"])).status == "ok"
+
+
+def test_default_preflight_present_without_probe_is_warn(monkeypatch):
+    from aeview.harness import base
+
+    monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
+    # No auth_status_args → present but unverifiable → warn, with no billed call.
+    assert _preflight(_PathGatedAdapter(auth_status_args=[])).status == "warn"
+
+
+def test_default_preflight_auth_probe_fails_is_warn(monkeypatch):
+    from aeview.harness import base
+
+    monkeypatch.setattr(base, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(base, "run_sync", _run_sync_rc(1))  # probe says not authed
+    assert _preflight(_PathGatedAdapter(auth_status_args=["auth", "status"])).status == "warn"
+
+
+def test_default_preflight_missing_binary_is_fail(monkeypatch):
+    from aeview.harness import base
+
+    monkeypatch.setattr(base, "which", lambda b: None)  # not on PATH
+    assert _preflight(_PathGatedAdapter()).status == "fail"
