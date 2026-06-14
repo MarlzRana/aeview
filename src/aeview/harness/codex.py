@@ -25,7 +25,7 @@ import json
 import threading
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from openai_codex import (
     ApprovalMode,
@@ -35,6 +35,7 @@ from openai_codex import (
     Sandbox,
     is_retryable_error,
 )
+from openai_codex._run import _collect_async_turn_result
 from openai_codex.types import ReasoningEffort, TurnStatus
 from pydantic import ValidationError
 
@@ -49,9 +50,22 @@ from .base import (
     StructuredOutput,
     looks_transient,
 )
+from .eventlog import EventLogWriter
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, AsyncIterator
+
     from openai_codex import TurnResult
+    from openai_codex.models import Notification
+
+
+async def _tee_stream(
+    stream: AsyncIterator[Notification], writer: EventLogWriter
+) -> AsyncIterator[Notification]:
+    """Yield each codex notification while teeing it (verbatim) to the live event log."""
+    async for notif in stream:
+        writer.append(notif)
+        yield notif
 
 
 class CodexAdapter:
@@ -77,23 +91,16 @@ class CodexAdapter:
     ) -> StructuredOutput:
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
         effort = self._resolve_effort(thinking)
-        try:
-            result = await self._run_isolated(
-                self._build_config(),
-                prompt,
-                make_strict_schema(schema),
-                model,
-                str(cwd),
-                effort,
-                timeout,
-            )
-        except AdapterError as exc:
-            # Best-effort log; a log-write failure must not mask the AdapterError or break the
-            # adapter's AdapterError-only failure contract.
-            with contextlib.suppress(OSError):
-                log_path.write_text(f"--- error ---\n{exc}", encoding="utf-8")
-            raise
-        self._write_log(log_path, result)
+        result = await self._run_isolated(
+            self._build_config(),
+            prompt,
+            make_strict_schema(schema),
+            model,
+            str(cwd),
+            effort,
+            timeout,
+            log_path,
+        )
         return self._interpret(result)
 
     async def _run_isolated(
@@ -105,6 +112,7 @@ class CodexAdapter:
         cwd: str,
         effort: ReasoningEffort | None,
         timeout: float | None,
+        log_path: Path,
     ) -> TurnResult:
         # The SDK runs its blocking RPC (incl. close()) on the shared asyncio.to_thread pool;
         # under aeview's unbounded fan-out a saturated pool could starve a timed-out review's
@@ -122,7 +130,7 @@ class CodexAdapter:
             # can't race set_result into InvalidStateError; if already cancelled, skip the run.
             if not outcome.set_running_or_notify_cancel():
                 return
-            coro = self._consume(config, prompt, schema, model, cwd, effort, timeout)
+            coro = self._consume(config, prompt, schema, model, cwd, effort, timeout, log_path)
             try:
                 outcome.set_result(asyncio.run(coro))
             except BaseException as exc:  # noqa: BLE001 - marshal every outcome to the awaiting loop
@@ -166,6 +174,7 @@ class CodexAdapter:
         cwd: str,
         effort: ReasoningEffort | None,
         timeout: float | None,
+        log_path: Path,
     ) -> TurnResult:
         """Run one read-only turn to completion inside the caller's (isolated) event loop.
         `asyncio.timeout(None)` is a no-op, so this bounds the run only when a timeout is set; a
@@ -175,6 +184,7 @@ class CodexAdapter:
         error chosen above already wins, so a teardown error must not mask it.
         """
         codex = AsyncCodex(config)
+        writer = EventLogWriter(log_path, harness=self.name, model=model)
         try:
             async with asyncio.timeout(timeout):
                 thread = await codex.thread_start(
@@ -184,11 +194,28 @@ class CodexAdapter:
                     model=model,
                     cwd=cwd,
                 )
-                return await thread.run(prompt, output_schema=schema, effort=effort)
+                # Stream the turn (== thread.run() internally) so every notification tees to the
+                # live log as it arrives, then reuse the SDK's own (private) collector to build the
+                # TurnResult — byte-identical to thread.run() plus an observer; the turn-start args
+                # match what run() passes (sandbox/approval already set at thread_start).
+                turn = await thread.turn(prompt, output_schema=schema, effort=effort)
+                # stream() returns an AsyncIterator typingwise but is an async generator at runtime
+                # (the SDK's own run() calls .aclose() on it); cast so the teardown is well-typed.
+                stream = cast("AsyncGenerator[Notification]", turn.stream())
+                try:
+                    result = await _collect_async_turn_result(
+                        _tee_stream(stream, writer), turn_id=turn.id
+                    )
+                finally:
+                    await stream.aclose()
+                writer.result()
+                return result
         except TimeoutError as exc:
+            writer.error(f"codex timed out after {timeout}s")
             raise AdapterError(f"codex timed out after {timeout}s", transient=False) from exc
         except FileNotFoundError as exc:
             # A bad codex_bin override (the SDK's resolve raises FileNotFoundError) fails fast.
+            writer.error(f"codex binary not found: {exc}")
             raise AdapterError(f"codex binary not found: {exc}", transient=False) from exc
         except CodexError as exc:
             # SDK transport/RPC errors. Retry on the SDK's own overload signal (ServerBusyError /
@@ -196,6 +223,7 @@ class CodexAdapter:
             # path's text classification so a rate-limit/overload surfacing as a plain CodexError
             # still retries instead of failing fast.
             transient = is_retryable_error(exc) or looks_transient(str(exc))
+            writer.error(f"codex SDK error: {exc}")
             raise AdapterError(f"codex SDK error: {exc}", transient=transient) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
             # A failed turn surfaces as RuntimeError(turn.error.message); any other unexpected error
@@ -204,10 +232,12 @@ class CodexAdapter:
             # non-terminal). Classify transient by text so an overload still retries.
             # (CancelledError is a BaseException, not Exception, so cancellation is not swallowed.)
             detail = str(exc)
+            writer.error(f"codex run failed: {detail}")
             raise AdapterError(
                 f"codex run failed: {detail}", transient=looks_transient(detail)
             ) from exc
         finally:
+            writer.close()
             with contextlib.suppress(Exception):
                 await codex.close()
 
@@ -272,18 +302,6 @@ class CodexAdapter:
         except ValueError as exc:
             valid = [e.value for e in ReasoningEffort]
             raise AdapterError(f"codex thinking '{thinking}' invalid; use one of {valid}") from exc
-
-    def _write_log(self, log_path: Path, result: TurnResult) -> None:
-        usage = self._usage(result)
-        summary = {
-            "status": result.status.value,
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-        }
-        lines = [result.final_response or "", "--- result ---", json.dumps(summary)]
-        # Best-effort: a failed log write must not break the AdapterError-only failure contract.
-        with contextlib.suppress(OSError):
-            log_path.write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def _usage(result: TurnResult) -> Usage:

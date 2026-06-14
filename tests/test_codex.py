@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import threading
 from pathlib import Path
@@ -22,6 +23,15 @@ from aeview.harness.base import AdapterError
 from aeview.process import ProcResult
 
 _VALID = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
+
+
+@dataclasses.dataclass
+class _FakeEvent:
+    """Stand-in for a codex Notification: the log writer serializes it via dataclasses.asdict and
+    the faked collector ignores it — the tee/log path runs without real SDK events."""
+
+    method: str
+    payload: dict
 
 
 def _usage(inp: int, out: int) -> ThreadTokenUsage:
@@ -81,32 +91,41 @@ class _Controller:
     def set_close_error(self, exc: BaseException) -> None:
         self._state["close_error"] = exc
 
+    def set_events(self, events: list) -> None:
+        self._state["events"] = events
+
 
 @pytest.fixture
 def codex_sdk(monkeypatch):
     """Mock the codex SDK boundary (codex.AsyncCodex) with an offline fake. The adapter resolves
     the SDK's bundled binary, so Tier-1 tests intercept the SDK call itself. Default = a valid
-    approve TurnResult with usage 100/20; the controller sets a raw result / exception / run delay
-    and inspects the thread_start + run arguments and the close() count."""
+    approve TurnResult with usage 100/20; the controller sets a raw result / exception / run delay /
+    streamed events, and inspects the thread_start + turn arguments and the close() count. The turn
+    is streamed (turn() + turn.stream()), so the SDK's private collector is faked to drain the tee'd
+    stream and return the fixture's TurnResult (the real collector is exercised live, not here)."""
     state: dict = {
         "result": _result(json.dumps(_VALID), usage=_usage(100, 20)),
         "exc": None,
         "run_delay": 0.0,
         "thread_start_delay": 0.0,
         "close_error": None,
+        "events": [],  # raw notifications the faked turn stream yields (each tee'd to the log)
     }
     captured: dict = {"closed": 0, "instances": 0}
 
+    class FakeTurnHandle:
+        id = "t1"
+
+        async def stream(self):
+            for event in state["events"]:
+                yield event
+
     class FakeThread:
-        async def run(self, input, *, output_schema=None, effort=None):
+        async def turn(self, input, *, output_schema=None, effort=None):
             captured["input"] = input
             captured["output_schema"] = output_schema
             captured["effort"] = effort
-            if state["run_delay"]:
-                await asyncio.sleep(state["run_delay"])
-            if state["exc"] is not None:
-                raise state["exc"]
-            return state["result"]
+            return FakeTurnHandle()
 
     class FakeAsyncCodex:
         def __init__(self, config):
@@ -125,7 +144,20 @@ def codex_sdk(monkeypatch):
             if state["close_error"] is not None:
                 raise state["close_error"]
 
+    async def fake_collect(stream, *, turn_id):
+        # Drain the tee'd stream so the writer logs every event, then honor delay/exc/result. We
+        # don't rebuild a TurnResult from notifications (the SDK owns that); the fixture supplies it
+        # directly, so the delay/exception now surface from collection (inside the review timeout).
+        async for _ in stream:
+            pass
+        if state["run_delay"]:
+            await asyncio.sleep(state["run_delay"])
+        if state["exc"] is not None:
+            raise state["exc"]
+        return state["result"]
+
     monkeypatch.setattr(codex, "AsyncCodex", FakeAsyncCodex)
+    monkeypatch.setattr(codex, "_collect_async_turn_result", fake_collect)
     return _Controller(state, captured)
 
 
@@ -304,14 +336,17 @@ async def test_bare_name_override_resolves_via_which(codex_sdk, tmp_path, monkey
 
 
 async def test_writes_success_log(codex_sdk, tmp_path):
+    # review.log is a JSONL event stream: an opening meta line, one line per streamed SDK event
+    # (tee'd verbatim), then a terminal result line. Every line carries seq + ts.
+    codex_sdk.set_events([_FakeEvent("item.completed", {"text": "hi"})])
     log = tmp_path / "review.log"
     await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
-    text = log.read_text()
-    assert "--- result ---" in text
-    assert '"status": "completed"' in text  # the TurnResult status
-    assert '"input_tokens": 100' in text  # token accounting is logged
-    assert '"output_tokens": 20' in text
-    assert "approve" in text  # the final_response (review JSON) is logged
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta"
+    assert lines[0]["event"] == {"harness": "codex", "model": "gpt-5.5"}
+    assert any(ln["kind"] == "event" and ln["event"]["method"] == "item.completed" for ln in lines)
+    assert lines[-1]["kind"] == "result"
+    assert all("seq" in ln and "ts" in ln for ln in lines)
 
 
 async def test_writes_error_log_on_failure(codex_sdk, tmp_path):
@@ -319,7 +354,22 @@ async def test_writes_error_log_on_failure(codex_sdk, tmp_path):
     log = tmp_path / "review.log"
     with pytest.raises(AdapterError):
         await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
-    assert "--- error ---" in log.read_text()
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert lines[-1]["kind"] == "error"
+    assert "boom" in lines[-1]["event"]["detail"]
+
+
+async def test_partial_event_log_survives_timeout(codex_sdk, tmp_path):
+    # The motivating case: a review that times out still leaves the events that arrived before it,
+    # plus a terminal error line — because events are flushed live, not written once at the end.
+    codex_sdk.set_events([_FakeEvent("item.completed", {"text": "partial"})])
+    codex_sdk.set_delay(10.0)
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError, match="timed out"):
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log, None, 0.05)
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert any(ln["kind"] == "event" and ln["event"]["method"] == "item.completed" for ln in lines)
+    assert lines[-1]["kind"] == "error"  # terminal error is recorded even on a timeout
 
 
 async def test_sdk_runs_off_the_caller_thread(codex_sdk, tmp_path):
@@ -389,18 +439,23 @@ async def test_log_write_failure_suppressed_on_error(codex_sdk, tmp_path):
 
 
 def test_sdk_call_kwargs_match_the_real_sdk():
-    # The SDK boundary is faked elsewhere; pin the kwarg names the adapter passes against the REAL
-    # SDK so an upgrade that renames one fails here rather than at runtime.
+    # The SDK boundary is faked elsewhere; pin the kwarg names/methods the adapter uses against the
+    # REAL SDK so an upgrade that renames one fails here rather than at runtime.
     import inspect
 
     from openai_codex import AsyncCodex, AsyncThread
+    from openai_codex.api import AsyncTurnHandle
 
     start = inspect.signature(AsyncCodex.thread_start).parameters
     for kw in ("sandbox", "approval_mode", "ephemeral", "model", "cwd"):
         assert kw in start, f"AsyncCodex.thread_start no longer accepts {kw}"
-    run = inspect.signature(AsyncThread.run).parameters
+    # We stream the turn (turn() + turn.stream()) and collect its result via the SDK's own private
+    # collector, instead of thread.run() — so an observer can tee every notification to the log.
+    turn = inspect.signature(AsyncThread.turn).parameters
     for kw in ("input", "output_schema", "effort"):
-        assert kw in run, f"AsyncThread.run no longer accepts {kw}"
+        assert kw in turn, f"AsyncThread.turn no longer accepts {kw}"
+    assert hasattr(AsyncTurnHandle, "stream")
+    assert hasattr(codex, "_collect_async_turn_result")
 
 
 def test_preflight_no_override_resolves_bundled_and_probes_bounded(monkeypatch):
