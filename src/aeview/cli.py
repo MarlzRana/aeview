@@ -373,11 +373,9 @@ def _merge_settings(dedup: DedupPlan | None, harness_binaries: dict[str, str]) -
     """Settings carrying the run's *pinned* dedup harness (so a re-merge uses the harness frozen in
     run.json, never whatever settings.json says now) plus the live harnessBinaries overrides — a
     binary path is an install/env concern read live, not part of the pinned review identity."""
-    instance = (
-        None
-        if dedup is None
-        else HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
-    )
+    if dedup is None:
+        return Settings(deduplication_harness=None, harness_binaries=harness_binaries)
+    instance = HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
     return Settings(deduplication_harness=instance, harness_binaries=harness_binaries)
 
 
@@ -479,7 +477,7 @@ def _terminal_exit_code(rid: str) -> int:
     # (interrupted/failed before merge) is an error.
     try:
         return exit_code(RunStore(rid).read_report())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return EXIT_ERROR
 
 
@@ -605,7 +603,7 @@ def resume(
         # otherwise (crashed before merge) fall through to a merge-only resume.
         try:
             report = store.read_report()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             pass
         else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
@@ -613,9 +611,7 @@ def resume(
 
     # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
     try:
-        prompts = {
-            r: store.read_prompt(r) for r in dict.fromkeys(e.reviewer for e in pending)
-        }
+        prompts = {r: store.read_prompt(r) for r in dict.fromkeys(e.reviewer for e in pending)}
     except OSError as exc:
         typer.echo(f"aeview: cannot resume run '{rid}': {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
@@ -655,7 +651,7 @@ def _run_row(manifest: RunManifest) -> dict:
     if state != "running":
         try:
             report = RunStore(manifest.run_id).read_report()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             report = None
         if report is not None:
             verdict = report_verdict_label(report)  # shares the contributed==0 rule with result

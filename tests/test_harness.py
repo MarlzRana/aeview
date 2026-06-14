@@ -84,6 +84,7 @@ async def test_options_pin_read_only_sandbox_and_schema(capture_query, tmp_path)
     # outside the repo (under dontAsk the Read tool is otherwise denied outside cwd). Live-verified.
     assert opts.add_dirs == ["/"]
     assert opts.extra_args.get("no-session-persistence", "MISSING") is None
+    assert "settings" not in opts.extra_args  # sandbox rides on settings=, never a duplicate flag
     # Structured output + model wiring; prompt goes to query(prompt=...), not into options.
     assert opts.output_format["type"] == "json_schema"
     assert "verdict" in opts.output_format["schema"]["properties"]
@@ -326,9 +327,16 @@ def test_classify_transient_timeout_vs_real_transient():
 
 def test_preflight_ok_when_binary_resolves_and_authed(monkeypatch):
     # No override → resolves the SDK's bundled binary; mock the auth probe so no subprocess spawns.
-    monkeypatch.setattr(claude_code, "run_sync", lambda *a, **k: ProcResult(0, "", ""))
+    calls: list = []
+
+    def fake_run_sync(args, cwd=None, timeout=None):
+        calls.append(args)
+        return ProcResult(0, "", "")
+
+    monkeypatch.setattr(claude_code, "run_sync", fake_run_sync)
     pf = claude_code.ClaudeCodeAdapter().preflight()
     assert pf.status == "ok"
+    assert calls and calls[0][1:] == ["auth", "status"]  # probe = resolved binary + auth subcommand
 
 
 def test_preflight_warns_when_auth_unverified(monkeypatch):
