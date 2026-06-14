@@ -30,7 +30,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 from copilot import CopilotClient, RuntimeConnection
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -75,12 +75,6 @@ _RETRY_SUFFIX = (
 )
 
 
-class _TurnResult(NamedTuple):
-    payload: dict
-    raw: str
-    usage: Usage
-
-
 class CopilotAdapter:
     name: str = "copilot"
     schema_support: SchemaSupport = "prompt"
@@ -110,7 +104,7 @@ class CopilotAdapter:
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
         effort = self._resolve_effort(thinking)
         base_prompt = _embed_schema(prompt, schema)
-        result = await self._run_isolated(
+        return await self._run_isolated(
             self._build_connection(),
             base_prompt,
             schema,
@@ -121,7 +115,6 @@ class CopilotAdapter:
             validate,
             log_path,
         )
-        return StructuredOutput(payload=result.payload, usage=result.usage, raw=result.raw)
 
     async def _run_isolated(
         self,
@@ -134,7 +127,7 @@ class CopilotAdapter:
         timeout: float | None,
         validate: Callable[[dict], object] | None,
         log_path: Path,
-    ) -> _TurnResult:
+    ) -> StructuredOutput:
         # The SDK runs its JSON-RPC writes on the loop's default executor and teardown (stop()'s
         # session.destroy) awaits an RPC too; under aeview's unbounded fan-out a saturated shared
         # pool could starve a timed-out review's teardown → deadlock. So run each review's SDK work
@@ -143,7 +136,7 @@ class CopilotAdapter:
         # cap/queue wait; and as a daemon it can't wedge interpreter exit on Ctrl-C (an abandoned
         # read-only turn finishes on its own; a clean subtree-kill is deferred I6b-2 work). Mirrors
         # the codex adapter's teardown isolation (same blocking-I/O-on-the-shared-executor shape).
-        outcome: concurrent.futures.Future[_TurnResult] = concurrent.futures.Future()
+        outcome: concurrent.futures.Future[StructuredOutput] = concurrent.futures.Future()
 
         def _runner() -> None:
             # Claim the future before running so a wrap_future cancel() from the awaiting loop can't
@@ -202,7 +195,7 @@ class CopilotAdapter:
         timeout: float | None,
         validate: Callable[[dict], object] | None,
         log_path: Path,
-    ) -> _TurnResult:
+    ) -> StructuredOutput:
         """Run one read-only review (with one re-prompt on invalid output) to completion inside the
         caller's (isolated) event loop. `asyncio.timeout(None)` is a no-op, so this bounds the run
         only when a timeout is set; a timeout is fail-fast (non-transient), matching every other
@@ -248,14 +241,14 @@ class CopilotAdapter:
                 writer.result()
                 # Built + returned here so payload/raw are in scope; the finally's bounded teardown
                 # runs on the way out and can't mask this result (it never raises).
-                return _TurnResult(
+                return StructuredOutput(
                     payload=payload,
-                    raw=raw,
                     usage=Usage(
                         input_tokens=collector.input_tokens,
                         output_tokens=collector.output_tokens,
                         cost_usd=0.0,  # see _UsageCollector: the SDK's `cost` is ignored
                     ),
+                    raw=raw,
                 )
         except AdapterError as exc:
             # Already classified (e.g. invalid-after-retries) — don't re-wrap/re-classify.

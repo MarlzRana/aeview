@@ -63,12 +63,8 @@ def test_error_terminal(tmp_path):
     w = EventLogWriter(log, harness="x", model="m")
     w.error("kaboom")
     w.close()
-    assert _lines(log)[-1] == {
-        "seq": 1,
-        "ts": _lines(log)[-1]["ts"],
-        "kind": "error",
-        "event": {"detail": "kaboom"},
-    }
+    last = _lines(log)[-1]
+    assert last == {"seq": 1, "ts": last["ts"], "kind": "error", "event": {"detail": "kaboom"}}
 
 
 def test_full_fidelity_no_cap(tmp_path):
@@ -205,3 +201,21 @@ def test_repr_raising_fallback_does_not_propagate(tmp_path):
     assert lines[1]["event"]["type"] == "aeview.unserializable"
     assert lines[1]["event"]["repr"] == "<unrepresentable>"
     assert lines[2]["event"]["method"] == "after"  # the stream continued past the bad event
+
+
+def test_write_oserror_is_suppressed(tmp_path):
+    # A write/flush OSError mid-stream (e.g. disk full) is suppressed — best-effort logging must not
+    # raise into the review. (Open failure is covered separately by test_bad_path_is_silent.)
+    class BrokenFH:
+        def write(self, _s: str) -> int:
+            raise OSError("disk full")
+
+        def flush(self) -> None: ...
+
+        def close(self) -> None: ...
+
+    log = tmp_path / "review.log"
+    w = EventLogWriter(log, harness="x", model="m")
+    w._fh = BrokenFH()  # type: ignore[assignment]  # simulate a mid-stream write failure
+    w.append(_Event("e", _Inner("a", datetime.now(UTC)), []))  # must not raise
+    w.close()

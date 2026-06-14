@@ -59,12 +59,17 @@ if TYPE_CHECKING:
 
 
 async def _tee_stream(
-    stream: AsyncIterator[Notification], writer: EventLogWriter
-) -> AsyncIterator[Notification]:
-    """Yield each codex notification while teeing it (verbatim) to the live event log."""
-    async for notif in stream:
-        writer.append(notif)
-        yield notif
+    stream: AsyncGenerator[Notification], writer: EventLogWriter
+) -> AsyncGenerator[Notification]:
+    """Yield each codex notification while teeing it (verbatim) to the live event log, and close the
+    underlying stream when the tee is closed — so neither generator lingers after an error."""
+    try:
+        async for notif in stream:
+            writer.append(notif)
+            yield notif
+    finally:
+        with contextlib.suppress(Exception):
+            await stream.aclose()
 
 
 async def _collect(stream: AsyncIterator[Notification], *, turn_id: str) -> TurnResult:
@@ -220,16 +225,11 @@ class CodexAdapter:
                 # TurnResult — byte-identical to thread.run() plus an observer; the turn-start args
                 # match what run() passes (sandbox/approval already set at thread_start).
                 turn = await thread.turn(prompt, output_schema=schema, effort=effort)
-                # stream() returns an AsyncIterator typingwise but is an async generator at runtime
-                # (the SDK's own run() calls .aclose() on it); cast so the teardown is well-typed.
-                stream = cast("AsyncGenerator[Notification]", turn.stream())
-                try:
-                    result = await _collect(_tee_stream(stream, writer), turn_id=turn.id)
-                finally:
-                    # Suppress: a raising aclose() must not mask the real error from _collect
-                    # (claude suppresses its generator aclose() for the same reason).
-                    with contextlib.suppress(Exception):
-                        await stream.aclose()
+                # turn.stream() is an async generator at runtime (AsyncIterator typingwise). The tee
+                # owns closing it; aclosing() closes the tee on exit, so neither generator leaks.
+                tee = _tee_stream(cast("AsyncGenerator[Notification]", turn.stream()), writer)
+                async with contextlib.aclosing(tee) as stream:
+                    result = await _collect(stream, turn_id=turn.id)
                 # Interpret + validate INSIDE the writer's scope so a non-completed turn, a non-JSON
                 # final, or a schema-invalid payload logs a terminal error, never a false success.
                 out = self._interpret(result)
@@ -245,20 +245,23 @@ class CodexAdapter:
             writer.error(str(exc))
             raise
         except TimeoutError as exc:
-            writer.error(f"codex timed out after {timeout}s")
-            raise AdapterError(f"codex timed out after {timeout}s", transient=False) from exc
+            msg = f"codex timed out after {timeout}s"
+            writer.error(msg)
+            raise AdapterError(msg, transient=False) from exc
         except FileNotFoundError as exc:
             # A bad codex_bin override (the SDK's resolve raises FileNotFoundError) fails fast.
-            writer.error(f"codex binary not found: {exc}")
-            raise AdapterError(f"codex binary not found: {exc}", transient=False) from exc
+            msg = f"codex binary not found: {exc}"
+            writer.error(msg)
+            raise AdapterError(msg, transient=False) from exc
         except CodexError as exc:
             # SDK transport/RPC errors. Retry on the SDK's own overload signal (ServerBusyError /
             # overload JSON-RPC) OR a transient-looking message — the latter restores the old CLI
             # path's text classification so a rate-limit/overload surfacing as a plain CodexError
             # still retries instead of failing fast.
             transient = is_retryable_error(exc) or looks_transient(str(exc))
-            writer.error(f"codex SDK error: {exc}")
-            raise AdapterError(f"codex SDK error: {exc}", transient=transient) from exc
+            msg = f"codex SDK error: {exc}"
+            writer.error(msg)
+            raise AdapterError(msg, transient=transient) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
             # A failed turn surfaces as RuntimeError(turn.error.message); any other unexpected error
             # also routes here, so the adapter's only failure type is AdapterError (the dedup path
@@ -266,10 +269,9 @@ class CodexAdapter:
             # non-terminal). Classify transient by text so an overload still retries.
             # (CancelledError is a BaseException, not Exception, so cancellation is not swallowed.)
             detail = str(exc)
-            writer.error(f"codex run failed: {detail}")
-            raise AdapterError(
-                f"codex run failed: {detail}", transient=looks_transient(detail)
-            ) from exc
+            msg = f"codex run failed: {detail}"
+            writer.error(msg)
+            raise AdapterError(msg, transient=looks_transient(detail)) from exc
         finally:
             writer.close()
             with contextlib.suppress(Exception):

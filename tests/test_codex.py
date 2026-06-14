@@ -515,6 +515,7 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     from openai_codex._run import _collect_async_turn_result
 
     assert callable(_collect_async_turn_result)
+    assert "turn_id" in inspect.signature(_collect_async_turn_result).parameters
 
 
 def test_preflight_no_override_resolves_bundled_and_probes_bounded(monkeypatch):
