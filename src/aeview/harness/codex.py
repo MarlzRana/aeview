@@ -118,6 +118,10 @@ class CodexAdapter:
         outcome: concurrent.futures.Future[TurnResult] = concurrent.futures.Future()
 
         def _runner() -> None:
+            # Claim the future before running so a wrap_future cancel() from the awaiting loop
+            # can't race set_result into InvalidStateError; if already cancelled, skip the run.
+            if not outcome.set_running_or_notify_cancel():
+                return
             coro = self._consume(config, prompt, schema, model, cwd, effort, timeout)
             try:
                 outcome.set_result(asyncio.run(coro))
@@ -179,10 +183,12 @@ class CodexAdapter:
             # A bad codex_bin override (the SDK's resolve raises FileNotFoundError) fails fast.
             raise AdapterError(f"codex binary not found: {exc}", transient=False) from exc
         except CodexError as exc:
-            # SDK transport/RPC errors; ServerBusyError / overload JSON-RPC is the retryable subset.
-            raise AdapterError(
-                f"codex SDK error: {exc}", transient=is_retryable_error(exc)
-            ) from exc
+            # SDK transport/RPC errors. Retry on the SDK's own overload signal (ServerBusyError /
+            # overload JSON-RPC) OR a transient-looking message — the latter restores the old CLI
+            # path's text classification so a rate-limit/overload surfacing as a plain CodexError
+            # still retries instead of failing fast.
+            transient = is_retryable_error(exc) or looks_transient(str(exc))
+            raise AdapterError(f"codex SDK error: {exc}", transient=transient) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
             # A failed turn surfaces as RuntimeError(turn.error.message); any other unexpected error
             # also routes here, so the adapter's only failure type is AdapterError (the dedup path

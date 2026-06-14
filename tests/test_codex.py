@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,9 @@ class _Controller:
     def set_thread_start_delay(self, seconds: float) -> None:
         self._state["thread_start_delay"] = seconds
 
+    def set_close_error(self, exc: BaseException) -> None:
+        self._state["close_error"] = exc
+
 
 @pytest.fixture
 def codex_sdk(monkeypatch):
@@ -72,6 +77,7 @@ def codex_sdk(monkeypatch):
         "exc": None,
         "run_delay": 0.0,
         "thread_start_delay": 0.0,
+        "close_error": None,
     }
     captured: dict = {"closed": 0, "instances": 0}
 
@@ -93,12 +99,15 @@ def codex_sdk(monkeypatch):
 
         async def thread_start(self, **kwargs):
             captured["thread_kwargs"] = kwargs
+            captured["thread_name"] = threading.current_thread().name
             if state["thread_start_delay"]:
                 await asyncio.sleep(state["thread_start_delay"])
             return FakeThread()
 
         async def close(self):
             captured["closed"] += 1
+            if state["close_error"] is not None:
+                raise state["close_error"]
 
     monkeypatch.setattr(codex, "AsyncCodex", FakeAsyncCodex)
     return _Controller(state, captured)
@@ -266,6 +275,8 @@ async def test_writes_success_log(codex_sdk, tmp_path):
     text = log.read_text()
     assert "--- result ---" in text
     assert '"status": "completed"' in text  # the TurnResult status
+    assert '"input_tokens": 100' in text  # token accounting is logged
+    assert '"output_tokens": 20' in text
     assert "approve" in text  # the final_response (review JSON) is logged
 
 
@@ -275,6 +286,38 @@ async def test_writes_error_log_on_failure(codex_sdk, tmp_path):
     with pytest.raises(AdapterError):
         await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
     assert "--- error ---" in log.read_text()
+
+
+async def test_sdk_runs_off_the_caller_thread(codex_sdk, tmp_path):
+    # The SDK interaction runs on a dedicated daemon thread + its own event loop; that isolation is
+    # what keeps close() from being starved (no teardown deadlock). Pin it so a revert to an inline
+    # await on the caller's loop fails here.
+    await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert codex_sdk.captured["thread_name"] != threading.current_thread().name
+    assert codex_sdk.captured["thread_name"] == "aeview-codex-turn"
+
+
+async def test_raising_close_does_not_break_the_result(codex_sdk, tmp_path):
+    # A close() that raises is suppressed (finally) so it can't mask the real result or break the
+    # AdapterError-only teardown contract.
+    codex_sdk.set_close_error(RuntimeError("close boom"))
+    out = await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # the real result survives a raising close()
+
+
+async def test_cancellation_does_not_error_in_worker_thread(codex_sdk, tmp_path, monkeypatch):
+    # Cancelling a review mid-run must not raise InvalidStateError in the daemon thread: the future
+    # is claimed (set_running_or_notify_cancel) before set_result, so the cancel can't race it.
+    thread_errors: list = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    codex_sdk.set_delay(0.3)  # keep the turn in flight across the cancel
+    task = asyncio.create_task(codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log"))
+    await asyncio.sleep(0.05)  # let the daemon thread start and claim the future
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.5)  # let the daemon thread set the result on the (now-running) future
+    assert thread_errors == []  # no InvalidStateError escaped the worker thread
 
 
 def test_sdk_call_kwargs_match_the_real_sdk():
