@@ -124,22 +124,25 @@ async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
 
 
 async def test_fan_out_resolves_binary_override_per_harness(aeview_home, monkeypatch):
-    # fan_out resolves harness_binaries[entry.harness] once and passes the resolved path to
-    # get_adapter — workers carry the resolved override, not the whole map.
+    # fan_out resolves harness_binaries[entry.harness] PER harness and passes the resolved path to
+    # get_adapter — each worker gets its own harness's override, not the whole map.
     seen: dict = {}
 
     def fake_get_adapter(harness, override=None):
-        seen["harness"], seen["override"] = harness, override
+        seen[harness] = override
         return _CaptureTimeoutAdapter()
 
     monkeypatch.setattr(fanout, "get_adapter", fake_get_adapter)
+    entries = [
+        _ENTRY,  # claude-code
+        RosterEntry(id="r__codex-x", reviewer="r", harness="codex", model="x"),
+    ]
     store = RunStore.create(new_run_id())
     await fanout.fan_out(
         store,
-        [_ENTRY],
-        {"default": "p"},
+        entries,
+        {"default": "p", "r": "p"},
         aeview_home,
-        harness_binaries={_ENTRY.harness: "/custom/bin"},
+        harness_binaries={"claude-code": "/a/claude", "codex": "/b/codex"},
     )
-    assert seen["harness"] == _ENTRY.harness
-    assert seen["override"] == "/custom/bin"
+    assert seen == {"claude-code": "/a/claude", "codex": "/b/codex"}

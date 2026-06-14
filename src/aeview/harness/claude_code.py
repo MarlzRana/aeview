@@ -102,6 +102,9 @@ class ClaudeCodeAdapter:
         extra_args: dict[str, str | None] = {"no-session-persistence": None}
         if thinking and thinking != "default":
             extra_args["effort"] = thinking
+        # No system_prompt: compose_prompt is fully self-contained (reviewer body + read-only guard
+        # + diff), so the review runs without Claude Code's default agent system prompt — more
+        # deterministic for a structured review. (The SDK sends an empty system prompt by default.)
         options = ClaudeAgentOptions(
             model=model,
             cwd=str(cwd),

@@ -14,13 +14,11 @@ from typing import Literal
 
 from .config import Settings
 from .harness import AdapterError, get_adapter
+from .harness.base import AUTH_PROBE_TIMEOUT
 from .process import run_sync
 from .resolve import ResolveError, discover_reviewers, resolve_reviewer
 
 CheckStatus = Literal["ok", "warn", "fail"]
-
-# Auth probes are no-cost status commands; bound them so a wedged CLI can't hang doctor.
-_AUTH_PROBE_TIMEOUT = 10.0
 
 
 @dataclass(slots=True)
@@ -83,6 +81,6 @@ def _check_harness(harness: str, binary_override: str | None) -> Check:
 def _check_gh() -> Check:
     if which("gh") is None:
         return Check("gh", "warn", "gh not found (needed only for --scope pr)")
-    if run_sync(["gh", "auth", "status"], timeout=_AUTH_PROBE_TIMEOUT).returncode == 0:
+    if run_sync(["gh", "auth", "status"], timeout=AUTH_PROBE_TIMEOUT).returncode == 0:
         return Check("gh", "ok", "present and authenticated")
     return Check("gh", "warn", "present but not authenticated")

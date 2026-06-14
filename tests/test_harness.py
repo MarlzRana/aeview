@@ -58,7 +58,7 @@ def capture_query(monkeypatch):
     return captured
 
 
-def _install_raising_query(monkeypatch, exc: Exception) -> None:
+def _install_raising_query(monkeypatch, exc: BaseException) -> None:
     async def fake_query(*, prompt, options, transport=None):
         raise exc
         yield  # unreachable — present only so this is an async generator (the SDK's query type)
@@ -249,6 +249,16 @@ def test_empty_override_normalizes_to_sdk_default():
     # An empty harnessBinaries entry must not become cli_path="" (which the SDK treats as a path);
     # it coerces to None so the SDK uses its own resolution.
     assert claude_code.ClaudeCodeAdapter("")._cli_path is None
+
+
+def test_get_adapter_forwards_binary_override():
+    # get_adapter threads the per-harness override into the constructed adapter: claude via
+    # cli_path, codex/copilot as their binary (argv[0]).
+    from aeview.harness import get_adapter
+
+    assert get_adapter("claude-code", "/x/claude")._cli_path == "/x/claude"
+    assert get_adapter("codex", "/x/codex").binary == "/x/codex"
+    assert get_adapter("copilot", "/x/copilot").binary == "/x/copilot"
 
 
 async def test_unexpected_transient_text_error_is_retried(monkeypatch, tmp_path):
