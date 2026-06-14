@@ -56,6 +56,9 @@ class _Controller:
     def set_delay(self, seconds: float) -> None:
         self._state["run_delay"] = seconds
 
+    def set_thread_start_delay(self, seconds: float) -> None:
+        self._state["thread_start_delay"] = seconds
+
 
 @pytest.fixture
 def codex_sdk(monkeypatch):
@@ -67,6 +70,7 @@ def codex_sdk(monkeypatch):
         "result": _result(json.dumps(_VALID), usage=_usage(100, 20)),
         "exc": None,
         "run_delay": 0.0,
+        "thread_start_delay": 0.0,
     }
     captured: dict = {"closed": 0, "instances": 0}
 
@@ -88,6 +92,8 @@ def codex_sdk(monkeypatch):
 
         async def thread_start(self, **kwargs):
             captured["thread_kwargs"] = kwargs
+            if state["thread_start_delay"]:
+                await asyncio.sleep(state["thread_start_delay"])
             return FakeThread()
 
         async def close(self):
@@ -235,6 +241,54 @@ async def test_bad_binary_override_fails_fast(tmp_path):
         await codex.CodexAdapter("/nonexistent/codex/binary").run(
             "p", "gpt-5.5", tmp_path, tmp_path / "log", None, 30.0
         )
+
+
+async def test_timeout_during_thread_start_is_non_transient(codex_sdk, tmp_path):
+    # The timeout wraps startup too: a slow thread_start (not just run) still times out and closes.
+    codex_sdk.set_thread_start_delay(10.0)
+    with pytest.raises(AdapterError) as ei:
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, tmp_path / "log", None, 0.01)
+    assert ei.value.transient is False
+    assert codex_sdk.captured["closed"] == 1
+
+
+async def test_bare_name_override_resolves_via_which(codex_sdk, tmp_path, monkeypatch):
+    # A bare command-name override is resolved through which before reaching CodexConfig.codex_bin.
+    monkeypatch.setattr(codex, "which", lambda b: "/resolved/codex" if b == "mycodex" else None)
+    await codex.CodexAdapter("mycodex").run("p", "gpt-5.5", tmp_path, tmp_path / "log")
+    assert codex_sdk.captured["config"].codex_bin == "/resolved/codex"
+
+
+async def test_writes_success_log(codex_sdk, tmp_path):
+    log = tmp_path / "review.log"
+    await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
+    text = log.read_text()
+    assert "--- result ---" in text
+    assert '"status": "completed"' in text  # the TurnResult status
+    assert "approve" in text  # the final_response (review JSON) is logged
+
+
+async def test_writes_error_log_on_failure(codex_sdk, tmp_path):
+    codex_sdk.set_exc(RuntimeError("boom"))
+    log = tmp_path / "review.log"
+    with pytest.raises(AdapterError):
+        await codex.CodexAdapter().run("p", "gpt-5.5", tmp_path, log)
+    assert "--- error ---" in log.read_text()
+
+
+def test_sdk_call_kwargs_match_the_real_sdk():
+    # The SDK boundary is faked elsewhere; pin the kwarg names the adapter passes against the REAL
+    # SDK so an upgrade that renames one fails here rather than at runtime.
+    import inspect
+
+    from openai_codex import AsyncCodex, AsyncThread
+
+    start = inspect.signature(AsyncCodex.thread_start).parameters
+    for kw in ("sandbox", "approval_mode", "ephemeral", "model", "cwd"):
+        assert kw in start, f"AsyncCodex.thread_start no longer accepts {kw}"
+    run = inspect.signature(AsyncThread.run).parameters
+    for kw in ("input", "output_schema", "effort"):
+        assert kw in run, f"AsyncThread.run no longer accepts {kw}"
 
 
 def test_preflight_no_override_resolves_bundled_and_probes_bounded(monkeypatch):

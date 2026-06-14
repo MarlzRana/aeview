@@ -75,10 +75,15 @@ class CodexAdapter:
     ) -> StructuredOutput:
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
         effort = self._resolve_effort(thinking)
-        codex = AsyncCodex(self._build_config())
         try:
-            result = await self._consume(
-                codex, prompt, make_strict_schema(schema), model, str(cwd), effort, timeout
+            result = await self._run_isolated(
+                self._build_config(),
+                prompt,
+                make_strict_schema(schema),
+                model,
+                str(cwd),
+                effort,
+                timeout,
             )
         except AdapterError as exc:
             # Best-effort log; a log-write failure must not mask the AdapterError or break the
@@ -88,6 +93,26 @@ class CodexAdapter:
             raise
         self._write_log(log_path, result)
         return self._interpret(result)
+
+    async def _run_isolated(
+        self,
+        config: CodexConfig,
+        prompt: str,
+        schema: dict,
+        model: str,
+        cwd: str,
+        effort: ReasoningEffort | None,
+        timeout: float | None,
+    ) -> TurnResult:
+        # The SDK multiplexes its blocking RPC (incl. close()) on the shared asyncio.to_thread
+        # executor; under aeview's unbounded fan-out a saturated pool could starve a timed-out
+        # review's close() and deadlock the teardown. Run each review's SDK interaction in its OWN
+        # event loop (on a worker thread) so it has a private executor: close() always runs, and an
+        # outer cancellation can't abort it. Concurrent codex reviews are bounded by the process
+        # thread pool and serialize beyond it; the inner loop is bounded by the per-review timeout.
+        return await asyncio.to_thread(
+            asyncio.run, self._consume(config, prompt, schema, model, cwd, effort, timeout)
+        )
 
     async def run(
         self,
@@ -109,7 +134,7 @@ class CodexAdapter:
 
     async def _consume(
         self,
-        codex: AsyncCodex,
+        config: CodexConfig,
         prompt: str,
         schema: dict,
         model: str,
@@ -117,13 +142,14 @@ class CodexAdapter:
         effort: ReasoningEffort | None,
         timeout: float | None,
     ) -> TurnResult:
-        """Run one read-only turn to completion. `asyncio.timeout(None)` is a no-op, so this bounds
-        the run only when a timeout is set; a timeout is fail-fast (non-transient), matching every
-        other adapter. The finally ALWAYS closes the client: `asyncio.timeout`/cancellation only
-        unwinds the asyncio side, but the SDK blocks the actual RPC on a worker thread, so the codex
-        subprocess (and that thread) leak until close() terminates it (terminate → 2s → kill,
-        bounded). The error chosen above already wins, so a teardown error must not mask it.
+        """Run one read-only turn to completion inside the caller's (isolated) event loop.
+        `asyncio.timeout(None)` is a no-op, so this bounds the run only when a timeout is set; a
+        timeout is fail-fast (non-transient), matching every other adapter. The finally ALWAYS
+        closes the client: the SDK blocks the actual RPC on a worker thread, so the codex subprocess
+        (and that thread) leak until close() terminates it (terminate → 2s → kill, bounded). The
+        error chosen above already wins, so a teardown error must not mask it.
         """
+        codex = AsyncCodex(config)
         try:
             async with asyncio.timeout(timeout):
                 thread = await codex.thread_start(
@@ -172,11 +198,12 @@ class CodexAdapter:
         return StructuredOutput(payload=payload, usage=self._usage(result), raw=final)
 
     def preflight(self) -> Preflight:
-        # The SDK resolves a bundled `codex` that need not be on PATH, so don't gate on which.
-        # Confirm a binary resolves (override → bundled → PATH), then probe auth with it.
+        # The SDK resolves a bundled `codex` not necessarily on PATH, so don't gate on PATH. Resolve
+        # exactly as the run path does (override → which; else bundled-only) so doctor can't report
+        # OK while the run would fail, then probe auth with it.
         binary = self._resolve_codex_bin(self._codex_bin)
         if binary is None:
-            return Preflight("fail", "codex binary not resolvable (no override, bundle, or PATH)")
+            return Preflight("fail", "codex binary not resolvable (bad override or no bundle)")
         probe = [binary, *self.auth_status_args]
         if run_sync(probe, timeout=AUTH_PROBE_TIMEOUT).returncode == 0:
             return Preflight("ok", f"codex SDK ready ({binary})")
@@ -192,20 +219,18 @@ class CodexAdapter:
         return CodexConfig(codex_bin=which(self._codex_bin) or self._codex_bin)
 
     def _resolve_codex_bin(self, override: str | None) -> str | None:
-        # Mirror the SDK's resolution order for doctor: explicit override → bundled → PATH. which()
-        # handles an absolute path OR a bare command name AND verifies executability, so a
-        # non-executable override resolves to None (doctor fails it) instead of a broken probe.
+        # Match the SDK's ACTUAL resolution so doctor can't report OK while the run would fail: an
+        # override resolves via which (abs path or bare name, executability-checked); with NO
+        # override the SDK uses ONLY its bundled binary (no PATH fallback), so neither do we.
         if override:
             return which(override)
         try:
             from codex_cli_bin import bundled_codex_path
 
             bundled = bundled_codex_path()
-        except Exception:  # noqa: BLE001 - bundle missing/renamed → degrade to PATH
-            bundled = None
-        if bundled is not None and Path(bundled).exists():
-            return str(bundled)
-        return which("codex")
+        except Exception:  # noqa: BLE001 - bundle missing/renamed → unresolved (doctor fails)
+            return None
+        return str(bundled) if Path(bundled).exists() else None
 
     def _resolve_effort(self, thinking: str | None) -> ReasoningEffort | None:
         # thinking maps to codex's reasoning effort; "default"/None leaves it unset. Validate
@@ -232,9 +257,10 @@ class CodexAdapter:
 
     @staticmethod
     def _usage(result: TurnResult) -> Usage:
-        total = result.usage.total if result.usage is not None else None
+        # codex reports no USD cost; usage is optional (the tokenUsage event may not arrive).
+        if result.usage is None:
+            return Usage(cost_usd=0.0)
+        total = result.usage.total
         return Usage(
-            input_tokens=total.input_tokens if total is not None else 0,
-            output_tokens=total.output_tokens if total is not None else 0,
-            cost_usd=0.0,  # codex reports no USD cost
+            input_tokens=total.input_tokens, output_tokens=total.output_tokens, cost_usd=0.0
         )

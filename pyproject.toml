@@ -17,7 +17,13 @@ dependencies = [
     "pyyaml>=6",
     "pathspec>=0.12",
     "claude-agent-sdk>=0.2.101",
-    "openai-codex>=0.1.0b2",
+    "openai-codex>=0.1.0b3",
+    # Temporary: opt into the prerelease codex runtime that ships manylinux (glibc Linux) wheels.
+    # openai-codex pins this exact runtime; declaring it directly with a prerelease floor is the
+    # only way to allow that one alpha without enabling prereleases globally (which would drag in
+    # alpha pydantic etc.). Drop once openai-codex pins a stable manylinux runtime (0.137.0a4 ->
+    # stable looks imminent on PyPI). uv.lock holds the resolved exact version.
+    "openai-codex-cli-bin>=0.137.0a4",
 ]
 
 [project.scripts]
