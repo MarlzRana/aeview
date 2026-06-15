@@ -167,6 +167,29 @@ def test_plan_filters_commits_scope(aeview_home, git_repo):
     assert "b/mod.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
 
 
+def test_plan_filters_multi_commit_scope(aeview_home, git_repo):
+    # Two commits, each touching a kept .py and an ignored .lock. `commits:a,b` -> git show both ->
+    # filtering must keep both .py across the commit boundary and drop both .lock blocks. This is
+    # the correctness the ignore.py multi-commit limitation note relies on (only a header is lost).
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "a.py").write_text("a = 1\n")
+    (git_repo / "one.lock").write_text("x\n")
+    git(git_repo, "add", "a.py", "one.lock")
+    git(git_repo, "commit", "-q", "--no-verify", "-m", "first")
+    a = git(git_repo, "rev-parse", "HEAD").strip()
+    (git_repo / "b.py").write_text("b = 1\n")
+    (git_repo / "two.lock").write_text("y\n")
+    git(git_repo, "add", "b.py", "two.lock")
+    git(git_repo, "commit", "-q", "--no-verify", "-m", "second")
+    b = git(git_repo, "rev-parse", "HEAD").strip()
+    plan = _plan_run(
+        ["default"], "commits", f"{a},{b}", git_repo, False, False, None, load_settings()
+    )
+    assert sorted(plan.ignored) == ["one.lock", "two.lock"]
+    assert "b/a.py" in plan.bundle.diff and "b/b.py" in plan.bundle.diff
+    assert "one.lock" not in plan.bundle.diff and "two.lock" not in plan.bundle.diff
+
+
 _HARNESS = [{"harness": "claude-code", "model": "opus"}]
 
 

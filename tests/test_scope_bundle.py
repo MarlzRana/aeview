@@ -131,6 +131,10 @@ def test_commits_non_contiguous_set_shows_each_own_patch(git_repo):
     assert "a.py" in r.diff and "c.py" in r.diff
     assert "b.py" not in r.diff
     assert r.spec.base == f"{a},{c}"
+    # git show emits in argument order, so requesting c before a flips the emitted diff order --
+    # proving the diff itself (not only the base label) honors the user's order.
+    rev = _resolve(git_repo, "commits", f"{c},{a}")
+    assert rev.diff.index("c.py") < rev.diff.index("a.py")
 
 
 def test_commits_dedupes_repeated_ref(git_repo):
