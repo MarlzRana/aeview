@@ -110,8 +110,22 @@ def run(
         str,
         typer.Option(
             "--scope",
-            help="What to review, as <type>[:value] (default: auto). See Scopes above "
-            "for what each type means.",
+            # \b keeps this block verbatim (Click won't re-wrap it), so the scope legend stays
+            # aligned in the option column instead of being reflowed into a paragraph.
+            help=(
+                "\b\n"
+                "What to review (<type>[:value]; default auto):\n"
+                "working-tree         all uncommitted changes\n"
+                "staged               only the staged changes\n"
+                "branch[:base]        commits your branch added vs base\n"
+                "pr[:number]          a GitHub PR's diff\n"
+                "effective-pr[:base]  branch + uncommitted vs fetched base\n"
+                "commits[:a,b,c]      one or more commits (bare = HEAD)\n"
+                "range:A..B           all changes between A and B\n"
+                "patch:file           a diff from a file (or - for stdin)\n"
+                "auto                 dirty -> working-tree, else branch"
+            ),
+            show_default=False,  # the help text already states "default auto"
         ),
     ] = "auto",
     reviewers: Annotated[
@@ -144,20 +158,7 @@ def run(
         bool, typer.Option("--json", help="Print report.json instead of the human summary.")
     ] = False,
 ) -> None:
-    """Run reviewers over a scope and emit a merged report.
-
-    \b
-    Scopes (--scope <type>[:value], default auto):
-      working-tree         all uncommitted changes (staged/unstaged/untracked)
-      staged               only the staged changes (what `git commit` records)
-      branch[:base]        commits your branch added vs its base
-      pr[:number]          a GitHub PR's diff (current branch, or :number)
-      effective-pr[:base]  branch + uncommitted work vs the fetched base
-      commits[:a,b,c]      specific commits, comma-separated (bare = HEAD)
-      range:A..B           all changes between commits A and B
-      patch:file           a unified diff from a file (or patch:- for stdin)
-      auto                 working-tree if dirty, else the current branch
-    """
+    """Run reviewers over a scope and emit a merged report."""
     cwd = Path.cwd()
     settings = load_settings()
     try:
