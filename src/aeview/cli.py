@@ -29,7 +29,14 @@ from .fanout import fan_out
 from .ignore import filter_resolved
 from .merge import merge_reviews
 from .prompt import compose_prompt
-from .report import EXIT_APPROVE, EXIT_ERROR, exit_code, render_human, report_verdict_label
+from .report import (
+    EXIT_APPROVE,
+    EXIT_ERROR,
+    exit_code,
+    render_human,
+    report_verdict_label,
+    run_gate_dict,
+)
 from .resolve import (
     RESERVED_REVIEWER_NAMES,
     DiscoveredReviewer,
@@ -152,11 +159,13 @@ def run(
             help="Preview roster, scope, and bundle size; make no model calls, persist nothing.",
         ),
     ] = False,
-    output: Annotated[
-        Path | None, typer.Option("--output", help="Also write report.json to this path.")
-    ] = None,
     json_out: Annotated[
-        bool, typer.Option("--json", help="Print report.json instead of the human summary.")
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the run gate as JSON (verdict + findings + run_id); "
+            "`aeview result` has the full report.",
+        ),
     ] = False,
 ) -> None:
     """Run reviewers over a scope and emit a merged report."""
@@ -187,12 +196,17 @@ def run(
 
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
-    report = asyncio.run(_execute(plan, settings, cwd))
+    run_id, report = asyncio.run(_execute(plan, settings, cwd))
 
-    rendered = json.dumps(report.model_dump(), indent=2) if json_out else render_human(report)
+    # `run` emits the gate (full findings minus the result-only fields); the full report is
+    # persisted to the run dir (read it via `aeview result`). Human form drops the cost line
+    # (usage is result-only).
+    rendered = (
+        json.dumps(run_gate_dict(report, run_id), indent=2)
+        if json_out
+        else render_human(report, include_cost=False)
+    )
     typer.echo(rendered)
-    if output is not None:
-        output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     raise typer.Exit(exit_code(report))
 
 
@@ -352,7 +366,7 @@ def _select_auto(
     return [default, *extra_reviewers], [r.name for r in extra_reviewers]
 
 
-async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
+async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Report]:
     store = RunStore.create(new_run_id())
     typer.echo(f"run {store.run_id}", err=True)
 
@@ -376,7 +390,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
     for reviewer_name, prompt in prompt_by_reviewer.items():
         store.write_prompt(reviewer_name, prompt)
 
-    return await _run_reviews_and_merge(
+    report = await _run_reviews_and_merge(
         store,
         manifest,
         plan.roster,
@@ -385,6 +399,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         settings.review_timeout_seconds,
         settings.override_harness_binaries,
     )
+    return store.run_id, report
 
 
 def _merge_settings(dedup: DedupPlan | None, override_harness_binaries: dict[str, str]) -> Settings:

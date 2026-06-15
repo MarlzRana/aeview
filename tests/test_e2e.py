@@ -18,7 +18,8 @@ async def _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts,
     # The full run path = plan (sync, raises ScopeError/ResolveError) then execute (async).
     settings = load_settings()
     plan = _plan_run(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings)
-    return await _execute(plan, settings, cwd)
+    _run_id, report = await _execute(plan, settings, cwd)  # _execute returns (run_id, report)
+    return report
 
 
 def _run(repo):

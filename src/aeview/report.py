@@ -37,7 +37,22 @@ def exit_code(report: Report) -> int:
     return _EXIT_BY_LABEL[report_verdict_label(report)]
 
 
-def render_human(report: Report) -> str:
+def run_gate_dict(report: Report, run_id: str) -> dict:
+    """The `aeview run` stdout shape: the report minus the fields reserved for `aeview result`
+    (each finding's `id`, plus `next_steps` / `usage` / the `dedup` detail beyond `status`), with
+    `run_id` added so a caller can fetch the exact `result`. The kept fields keep their report.json
+    names, so a consumer reading only these fields works against both `run` and `result`."""
+    return {
+        "verdict": report.verdict,
+        "summary": report.summary,
+        "run_id": run_id,
+        "findings": [f.model_dump(exclude={"id"}) for f in report.findings],
+        "coverage": report.coverage.model_dump(),
+        "dedup": {"status": report.dedup.status},
+    }
+
+
+def render_human(report: Report, *, include_cost: bool = True) -> str:
     lines: list[str] = []
     label = report_verdict_label(report)
     if label == "error":
@@ -63,6 +78,6 @@ def render_human(report: Report) -> str:
     if report.dedup.status == "failed":
         lines.append(f"     dedup FAILED: {report.dedup.warning or report.dedup.reason}")
 
-    if report.usage.total.cost_usd:
+    if include_cost and report.usage.total.cost_usd:
         lines.append(f"     cost: ${report.usage.total.cost_usd:.4f}")
     return "\n".join(lines)

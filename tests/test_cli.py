@@ -229,18 +229,6 @@ def test_dry_run_does_not_prune_existing_runs(aeview_home, git_repo, monkeypatch
     assert (runs_dir() / "stale-run").exists()  # preview must not delete history
 
 
-def test_run_writes_output_file(aeview_home, git_repo, stub_claude, tmp_path, monkeypatch):
-    # Positive half of the --output contract (the dry-run test covers the negative half).
-    import json
-
-    monkeypatch.chdir(git_repo)
-    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
-    out = tmp_path / "report.json"
-    CliRunner().invoke(app, ["run", "--scope", "working-tree", "--output", str(out)])
-    assert out.exists()
-    assert "verdict" in json.loads(out.read_text())
-
-
 def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_claude, monkeypatch):
     # The `run` path threads settings.reviewTimeoutSeconds into fan_out (resume has its own test).
     import json
@@ -269,18 +257,6 @@ def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_cl
     assert captured["timeout"] == 555
     # settings.overrideHarnessBinaries also threads to fan_out (the per-harness binary override).
     assert captured["override_harness_binaries"] == {"claude-code": "/x/claude"}
-
-
-def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
-    # "persist nothing" includes --output: the preview exits before any report write.
-    monkeypatch.chdir(git_repo)
-    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
-    out = tmp_path / "should_not_exist.json"
-    result = CliRunner().invoke(
-        app, ["run", "--scope", "working-tree", "--dry-run", "--output", str(out)]
-    )
-    assert result.exit_code == 0
-    assert not out.exists()
 
 
 def test_run_surfaces_ignored_files_on_stderr(aeview_home, git_repo, stub_claude, monkeypatch):
@@ -348,6 +324,51 @@ def test_run_json_stdout_unpolluted_by_auto_activated_notice(
     json.loads(result.stdout)  # stdout parses as the report JSON
     assert "auto-activated" not in result.stdout
     assert "auto-activated 1 reviewer(s): py" in result.stderr
+
+
+def test_run_json_is_the_gate_while_result_stays_full(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # `run --json` emits the gate (full findings minus the result-only fields, plus run_id); the
+    # persisted report.json (what `result` reads) stays the full report.
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
+    gate = json.loads(result.stdout)
+    assert gate["run_id"]  # exposed so a caller can fetch the exact result
+    assert "usage" not in gate and "next_steps" not in gate
+    assert set(gate["dedup"]) == {"status"}  # dedup detail (harness/reason/warning) is result-only
+    assert gate["findings"], "the stub plants a finding"
+    f = gate["findings"][0]
+    assert "id" not in f  # per-finding id is result-only
+    assert f["body"] and f["recommendation"] and f["sources"]  # agent-facing detail stays in run
+    # the on-disk report.json (what `result` reads) is the FULL report — fetched via the gate's
+    # own run_id, so the assertion is tied to the exact run this command created.
+    full = json.loads((runs_dir() / gate["run_id"] / "report.json").read_text())
+    assert "usage" in full and "next_steps" in full
+    assert "id" in full["findings"][0]
+    assert {"harness", "reason", "warning"} <= set(full["dedup"])
+    # and `aeview result --json` (the command, not just the on-disk file) emits that full report
+    result_out = CliRunner().invoke(app, ["result", gate["run_id"], "--json"])
+    result_full = json.loads(result_out.stdout)
+    assert "usage" in result_full and "next_steps" in result_full
+    assert "id" in result_full["findings"][0]
+
+
+def test_run_human_gate_omits_cost(aeview_home, git_repo, stub_claude, monkeypatch):
+    # The human `run` gate suppresses the cost line (usage is result-only). The stub emits a nonzero
+    # cost, so a regression that flips this path back to render_human's default (include_cost=True)
+    # would leak `cost:` into stdout and fail here.
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree"])
+    assert result.exit_code in (0, 1)  # a real verdict, not a resolution/scope error
+    assert "cost:" not in result.stdout
+    # self-validating: the same run's `result` (human) DOES show a cost line, so the negative
+    # assertion above can't pass vacuously when the total is zero (run hides cost, result shows it).
+    run_id = next(iter(runs_dir().iterdir())).name
+    result_human = CliRunner().invoke(app, ["result", run_id])
+    assert "cost:" in result_human.stdout
 
 
 def _dry_plan(

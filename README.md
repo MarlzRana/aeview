@@ -268,9 +268,9 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
 
 | Command | What it does |
 |---|---|
-| `aeview run` | Run reviewers over a scope and write a merged report. |
+| `aeview run` | Run reviewers over a scope; print the **gate** (verdict + findings, see below) and exit `0/1/2`. |
 | `aeview status [run-id]` | Per-review progress + coverage (defaults to the latest run). `--wait` blocks to a terminal state and adopts its exit code. |
-| `aeview result [run-id]` | Print a finished run's report; exit with its `0/1/2` code. |
+| `aeview result [run-id]` | Print a finished run's **full** report; exit with its `0/1/2` code. |
 | `aeview resume <run-id>` | Re-run a run's non-`done` reviews against its frozen bundle, then re-merge. |
 | `aeview list` | Recent runs, newest first: id, time, scope, verdict, coverage. |
 | `aeview reviewers [name]` | List the reviewers visible here (walk-up), or show one's detail. |
@@ -279,12 +279,11 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
 | `aeview version` | Print the version. |
 
 Common `run` flags: `--scope`, `--reviewers`, `--include-dirty`, `--allow-conflicts`, `--dry-run`,
-`--output PATH` (also write `report.json` there), `--json`. Most commands accept `--json` for
-machine-readable output.
+`--json`. Most commands accept `--json` for machine-readable output.
 
 ## The report & exit codes
 
-`report.json` is the merged, deduplicated artifact:
+The full merged artifact is `report.json` — what `aeview result` and the on-disk file give you:
 
 ```jsonc
 {
@@ -313,6 +312,12 @@ machine-readable output.
   "usage": { "reviews": {...}, "dedup": {...}, "total": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0 } }
 }
 ```
+
+**`aeview run` prints a *gate*, not the full report:** it's `report.json` with a top-level `run_id`
+added and the result-only detail omitted — `findings[].id`, `next_steps`, `usage`, and the `dedup`
+fields other than `status`. The kept fields keep their `report.json` names, so a consumer that reads
+only the gate's fields works against both `run` and `result`. The dropped detail (token/cost
+accounting, per-review next steps, dedup provenance, per-finding ids) lives in `aeview result`.
 
 **Exit codes** (the loop-until-clean contract):
 
