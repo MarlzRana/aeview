@@ -55,11 +55,20 @@ from .schema import DedupPlan, Invocation, Report, RosterEntry, RunManifest, Sco
 from .scope import ResolvedScope, ScopeError, parse_scope, repo_root
 from .scope import resolve as resolve_scope
 
+# Rich (boxed, colored) help for an interactive terminal; plain Click help when stdout is piped or
+# captured (e.g. an agent) — the terse `claude`-style output agents parse more easily. One stdout
+# tty probe at startup; --json still controls report format, this only affects help/error styling.
+try:
+    _INTERACTIVE_HELP = sys.stdout.isatty()
+except AttributeError, ValueError, OSError:
+    _INTERACTIVE_HELP = False
+
 app = typer.Typer(
     name="aeview",
     help="Fan code reviewers across agent harnesses and merge one verdict.",
     no_args_is_help=True,
     add_completion=False,
+    rich_markup_mode="rich" if _INTERACTIVE_HELP else None,
 )
 
 
