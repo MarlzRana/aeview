@@ -154,7 +154,7 @@ def test_plan_filters_under_hostile_diff_config(aeview_home, git_repo, cfg):
     assert "uv.lock" not in plan.bundle.diff
 
 
-def test_plan_filters_commit_scope(aeview_home, git_repo):
+def test_plan_filters_commits_scope(aeview_home, git_repo):
     # A single commit touching both an ignored and a kept file: git show -> filter through planning.
     commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
     (git_repo / "uv.lock").write_text("lock\n")
@@ -162,7 +162,7 @@ def test_plan_filters_commit_scope(aeview_home, git_repo):
     git(git_repo, "add", "uv.lock", "mod.py")
     git(git_repo, "commit", "-q", "--no-verify", "-m", "both")
     sha = git(git_repo, "rev-parse", "HEAD").strip()
-    plan = _plan_run(["default"], "commit", sha, git_repo, False, False, None, load_settings())
+    plan = _plan_run(["default"], "commits", sha, git_repo, False, False, None, load_settings())
     assert plan.ignored == ["uv.lock"]
     assert "b/mod.py" in plan.bundle.diff and "b/uv.lock" not in plan.bundle.diff
 
@@ -259,11 +259,11 @@ def test_auto_activates_repo_reviewer_from_subdirectory(aeview_home, git_repo):
     assert plan.auto_activated == ["py"]
 
 
-def test_auto_activates_for_commit_scope(aeview_home, git_repo):
-    # Auto mode skips only patch scope; a commit-scope bare run still activates from its diff.
+def test_auto_activates_for_commits_scope(aeview_home, git_repo):
+    # Auto mode skips only patch scope; a commits-scope bare run still activates from its diff.
     make_reviewer(git_repo, "py", harnesses=_HARNESS, auto_activate_paths=["*.py"])
     sha = commit(git_repo, "added.py", "x = 1\n", "add py")
-    plan = _plan_run(None, "commit", sha, git_repo, False, False, None, load_settings())
+    plan = _plan_run(None, "commits", sha, git_repo, False, False, None, load_settings())
     assert "py" in plan.names
     assert plan.auto_activated == ["py"]
 

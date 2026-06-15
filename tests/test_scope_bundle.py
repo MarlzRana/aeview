@@ -37,7 +37,7 @@ def test_parse_scope_rejects_option_like_value():
     with pytest.raises(ScopeError):
         parse_scope("range:--output=/tmp/x")
     with pytest.raises(ScopeError):
-        parse_scope("commit:-x")
+        parse_scope("commits:-x")
 
 
 def test_parse_scope_allows_stdin_patch_sentinel():
@@ -96,22 +96,56 @@ def test_resolve_base_rejects_option_like_ref_segment(git_repo):
         resolve_base(git_repo, "origin/-p", do_fetch=True)
 
 
-# --- commit / range -------------------------------------------------------------------
+# --- commits / range ------------------------------------------------------------------
 
 
-def test_commit_default_is_head(git_repo):
+def test_commits_default_is_head(git_repo):
     commit(git_repo, "b.py", "b = 1\n", "add b")
-    r = _resolve(git_repo, "commit")
+    r = _resolve(git_repo, "commits")
     assert "b.py" in r.diff
     assert r.spec.base == "HEAD"
 
 
-def test_commit_specific_ref(git_repo):
+def test_commits_specific_ref(git_repo):
     first = git(git_repo, "rev-parse", "HEAD").strip()
     commit(git_repo, "b.py", "b = 1\n", "add b")
-    r = _resolve(git_repo, "commit", first)
+    r = _resolve(git_repo, "commits", first)
     assert "app.py" in r.diff  # the initial commit's content
     assert "b.py" not in r.diff
+
+
+def test_commits_non_contiguous_set_shows_each_own_patch(git_repo):
+    # A set that SKIPS a commit: each listed commit is shown against its own parent, so only the
+    # selected commits' added files appear -- the skipped one's addition does not.
+    a = commit(git_repo, "a.py", "a = 1\n", "add a")
+    commit(git_repo, "b.py", "b = 1\n", "add b")  # skipped
+    c = commit(git_repo, "c.py", "c = 1\n", "add c")
+    r = _resolve(git_repo, "commits", f"{a},{c}")
+    assert "a.py" in r.diff and "c.py" in r.diff
+    assert "b.py" not in r.diff
+    assert r.spec.base == f"{a},{c}"
+
+
+def test_commits_dedupes_repeated_ref(git_repo):
+    sha = commit(git_repo, "b.py", "b = 1\n", "add b")
+    r = _resolve(git_repo, "commits", f"{sha},{sha}")
+    assert r.spec.base == sha  # collapsed to a single ref, not "<sha>,<sha>"
+
+
+def test_commits_empty_value_raises(git_repo):
+    with pytest.raises(ScopeError, match="at least one commit"):
+        _resolve(git_repo, "commits", "")
+
+
+def test_commits_rejects_range_item(git_repo):
+    a = git(git_repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(ScopeError, match="range"):
+        _resolve(git_repo, "commits", f"{a}..HEAD")
+
+
+def test_commits_nonexistent_ref_raises(git_repo):
+    with pytest.raises(ScopeError, match="does not exist"):
+        _resolve(git_repo, "commits", "deadbeefdeadbeef")
 
 
 def test_range_diff(git_repo):
@@ -150,9 +184,9 @@ def test_branch_include_dirty_folds_worktree(git_repo):
     assert "dirty.py" in r.diff
 
 
-def test_include_dirty_rejected_on_commit(git_repo):
+def test_include_dirty_rejected_on_commits(git_repo):
     with pytest.raises(ScopeError):
-        _resolve(git_repo, "commit", include_dirty=True)
+        _resolve(git_repo, "commits", include_dirty=True)
 
 
 def test_staged_include_dirty_widens_to_working_tree(git_repo):
@@ -238,7 +272,7 @@ def test_in_progress_merge_is_refused(git_repo):
 
 
 def test_in_progress_merge_does_not_block_historical_scopes(git_repo):
-    # commit/range diff historical refs and don't read the working tree, so an in-progress
+    # commits/range diff historical refs and don't read the working tree, so an in-progress
     # merge must not block them.
     first = git(git_repo, "rev-parse", "HEAD").strip()
     git(git_repo, "checkout", "-q", "-b", "feature")
@@ -249,7 +283,7 @@ def test_in_progress_merge_does_not_block_historical_scopes(git_repo):
 
     subprocess.run(["git", "merge", "feature"], cwd=git_repo, capture_output=True)  # conflicts
     # These resolve despite the unfinished merge.
-    assert not _resolve(git_repo, "commit", first).is_empty
+    assert not _resolve(git_repo, "commits", first).is_empty
     assert not _resolve(git_repo, "range", f"{first}..{second}").is_empty
 
 

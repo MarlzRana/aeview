@@ -108,7 +108,7 @@ def run(
         typer.Option(
             "--scope",
             help="What to review: <type>[:value]. Types: working-tree, staged, branch, "
-            "pr, effective-pr, commit, range, patch; omitted -> auto.",
+            "pr, effective-pr, commits, range, patch; omitted -> auto.",
         ),
     ] = "auto",
     reviewers: Annotated[

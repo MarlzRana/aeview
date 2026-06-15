@@ -29,7 +29,7 @@ _KNOWN_TYPES = {
     "branch",
     "pr",
     "effective-pr",
-    "commit",
+    "commits",
     "range",
     "patch",
     "auto",
@@ -73,7 +73,7 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
         raise ScopeError(f"scope '{stype}' requires a value, e.g. --scope {stype}:<value>")
     # `range` must be an actual range (A..B / A...B). A bare ref makes `git diff <ref>`
     # compare against the WORKING TREE, which would read uncommitted/conflicted content while
-    # the conflict gate (which excludes range) is skipped. Use commit:/branch: for a single ref.
+    # the conflict gate (which excludes range) is skipped. Use commits:/branch: for a single ref.
     if stype == "range" and (value is None or ".." not in value):
         raise ScopeError("range scope needs a commit range like A..B or A...B (not a single ref)")
     # A value starting with '-' would be read by git as an option (e.g.
@@ -149,7 +149,7 @@ def _merge_base(cwd: Path, base: str) -> str:
     if res.returncode != 0:
         raise ScopeError(
             f"no common ancestor between HEAD and '{base}' (unrelated histories); "
-            f"use --scope range:<A..B> or --scope commit instead"
+            f"use --scope range:<A..B> or --scope commits instead"
         )
     return res.stdout.strip()
 
@@ -293,7 +293,7 @@ def resolve(
 
     _validate_include_dirty(raw_type, include_dirty)
 
-    # The conflict gate only matters when the diff reads the working tree. pr/commit/range
+    # The conflict gate only matters when the diff reads the working tree. pr/commits/range
     # (and plain branch) diff network/historical refs, so a local in-progress merge is
     # irrelevant to them and must not block the review.
     reads_worktree = raw_type in _WORKTREE_SCOPES or include_dirty
@@ -316,8 +316,8 @@ def resolve(
         return _resolve_effective_pr(cwd, value)
     if raw_type == "pr":
         return _resolve_pr(cwd, value)
-    if raw_type == "commit":
-        return _resolve_commit(cwd, value)
+    if raw_type == "commits":
+        return _resolve_commits(cwd, value)
     if raw_type == "range":
         return _resolve_range(cwd, value)
     raise ScopeError(f"scope '{raw_type}' is not implemented")
@@ -390,12 +390,31 @@ def _resolve_pr(cwd: Path, value: str | None) -> ResolvedScope:
     return _result("pr", base, diff, [])
 
 
-def _resolve_commit(cwd: Path, value: str | None) -> ResolvedScope:
-    ref = value or "HEAD"
-    if not _ref_exists(cwd, ref):
-        raise ScopeError(f"commit '{ref}' does not exist")
-    diff = _git(["show", "--format=medium", ref], cwd)
-    return _result("commit", ref, diff, [f"git show {ref}"])
+def _parse_commit_refs(value: str | None) -> list[str]:
+    # Bare `commits` -> HEAD. `commits:a,b,c` is a SET (possibly non-contiguous); de-dupe but keep
+    # the user's order. Each is shown against its own parent, never merged into one range diff.
+    if value is None:
+        return ["HEAD"]
+    refs = list(dict.fromkeys(r.strip() for r in value.split(",") if r.strip()))
+    if not refs:
+        raise ScopeError("commits scope needs at least one commit ref (e.g. commits:<sha>)")
+    for ref in refs:
+        # A leading '-' would reach `git show` as an option; '..' is a range -> use range:.
+        if ref.startswith("-"):
+            raise ScopeError(f"commit ref may not start with '-': {ref!r}")
+        if ".." in ref:
+            raise ScopeError(f"'{ref}' looks like a range; use --scope range:{ref}")
+    return refs
+
+
+def _resolve_commits(cwd: Path, value: str | None) -> ResolvedScope:
+    refs = _parse_commit_refs(value)
+    for ref in refs:
+        if not _ref_exists(cwd, ref):
+            raise ScopeError(f"commit '{ref}' does not exist")
+    diff = _git(["show", "--format=medium", *refs], cwd)
+    # `git show <refs...>` emits each commit's own patch; base records the set for the manifest.
+    return _result("commits", ",".join(refs), diff, [f"git show {' '.join(refs)}"])
 
 
 def _resolve_range(cwd: Path, value: str | None) -> ResolvedScope:
