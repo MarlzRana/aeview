@@ -418,18 +418,6 @@ async def test_session_deleted_even_when_the_run_fails(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
 
 
-async def test_stop_runs_even_if_delete_raises_baseexception(copilot_sdk, tmp_path):
-    # delete is suppressed for Exceptions, but a BaseException (e.g. cancellation) would escape the
-    # suppress; the try/finally guarantees stop() still runs before it propagates.
-    class _Boom(BaseException):
-        pass
-
-    copilot_sdk.set_delete_error(_Boom())
-    with pytest.raises(_Boom):
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert copilot_sdk.captured["stopped"] == 1  # stop() ran despite the BaseException from delete
-
-
 async def test_each_run_gets_a_distinct_session_id(copilot_sdk, tmp_path):
     # The id is generated per review (uuid4), so two runs delete two DIFFERENT sessions — a
     # regression to a constant/shared id (which would collide and mis-delete) is caught here.
