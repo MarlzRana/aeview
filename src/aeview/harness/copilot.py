@@ -207,6 +207,7 @@ class CopilotAdapter:
         collector = _UsageCollector()
         writer = EventLogWriter(log_path, harness=self.name, model=model)
         client: CopilotClient | None = None
+        session_id: str | None = None
         try:
             async with asyncio.timeout(timeout):
                 # Construct inside the try so a "Copilot CLI not found" RuntimeError (raised in
@@ -225,6 +226,9 @@ class CopilotAdapter:
                     on_permission_request=_deny_by_default_permission,
                     working_directory=cwd,
                 )
+                # Capture the id so the finally can delete this session's disk state on any path
+                # (stop() preserves it; aeview never resumes), not just the success path.
+                session_id = session.session_id
 
                 # One subscription tees every SessionEvent to the live log AND feeds the usage
                 # collector — session.on already delivers the full event stream (we previously kept
@@ -270,7 +274,7 @@ class CopilotAdapter:
         finally:
             writer.close()
             if client is not None:
-                await _teardown_client(client)
+                await _teardown_client(client, session_id)
 
     def preflight(self) -> Preflight:
         # The SDK resolves a bundled `copilot` not necessarily on PATH, so don't gate on PATH.
@@ -367,12 +371,21 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
     return which(path)
 
 
-async def _teardown_client(client: CopilotClient) -> None:
-    # Best-effort, bounded teardown. stop() disconnects sessions + awaits a destroy RPC (which can
-    # hang on a dead connection) before its own bounded terminate→kill, so cap it and fall back to
-    # force_stop() (the SDK's escape for a stuck stop()). A teardown that raises or hangs must
-    # neither mask a valid parsed result nor block — on the daemon thread a wedged teardown only
-    # abandons the subprocess (it finishes on its own; clean subtree-kill is deferred I6b-2).
+async def _teardown_client(client: CopilotClient, session_id: str | None) -> None:
+    # Best-effort, bounded teardown. First delete THIS review's on-disk session: stop() only
+    # disconnects (the SDK keeps session-state/<id> for resume), and aeview never resumes — so
+    # without this each review leaks a ~/.copilot session dir. delete_session needs the live
+    # connection, so it MUST run before stop(); it's bounded + suppressed like stop() (a hung or
+    # failed delete can't mask the result or block, and stop() still runs after). Only our own
+    # session_id is deleted, never the user's other ~/.copilot sessions.
+    if session_id is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(client.delete_session(session_id), timeout=_TEARDOWN_GRACE)
+    # stop() disconnects sessions + awaits a destroy RPC (which can hang on a dead connection)
+    # before its own bounded terminate→kill, so cap it and fall back to force_stop() (the SDK's
+    # escape for a stuck stop()). A teardown that raises or hangs must neither mask a valid parsed
+    # result nor block — on the daemon thread a wedged teardown only abandons the subprocess (it
+    # finishes on its own; clean subtree-kill is deferred I6b-2).
     try:
         await asyncio.wait_for(client.stop(), timeout=_TEARDOWN_GRACE)
     except Exception:  # noqa: BLE001 - bounded; fall back to the hard kill, never propagate
