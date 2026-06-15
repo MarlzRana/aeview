@@ -371,6 +371,16 @@ def test_run_human_gate_omits_cost(aeview_home, git_repo, stub_claude, monkeypat
     assert "cost:" in result_human.stdout
 
 
+def test_run_rejects_removed_output_flag(tmp_path):
+    # --output was removed (use `run --json > file` + `result`); pin that it's gone so a silent
+    # revival (e.g. re-adding a full-report file write) fails loudly. Click rejects the unknown
+    # option at parse time — usage error, before the run, no file written.
+    out = tmp_path / "report.json"
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--output", str(out)])
+    assert result.exit_code == 2  # usage error: No such option
+    assert not out.exists()
+
+
 def _dry_plan(
     n_reviews: int = 1,
     *,

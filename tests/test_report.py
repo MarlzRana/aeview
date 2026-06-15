@@ -117,6 +117,20 @@ def test_run_gate_keeps_report_fields_verbatim_minus_result_only():
         assert gate[key] == full[key], key
     assert gate["dedup"] == {"status": full["dedup"]["status"]}  # dedup trimmed to status only
     assert gate["findings"][0] == {k: v for k, v in full["findings"][0].items() if k != "id"}
+    # finding-level anti-leak guard (mirrors the top-level one): a new MergedFinding field flows
+    # into the gate via model_dump(exclude={"id"}), so pin the exact gate-finding key set. Adding a
+    # field without deciding its gate fate fails here. (A model_fields-derived set never fails.)
+    assert set(gate["findings"][0]) == {
+        "title",
+        "body",
+        "severity",
+        "category",
+        "confidence",
+        "location",
+        "recommendation",
+        "sources",
+        "agreement",
+    }
 
 
 def test_render_human_can_omit_cost_for_the_run_gate():
