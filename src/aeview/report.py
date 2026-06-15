@@ -52,7 +52,10 @@ def run_gate_dict(report: Report, run_id: str) -> dict:
     }
 
 
-def render_human(report: Report, *, include_cost: bool = True) -> str:
+def render_human(report: Report, *, gate: bool = False) -> str:
+    """Human report. `gate=True` is the `aeview run` form: it drops the result-only detail (cost,
+    and the dedup failure reason) so the human gate matches the JSON gate. `result`/`resume` render
+    the full form (the default)."""
     lines: list[str] = []
     label = report_verdict_label(report)
     if label == "error":
@@ -76,8 +79,9 @@ def render_human(report: Report, *, include_cost: bool = True) -> str:
         lines.append(f"    {loc} :: {f.recommendation}")
 
     if report.dedup.status == "failed":
-        lines.append(f"     dedup FAILED: {report.dedup.warning or report.dedup.reason}")
+        detail = "" if gate else f": {report.dedup.warning or report.dedup.reason}"
+        lines.append(f"     dedup FAILED{detail}")
 
-    if include_cost and report.usage.total.cost_usd:
+    if not gate and report.usage.total.cost_usd:
         lines.append(f"     cost: ${report.usage.total.cost_usd:.4f}")
     return "\n".join(lines)

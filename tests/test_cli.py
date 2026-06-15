@@ -335,6 +335,7 @@ def test_run_json_is_the_gate_while_result_stays_full(
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
     gate = json.loads(result.stdout)
+    assert result.exit_code == 1  # the stub plants a bug -> needs-attention -> exit 1
     assert gate["run_id"]  # exposed so a caller can fetch the exact result
     assert "usage" not in gate and "next_steps" not in gate
     assert set(gate["dedup"]) == {"status"}  # dedup detail (harness/reason/warning) is result-only
@@ -351,13 +352,20 @@ def test_run_json_is_the_gate_while_result_stays_full(
     # and `aeview result --json` (the command, not just the on-disk file) emits that full report
     result_out = CliRunner().invoke(app, ["result", gate["run_id"], "--json"])
     result_full = json.loads(result_out.stdout)
+    assert result_out.exit_code == 1  # result exits the run's verdict too
     assert "usage" in result_full and "next_steps" in result_full
     assert "id" in result_full["findings"][0]
+    # the kept fields match across the two commands by value, not just by name (the "reads against
+    # both" contract), end-to-end through both serializers
+    assert gate["verdict"] == result_full["verdict"]
+    assert gate["summary"] == result_full["summary"]
+    assert gate["coverage"] == result_full["coverage"]
+    assert gate["findings"][0] == {k: v for k, v in result_full["findings"][0].items() if k != "id"}
 
 
 def test_run_human_gate_omits_cost(aeview_home, git_repo, stub_claude, monkeypatch):
     # The human `run` gate suppresses the cost line (usage is result-only). The stub emits a nonzero
-    # cost, so a regression that flips this path back to render_human's default (include_cost=True)
+    # cost, so a regression that flips this path back to render_human's default (gate=False, full)
     # would leak `cost:` into stdout and fail here.
     monkeypatch.chdir(git_repo)
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
@@ -371,13 +379,14 @@ def test_run_human_gate_omits_cost(aeview_home, git_repo, stub_claude, monkeypat
     assert "cost:" in result_human.stdout
 
 
-def test_run_rejects_removed_output_flag(tmp_path):
-    # --output was removed (use `run --json > file` + `result`); pin that it's gone so a silent
-    # revival (e.g. re-adding a full-report file write) fails loudly. Click rejects the unknown
-    # option at parse time — usage error, before the run, no file written.
+def test_run_rejects_removed_output_flag(aeview_home, tmp_path):
+    # --output was removed (use `run --json > file` + `result`); pin it's gone so a silent revival
+    # (e.g. re-adding a full-report file write) fails loudly. aeview_home isolates the callback's
+    # config seeding; Click rejects the unknown option at parse time, before any run planning.
     out = tmp_path / "report.json"
     result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--output", str(out)])
-    assert result.exit_code == 2  # usage error: No such option
+    assert result.exit_code == 2  # usage error
+    assert "No such option" in result.output  # rejected at parse, not a later validation exit 2
     assert not out.exists()
 
 

@@ -199,12 +199,12 @@ def run(
     run_id, report = asyncio.run(_execute(plan, settings, cwd))
 
     # `run` emits the gate (full findings minus the result-only fields); the full report is
-    # persisted to the run dir (read it via `aeview result`). Human form drops the cost line
-    # (usage is result-only).
+    # persisted to the run dir (read it via `aeview result`). The human form is the gate too
+    # (gate=True drops cost + the dedup failure detail).
     rendered = (
         json.dumps(run_gate_dict(report, run_id), indent=2)
         if json_out
-        else render_human(report, include_cost=False)
+        else render_human(report, gate=True)
     )
     typer.echo(rendered)
     raise typer.Exit(exit_code(report))

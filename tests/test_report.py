@@ -133,7 +133,14 @@ def test_run_gate_keeps_report_fields_verbatim_minus_result_only():
     }
 
 
-def test_render_human_can_omit_cost_for_the_run_gate():
+def test_render_human_gate_trims_cost_and_dedup_detail():
+    # The run gate (gate=True) drops the result-only detail so the human form matches the JSON gate.
     report = _report()  # total cost 0.12
-    assert "cost: $0.1200" in render_human(report)  # result/default form shows it
-    assert "cost:" not in render_human(report, include_cost=False)  # run gate hides it
+    assert "cost: $0.1200" in render_human(report)  # result/default form shows cost
+    assert "cost:" not in render_human(report, gate=True)  # gate hides it
+    failed = _report(
+        dedup=Dedup(status="failed", harness="dx", reason="timed out", warning="DUPES NOT REMOVED")
+    )
+    assert "dedup FAILED: DUPES NOT REMOVED" in render_human(failed)  # result shows the reason
+    gate_out = render_human(failed, gate=True)
+    assert "dedup FAILED" in gate_out and "DUPES NOT REMOVED" not in gate_out  # gate: status only
