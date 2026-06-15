@@ -107,8 +107,8 @@ def run(
         str,
         typer.Option(
             "--scope",
-            help="What to review: <type>[:value]. Types: working-tree, staged, branch, "
-            "pr, effective-pr, commits, range, patch; omitted -> auto.",
+            help="What to review, as <type>[:value] (default: auto). See Scopes above "
+            "for what each type means.",
         ),
     ] = "auto",
     reviewers: Annotated[
@@ -141,7 +141,20 @@ def run(
         bool, typer.Option("--json", help="Print report.json instead of the human summary.")
     ] = False,
 ) -> None:
-    """Run reviewers over a scope and emit a merged report."""
+    """Run reviewers over a scope and emit a merged report.
+
+    \b
+    Scopes (--scope <type>[:value], default auto):
+      working-tree         all uncommitted changes (staged/unstaged/untracked)
+      staged               only the staged changes (what `git commit` records)
+      branch[:base]        commits your branch added vs its base
+      pr[:number]          a GitHub PR's diff (current branch, or :number)
+      effective-pr[:base]  branch + uncommitted work vs the fetched base
+      commits[:a,b,c]      specific commits, comma-separated (bare = HEAD)
+      range:A..B           all changes between commits A and B
+      patch:file           a unified diff from a file (or patch:- for stdin)
+      auto                 working-tree if dirty, else the current branch
+    """
     cwd = Path.cwd()
     settings = load_settings()
     try:
