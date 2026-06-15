@@ -157,6 +157,27 @@ def test_commits_rejects_range_item(git_repo):
 def test_commits_nonexistent_ref_raises(git_repo):
     with pytest.raises(ScopeError, match="does not exist"):
         _resolve(git_repo, "commits", "deadbeefdeadbeef")
+    # _ref_exists runs over every ref, so a bad ref in a *later* position is caught too.
+    good = git(git_repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(ScopeError, match="does not exist"):
+        _resolve(git_repo, "commits", f"{good},deadbeefdeadbeef")
+
+
+def test_commits_accepts_ancestry_refs(git_repo):
+    # The leading-'^' rail is leading-only: ancestry refs like HEAD^ are valid single commits that
+    # must resolve, not be mistaken for the '^' negation we reject (HEAD^ does not start with '^').
+    commit(git_repo, "b.py", "b = 1\n", "add b")  # advance HEAD; HEAD^ is now the initial commit
+    r = _resolve(git_repo, "commits", "HEAD^")
+    assert "app.py" in r.diff and "b.py" not in r.diff
+
+
+def test_commits_inspect_is_space_joined(git_repo):
+    # Input is comma-separated, but the self-collect `git show` hint must be SPACE-joined
+    # (`git show a b`, not `git show a,b` which git reads as one bad ref). Guards that join.
+    first = git(git_repo, "rev-parse", "HEAD").strip()
+    second = commit(git_repo, "b.py", "b = 1\n", "add b")
+    r = _resolve(git_repo, "commits", f"{first},{second}")
+    assert r.inspect == [f"git show {first} {second}"]
 
 
 def test_commits_rejects_option_or_negation_non_first_item(git_repo):
