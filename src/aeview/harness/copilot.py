@@ -221,11 +221,10 @@ class CopilotAdapter:
                 # the SDK's feature flags (host git ops, skills, MCP, file hooks, config discovery —
                 # all None/off here) at their defaults can't bypass it. We deliberately do NOT add a
                 # second tool-gating layer (the user chose handler-only); live-proven write-nowhere.
-                # Pre-generate the id and pass it to create_session so the finally can delete this
-                # session on EVERY path the runtime may have allocated it — including a create that
-                # times out or errors AFTER allocating the dir but before returning the session.
-                # (stop() preserves the dir; aeview never resumes.) Deleting a never-allocated id is
-                # a harmless suppressed no-op.
+                # Pre-generate the id and pass it to create_session so teardown can delete this
+                # session on any path it may have been allocated — even a create that times out or
+                # errors mid-allocation. The SDK allocates under exactly this id (it raises if the
+                # runtime returns a different id). Deleting a never-allocated id raises, suppressed.
                 session_id = str(uuid.uuid4())
                 session = await client.create_session(
                     session_id=session_id,

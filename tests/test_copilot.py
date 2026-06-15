@@ -133,10 +133,8 @@ def copilot_sdk(monkeypatch):
         def __init__(self, create_kwargs: dict) -> None:
             self._handlers: list = []
             captured["create_kwargs"] = create_kwargs
-            # The real CopilotSession exposes session_id (a str); the adapter reads it to delete
-            # this session's on-disk state during teardown.
-            self.session_id = create_kwargs.get("session_id") or f"fake-{uuid.uuid4().hex}"
-            captured["session_id"] = self.session_id
+            # Adapter always passes a pre-generated session_id (the id it deletes in teardown).
+            self.session_id = create_kwargs["session_id"]
 
         def on(self, handler):
             self._handlers.append(handler)
@@ -205,9 +203,10 @@ def copilot_sdk(monkeypatch):
 
         async def create_session(self, **kwargs):
             captured["created"] += 1
-            # Capture the adapter's pre-generated session_id even on failure, so a create-error
-            # test can assert teardown still tried to delete it.
-            captured["session_id"] = kwargs.get("session_id")
+            # The adapter pre-generates and passes session_id (the id it deletes in teardown);
+            # require + capture it even on failure so a create-error test can assert the delete.
+            assert "session_id" in kwargs, "adapter must pass a pre-generated session_id"
+            captured["session_id"] = kwargs["session_id"]
             if state["create_error"] is not None:
                 raise state["create_error"]
             return FakeSession(kwargs)
@@ -387,6 +386,8 @@ async def test_timeout_is_non_transient_and_tears_down(copilot_sdk, tmp_path):
     assert ei.value.transient is False
     assert "timed out" in str(ei.value)
     assert copilot_sdk.captured["stopped"] == 1  # client torn down despite the timeout
+    # The headline leak scenario: a session was created before the timeout, so it must be deleted.
+    assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
 
 
 async def test_deletes_session_before_stop(copilot_sdk, tmp_path):
@@ -445,21 +446,23 @@ async def test_delete_session_hang_is_bounded(copilot_sdk, tmp_path, monkeypatch
     copilot_sdk.set_delete_delay(0.5)  # > grace → wait_for bounds it out
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"  # the bounded-out delete didn't mask the result
+    order = copilot_sdk.captured["teardown_order"]
+    # delete was attempted, then bounded out (we reached stop despite the 0.5s > 0.05s grace).
+    assert order.index("delete") < order.index("stop")
     assert copilot_sdk.captured["stopped"] == 1  # stop() still ran after the delete was bounded
 
 
 def test_real_sdk_session_contract_pinned():
-    # Tier-2 SDK-drift pin for the leak fix: it calls client.delete_session(session_id), passes a
-    # pre-generated session_id to create_session, and reads session.session_id. If a copilot-sdk
-    # upgrade renames/moves any of these, the faked tests still pass but the real run re-leaks — so
-    # pin the real symbols here.
+    # Tier-2 SDK-drift pin for the leak fix: it passes a pre-generated session_id to create_session
+    # (the SDK allocates the session under that id) and deletes it via delete_session(session_id).
+    # If a copilot-sdk upgrade renames/moves either param the faked tests still pass but the real
+    # run re-leaks, so pin the real symbols here.
     import inspect
 
-    from copilot import CopilotClient, CopilotSession
+    from copilot import CopilotClient
 
-    assert "session_id" in inspect.signature(CopilotClient.delete_session).parameters
     assert "session_id" in inspect.signature(CopilotClient.create_session).parameters
-    assert "session_id" in inspect.signature(CopilotSession.__init__).parameters
+    assert "session_id" in inspect.signature(CopilotClient.delete_session).parameters
 
 
 async def test_sdk_runs_off_the_caller_thread(copilot_sdk, tmp_path):
