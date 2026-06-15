@@ -122,6 +122,7 @@ def copilot_sdk(monkeypatch):
         "deleted": [],  # session_ids passed to delete_session (the leak-cleanup)
         "teardown_order": [],  # sequence of "delete"/"stop"/"force_stop" to assert ordering
         "session_id": None,  # the id the fake session handed out
+        "delete_completed": False,  # True only if delete ran fully (not bounded out by wait_for)
     }
 
     def _next_turn() -> dict:
@@ -133,8 +134,6 @@ def copilot_sdk(monkeypatch):
         def __init__(self, create_kwargs: dict) -> None:
             self._handlers: list = []
             captured["create_kwargs"] = create_kwargs
-            # Adapter always passes a pre-generated session_id (the id it deletes in teardown).
-            self.session_id = create_kwargs["session_id"]
 
         def on(self, handler):
             self._handlers.append(handler)
@@ -184,6 +183,7 @@ def copilot_sdk(monkeypatch):
             captured["deleted"].append(session_id)
             if state["delete_delay"]:
                 await asyncio.sleep(state["delete_delay"])
+            captured["delete_completed"] = True  # not reached if wait_for cancels the sleep
             if state["delete_error"] is not None:
                 raise state["delete_error"]
 
@@ -447,22 +447,10 @@ async def test_delete_session_hang_is_bounded(copilot_sdk, tmp_path, monkeypatch
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert out.review.verdict == "approve"  # the bounded-out delete didn't mask the result
     order = copilot_sdk.captured["teardown_order"]
-    # delete was attempted, then bounded out (we reached stop despite the 0.5s > 0.05s grace).
-    assert order.index("delete") < order.index("stop")
+    assert order.index("delete") < order.index("stop")  # delete attempted, then we reached stop
+    # The bound actually fired: the delete was cancelled mid-sleep, so it never ran to completion.
+    assert copilot_sdk.captured["delete_completed"] is False
     assert copilot_sdk.captured["stopped"] == 1  # stop() still ran after the delete was bounded
-
-
-def test_real_sdk_session_contract_pinned():
-    # Tier-2 SDK-drift pin for the leak fix: it passes a pre-generated session_id to create_session
-    # (the SDK allocates the session under that id) and deletes it via delete_session(session_id).
-    # If a copilot-sdk upgrade renames/moves either param the faked tests still pass but the real
-    # run re-leaks, so pin the real symbols here.
-    import inspect
-
-    from copilot import CopilotClient
-
-    assert "session_id" in inspect.signature(CopilotClient.create_session).parameters
-    assert "session_id" in inspect.signature(CopilotClient.delete_session).parameters
 
 
 async def test_sdk_runs_off_the_caller_thread(copilot_sdk, tmp_path):
@@ -920,6 +908,10 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     create = inspect.signature(CopilotClient.create_session).parameters
     for kw in ("model", "reasoning_effort", "on_permission_request", "working_directory"):
         assert kw in create, f"CopilotClient.create_session no longer accepts {kw}"
+    # Leak fix: it pre-generates session_id, passes it to create_session, and deletes it via
+    # delete_session(session_id) in teardown — pin both params so a rename re-leaks loudly here.
+    assert "session_id" in create
+    assert "session_id" in inspect.signature(CopilotClient.delete_session).parameters
     send = inspect.signature(CopilotSession.send_and_wait).parameters
     assert "timeout" in send, "CopilotSession.send_and_wait no longer accepts timeout"
     # The override path depends on for_stdio(path=...); the usage path on session.on(handler).

@@ -202,9 +202,10 @@ class CopilotAdapter:
         only when a timeout is set; a timeout is fail-fast (non-transient), matching every other
         adapter. ALL teardown is `_teardown_client` in the outer finally — OUTSIDE the review
         timeout and bounded — so a slow/hung teardown can neither consume the review timeout nor
-        mask a valid parsed result (we don't disconnect the session explicitly: client.stop()
-        destroys it, and force_stop() is the hard-kill fallback). On the daemon thread a wedged
-        teardown can't block aeview; the subprocess finishes (subtree-kill is deferred I6b-2)."""
+        mask a valid parsed result (teardown deletes this session's disk state, then stop()s the
+        client, with force_stop() as the hard-kill fallback — see _teardown_client). On the daemon
+        thread a wedged teardown can't block aeview; the subprocess finishes (subtree-kill is
+        deferred I6b-2)."""
         collector = _UsageCollector()
         writer = EventLogWriter(log_path, harness=self.name, model=model)
         client: CopilotClient | None = None
