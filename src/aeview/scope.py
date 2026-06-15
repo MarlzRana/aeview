@@ -399,9 +399,10 @@ def _parse_commit_refs(value: str | None) -> list[str]:
     if not refs:
         raise ScopeError("commits scope needs at least one commit ref (e.g. commits:<sha>)")
     for ref in refs:
-        # A leading '-' would reach `git show` as an option; '..' is a range -> use range:.
-        if ref.startswith("-"):
-            raise ScopeError(f"commit ref may not start with '-': {ref!r}")
+        # Leading '-' reaches `git show` as an option; leading '^' is a negation that silently
+        # yields an empty review; '..' is a range. None names a commit to show -> reject.
+        if ref.startswith(("-", "^")):
+            raise ScopeError(f"commit ref may not start with '-' or '^': {ref!r}")
         if ".." in ref:
             raise ScopeError(f"'{ref}' looks like a range; use --scope range:{ref}")
     return refs

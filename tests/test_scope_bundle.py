@@ -52,6 +52,13 @@ def test_parse_scope_range_requires_a_range():
     assert parse_scope("range:A...B") == ("range", "A...B")
 
 
+def test_parse_scope_commits_list_and_bare():
+    # commits is a known type, not value-required: bare passes through (-> HEAD at resolve), and a
+    # comma-list is carried verbatim for _parse_commit_refs to split.
+    assert parse_scope("commits:a,b,c") == ("commits", "a,b,c")
+    assert parse_scope("commits") == ("commits", None)
+
+
 # --- working-tree / staged ------------------------------------------------------------
 
 
@@ -146,6 +153,25 @@ def test_commits_rejects_range_item(git_repo):
 def test_commits_nonexistent_ref_raises(git_repo):
     with pytest.raises(ScopeError, match="does not exist"):
         _resolve(git_repo, "commits", "deadbeefdeadbeef")
+
+
+def test_commits_rejects_option_or_negation_non_first_item(git_repo):
+    # The first item is caught by parse_scope's whole-value guard; a *later* item is caught by the
+    # per-item rail. '^sha' is a negation that `git show` silently resolves to an empty diff.
+    sha = git(git_repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(ScopeError, match="may not start with"):
+        _resolve(git_repo, "commits", f"{sha},--output=x")
+    with pytest.raises(ScopeError, match="may not start with"):
+        _resolve(git_repo, "commits", f"{sha},^{sha}")
+
+
+def test_commits_normalizes_whitespace_and_preserves_order(git_repo):
+    # Surrounding/interior whitespace stripped, empty segments dropped, dups removed, and the user's
+    # order kept (git show emits in arg order, so the base label records that order, not sorted).
+    first = git(git_repo, "rev-parse", "HEAD").strip()
+    second = commit(git_repo, "b.py", "b = 1\n", "add b")
+    r = _resolve(git_repo, "commits", f"  {second} , {first} ,, {second} ")
+    assert r.spec.base == f"{second},{first}"
 
 
 def test_range_diff(git_repo):

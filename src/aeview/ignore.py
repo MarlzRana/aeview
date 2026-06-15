@@ -14,8 +14,11 @@ residual, accepted leak (this is query-cleanliness, not a security boundary, and
 anywhere by design).
 
 Known limitations:
-- Merge commits reviewed via `commit:<merge-sha>` produce a combined diff (`diff --cc`), which is
+- Merge commits reviewed via `commits:<merge-sha>` produce a combined diff (`diff --cc`), which is
   not split into per-file blocks here, so it passes through unfiltered.
+- A multi-ref `commits:a,b` diff interleaves each commit's `git show` header between file blocks.
+  The header binds to the preceding block, so dropping an ignored block can also drop the next
+  commit's header. Filtering correctness is unaffected; only that cosmetic header is lost.
 - Paths git renders specially (non-ASCII is handled via `core.quotePath=false`; embedded spaces or
   control chars in the `diff --git` header are best-effort) may not match.
 """
