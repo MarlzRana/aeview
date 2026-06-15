@@ -1,0 +1,43 @@
+# Build the sdist + wheel and publish them to PyPI on a version tag.
+#
+# Triggered ONLY by pushing a tag like `v0.0.1`, so it stays dormant until a real release.
+# Auth is PyPI Trusted Publishing (OIDC) — no stored token. Before the first publish a matching
+# "pending publisher" must be configured on PyPI for this repo + this workflow (`release.yml`) +
+# the `pypi` environment (one-time setup; see the I12c publish steps).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aeview
+    permissions:
+      id-token: write # OIDC for Trusted Publishing; scoped to this job only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.14"
+      - name: Verify the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match pyproject version $pkg"
+            exit 1
+          fi
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
