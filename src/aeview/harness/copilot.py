@@ -225,7 +225,8 @@ class CopilotAdapter:
                 # Pre-generate the id and pass it to create_session so teardown can delete this
                 # session on any path it may have been allocated — even a create that times out or
                 # errors mid-allocation. The SDK allocates under exactly this id (it raises if the
-                # runtime returns a different id). Deleting a never-allocated id raises, suppressed.
+                # runtime returns a different id). Deleting a never-allocated id raises, suppressed;
+                # cleanup of an interrupted create is best-effort (it can race a late allocation).
                 session_id = str(uuid.uuid4())
                 session = await client.create_session(
                     session_id=session_id,
@@ -380,23 +381,26 @@ async def _teardown_client(client: CopilotClient, session_id: str | None) -> Non
     # Best-effort, bounded teardown. First delete THIS review's on-disk session: stop() only
     # disconnects (the SDK keeps session-state/<id> for resume), and aeview never resumes — so
     # without this each review leaks a ~/.copilot session dir. delete_session needs the live
-    # connection, so it MUST run before stop(); it's bounded + suppressed like stop() (a hung or
-    # failed delete can't mask the result or block, and stop() still runs after). Only our own
+    # connection, so it MUST run before stop(); it's bounded + suppressed (a hung/failed delete
+    # can't mask the result or block). The delete sits in a try/finally so stop() still runs even if
+    # delete raises something suppress(Exception) can't catch (e.g. a BaseException). Only our own
     # session_id is deleted, never the user's other ~/.copilot sessions.
-    if session_id is not None:
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(client.delete_session(session_id), timeout=_TEARDOWN_GRACE)
-    # stop() disconnects sessions + awaits a destroy RPC (which can hang on a dead connection)
-    # before its own bounded terminate→kill, so cap it and fall back to force_stop() (the SDK's
-    # escape for a stuck stop()). A teardown that raises or hangs must neither mask a valid parsed
-    # result nor block — on the daemon thread a wedged teardown only abandons the subprocess (it
-    # finishes on its own; clean subtree-kill is deferred I6b-2).
     try:
-        await asyncio.wait_for(client.stop(), timeout=_TEARDOWN_GRACE)
-    except Exception:  # noqa: BLE001 - bounded; fall back to the hard kill, never propagate
-        # force_stop() can also hang on a stuck transport, so bound it too (and suppress errors).
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(client.force_stop(), timeout=_TEARDOWN_GRACE)
+        if session_id is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.delete_session(session_id), timeout=_TEARDOWN_GRACE)
+    finally:
+        # stop() disconnects sessions + awaits a destroy RPC (which can hang on a dead connection)
+        # before its own bounded terminate→kill, so cap it and fall back to force_stop() (the SDK's
+        # escape for a stuck stop()). A teardown that raises or hangs must neither mask a valid
+        # parsed result nor block — on the daemon thread a wedged teardown only abandons the
+        # subprocess (it finishes on its own; clean subtree-kill is deferred I6b-2).
+        try:
+            await asyncio.wait_for(client.stop(), timeout=_TEARDOWN_GRACE)
+        except Exception:  # noqa: BLE001 - bounded; fall back to the hard kill, never propagate
+            # force_stop() can also hang on a stuck transport, so bound + suppress it too.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.force_stop(), timeout=_TEARDOWN_GRACE)
 
 
 async def _run_turns(

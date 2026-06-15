@@ -418,25 +418,24 @@ async def test_session_deleted_even_when_the_run_fails(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
 
 
-async def test_create_failure_still_attempts_delete(copilot_sdk, tmp_path):
-    # The id is pre-generated and passed to create_session, so even if create fails after the
-    # runtime may have allocated the dir, teardown still tries to delete that id (best-effort,
-    # suppressed if nothing was allocated) — then stops the client.
-    copilot_sdk.set_create_error(RuntimeError("handshake failed"))
-    with pytest.raises(AdapterError):
+async def test_stop_runs_even_if_delete_raises_baseexception(copilot_sdk, tmp_path):
+    # delete is suppressed for Exceptions, but a BaseException (e.g. cancellation) would escape the
+    # suppress; the try/finally guarantees stop() still runs before it propagates.
+    class _Boom(BaseException):
+        pass
+
+    copilot_sdk.set_delete_error(_Boom())
+    with pytest.raises(_Boom):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
-    assert copilot_sdk.captured["stopped"] == 1
+    assert copilot_sdk.captured["stopped"] == 1  # stop() ran despite the BaseException from delete
 
 
-async def test_no_delete_when_start_fails(copilot_sdk, tmp_path):
-    # start() failing means the runtime never connected and no session id was generated yet, so
-    # delete is skipped (session_id stays None) — the client is still torn down.
-    copilot_sdk.set_start_error(RuntimeError("spawn failed"))
-    with pytest.raises(AdapterError):
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert copilot_sdk.captured["deleted"] == []  # nothing was allocated → nothing to delete
-    assert copilot_sdk.captured["stopped"] == 1
+async def test_each_run_gets_a_distinct_session_id(copilot_sdk, tmp_path):
+    # The id is generated per review (uuid4), so two runs delete two DIFFERENT sessions — a
+    # regression to a constant/shared id (which would collide and mis-delete) is caught here.
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert len(set(copilot_sdk.captured["deleted"])) == 2
 
 
 async def test_delete_session_hang_is_bounded(copilot_sdk, tmp_path, monkeypatch):
@@ -1175,6 +1174,7 @@ async def test_start_failure_is_normalized_and_torn_down(copilot_sdk, tmp_path):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is True
     assert copilot_sdk.captured["stopped"] == 1  # torn down after a failed start
+    assert copilot_sdk.captured["deleted"] == []  # no id generated before start → nothing to delete
 
 
 async def test_create_session_failure_is_normalized_and_torn_down(copilot_sdk, tmp_path):
@@ -1183,6 +1183,8 @@ async def test_create_session_failure_is_normalized_and_torn_down(copilot_sdk, t
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is False
     assert copilot_sdk.captured["stopped"] == 1
+    # The id is pre-generated, so teardown best-effort deletes it even when create fails.
+    assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
 
 
 async def test_raising_force_stop_does_not_break_the_result(copilot_sdk, tmp_path):
