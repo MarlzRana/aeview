@@ -4,6 +4,9 @@
 # Auth is PyPI Trusted Publishing (OIDC) — no stored token. Before the first publish a matching
 # "pending publisher" must be configured on PyPI for this repo + this workflow (`release.yml`) +
 # the `pypi` environment (one-time setup; see the I12c publish steps).
+#
+# Every action is pinned to a commit SHA (Dependabot bumps them): a job that mints the OIDC token
+# and uploads to the immutable index must not run mutable action refs.
 name: Release
 
 on:
@@ -11,8 +14,14 @@ on:
     tags:
       - "v*"
 
+# Restrictive default for the whole workflow; any job that omits its own block inherits this.
 permissions:
   contents: read
+
+# Serialize releases so two tag pushes can't race the (immutable) PyPI upload.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   pypi-publish:
@@ -22,25 +31,23 @@ jobs:
       name: pypi
       url: https://pypi.org/p/aeview
     permissions:
-      contents: read # job-level perms fully replace the workflow default, so re-grant the checkout read
+      contents: read # job-level perms fully replace the workflow default, so re-grant checkout read
       id-token: write # OIDC for Trusted Publishing; scoped to this job only
     steps:
-      # The third-party action in this publish job is pinned to a commit SHA (Dependabot bumps it);
-      # actions/checkout is first-party and pypa's action tracks its security-maintained release/v1.
-      - uses: actions/checkout@v4
-      - name: Install uv
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install uv + Python 3.14
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.14"
+      - run: uv python install 3.14
       - name: Verify the tag matches the package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+          pkg="$(uv version --short)"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match pyproject version $pkg"
             exit 1
           fi
       - name: Build sdist + wheel
         run: uv build
-      - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
