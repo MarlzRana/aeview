@@ -114,15 +114,16 @@ def run(
             # aligned in the option column instead of being reflowed into a paragraph.
             help=(
                 "\b\n"
-                "What to review (<type>[:value]; default auto):\n"
+                "What to review (<type>[:value]; omit --scope for auto).\n"
+                "'bare =' is the default when no :value is given:\n"
                 "working-tree         all uncommitted changes\n"
                 "staged               only the staged changes\n"
-                "branch[:base]        commits your branch added vs base\n"
-                "pr[:number]          a GitHub PR's diff\n"
-                "effective-pr[:base]  branch + uncommitted vs fetched base\n"
-                "commits[:a,b,c]      one or more commits (bare = HEAD)\n"
-                "range:A..B           all changes between A and B\n"
-                "patch:file           a diff from a file (or - for stdin)\n"
+                "branch[:base]        your branch vs base (bare = auto)\n"
+                "pr[:number]          a PR's diff (bare = current branch)\n"
+                "effective-pr[:base]  branch + dirty vs base (bare = auto)\n"
+                "commits[:a,b,c]      the commits listed (bare = HEAD)\n"
+                "range:A..B           between A and B (value required)\n"
+                "patch:file           a diff file, or - (value required)\n"
                 "auto                 dirty -> working-tree, else branch"
             ),
             show_default=False,  # the help text already states "default auto"
