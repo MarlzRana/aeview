@@ -237,7 +237,7 @@ context) but cannot modify your repo. Claude Code and Codex enforce this with th
 read-only sandboxes; Copilot uses a deny-by-default permission handler that only approves reads.
 
 Each SDK ships a **pinned binary**, so aeview is insulated from your own CLI upgrades. To point a
-harness at a different binary, set [`harnessBinaries`](#configuration).
+harness at a different binary, set [`overrideHarnessBinaries`](#configuration).
 
 ## Configuration
 
@@ -252,7 +252,7 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
   "deduplicationHarness": { "harness": "claude-code", "model": "claude-opus-4-8" },
   "retention": { "keepLast": 20, "ttlDays": 14 },
   "reviewTimeoutSeconds": 1200,
-  "harnessBinaries": { "codex": "/usr/local/bin/codex" }
+  "overrideHarnessBinaries": { "codex": "/usr/local/bin/codex" }
 }
 ```
 
@@ -262,7 +262,7 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
 | `deduplicationHarness` | The harness used to deduplicate findings across the panel. |
 | `retention` | Auto-prune old runs: keep at least the newest `keepLast`, and drop runs that are *also* older than `ttlDays` days. |
 | `reviewTimeoutSeconds` | Timeout (seconds) per harness attempt; transient errors retry, so a review's total time can exceed it. A timed-out review fails fast (no retry); `resume` re-runs it. |
-| `harnessBinaries` | Optional per-harness override of the bundled CLI binary, by path. Keys: `claude-code`, `codex`, `copilot`. |
+| `overrideHarnessBinaries` | Optional per-harness override of the bundled CLI binary, by path. Keys: `claude-code`, `codex`, `copilot`. |
 
 ## Commands
 

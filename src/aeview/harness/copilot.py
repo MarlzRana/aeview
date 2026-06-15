@@ -3,7 +3,7 @@
 Runs GitHub Copilot through the `github-copilot-sdk` (`CopilotClient().create_session(...)` +
 `session.send_and_wait(...)`) instead of shelling out to the `copilot` CLI. The SDK resolves its
 own bundled `copilot` binary by default (shipped in the platform wheel); a
-`settings.harnessBinaries["copilot"]` entry overrides it via `RuntimeConnection.for_stdio`.
+`settings.overrideHarnessBinaries["copilot"]` entry overrides it via `RuntimeConnection.for_stdio`.
 
 Copilot has no schema flag (`schema_support="prompt"`): the wanted JSON Schema is appended to the
 prompt with a strict "return ONLY this JSON" instruction, and aeview validates + re-prompts once on
@@ -82,8 +82,9 @@ class CopilotAdapter:
     auth_status_args: list[str] = []  # no no-cost auth probe; preflight warns  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
-        # settings.harnessBinaries["copilot"], threaded to the SDK via RuntimeConnection.for_stdio.
-        # None (incl. an empty string) → the SDK's bundled copilot binary.
+        # settings.overrideHarnessBinaries["copilot"], threaded to the SDK via
+        # RuntimeConnection.for_stdio. None (incl. an empty string) → the SDK's bundled
+        # copilot binary.
         self._copilot_bin = binary_override or None
         self.binary = binary_override or "copilot"  # protocol attr / doctor display
 

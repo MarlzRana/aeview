@@ -78,7 +78,7 @@ class Settings(BaseModel):
     # Per-harness binary path override, keyed by harness name (claude-code/codex/copilot). Each
     # harness SDK resolves its own bundled binary by default; an entry here points it at a specific
     # executable instead (claude `cli_path`, codex/copilot argv[0]). Absent/empty → SDK default.
-    harness_binaries: dict[str, str] = Field(default_factory=dict)
+    override_harness_binaries: dict[str, str] = Field(default_factory=dict)
 
 
 def _package_data(name: str) -> str:

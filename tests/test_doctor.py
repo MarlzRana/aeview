@@ -80,7 +80,7 @@ def test_doctor_bad_override_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     settings = Settings(
         deduplication_harness=HarnessInstance(harness="copilot", model="gpt-5.4"),
-        harness_binaries={"copilot": "/nonexistent/copilot"},
+        override_harness_binaries={"copilot": "/nonexistent/copilot"},
     )
     report = doctor.run_doctor(tmp_path, settings)
     assert not report.ok
@@ -155,8 +155,8 @@ def test_doctor_copilot_warns_present_but_unverifiable(tmp_path, monkeypatch):
 
 
 def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
-    # settings.harnessBinaries reaches the harness check: codex's preflight resolves the OVERRIDE
-    # path (via which), not the bundled binary.
+    # settings.overrideHarnessBinaries reaches the harness check: codex's preflight resolves
+    # the OVERRIDE path (via which), not the bundled binary.
     from aeview.harness import codex
 
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])
@@ -172,7 +172,7 @@ def test_doctor_passes_binary_override_to_the_adapter(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "run_sync", _run_sync_rc(0))
     settings = Settings(
         deduplication_harness=HarnessInstance(harness="codex", model="sonnet"),
-        harness_binaries={"codex": "/opt/codex"},
+        override_harness_binaries={"codex": "/opt/codex"},
     )
     doctor.run_doctor(tmp_path, settings)
     assert "/opt/codex" in checked  # the override path is what was resolved

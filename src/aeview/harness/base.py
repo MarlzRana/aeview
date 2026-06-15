@@ -119,7 +119,7 @@ class Adapter(Protocol):
 
     def preflight(self) -> Preflight:
         """Doctor check: is this harness's binary resolvable and (where probeable) authed? The
-        adapter is constructed via get_adapter() with its settings.harnessBinaries override
+        adapter is constructed via get_adapter() with its settings.overrideHarnessBinaries override
         already applied, so this reads the adapter's own resolved binary — no override arg."""
         ...
 

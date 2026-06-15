@@ -323,8 +323,8 @@ async def test_no_usage_events_yields_zero(copilot_sdk, tmp_path):
 
 
 async def test_binary_override_threads_to_stdio_connection(copilot_sdk, tmp_path, monkeypatch):
-    # settings.harnessBinaries["copilot"] reaches RuntimeConnection.for_stdio(path=...). An absolute
-    # path which can't resolve is passed verbatim (so the SDK fails loud, not silently bundled).
+    # settings.overrideHarnessBinaries["copilot"] reaches RuntimeConnection.for_stdio(path=...).
+    # An absolute path which can't resolve is passed verbatim (so the SDK fails loud, not bundled).
     monkeypatch.setattr(copilot, "which", lambda b: None)
     recorded: dict = {}
 

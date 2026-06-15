@@ -673,13 +673,17 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
 
     aeview_home.mkdir(parents=True, exist_ok=True)
     (aeview_home / "settings.json").write_text(
-        json.dumps({"reviewTimeoutSeconds": 777, "harnessBinaries": {"claude-code": "/z/claude"}})
+        json.dumps(
+            {"reviewTimeoutSeconds": 777, "overrideHarnessBinaries": {"claude-code": "/z/claude"}}
+        )
     )
     captured: dict = {}
 
-    async def fake_fan_out(store, roster, prompts, cwd, timeout=None, harness_binaries=None):
+    async def fake_fan_out(
+        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None
+    ):
         captured["timeout"] = timeout
-        captured["harness_binaries"] = harness_binaries
+        captured["override_harness_binaries"] = override_harness_binaries
         return []
 
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
@@ -699,7 +703,8 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     store.write_review(_review("default__a", "running"))
     runner.invoke(app, ["resume", "t"])
     assert captured["timeout"] == 777  # the configured per-review timeout reaches the fan-out
-    assert captured["harness_binaries"] == {"claude-code": "/z/claude"}  # override threads too
+    # the override map threads through to the fan-out too
+    assert captured["override_harness_binaries"] == {"claude-code": "/z/claude"}
 
 
 def test_resume_missing_prompt_exits_error(aeview_home):
@@ -738,7 +743,7 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
     )
     seen: dict = {}
 
-    async def fake_fan_out(s, roster, prompts, cwd, timeout=None, harness_binaries=None):
+    async def fake_fan_out(s, roster, prompts, cwd, timeout=None, override_harness_binaries=None):
         seen["report_existed"] = (s.dir / "report.json").exists()
         return []
 

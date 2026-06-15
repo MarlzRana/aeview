@@ -219,8 +219,8 @@ async def test_usage_none_yields_zero(codex_sdk, tmp_path):
 
 
 async def test_binary_override_threads_to_codex_bin(codex_sdk, tmp_path):
-    # settings.harnessBinaries["codex"] reaches CodexConfig.codex_bin. An absolute path that which
-    # can't resolve is passed through verbatim (so the SDK fails loud rather than using the bundle).
+    # settings.overrideHarnessBinaries["codex"] reaches CodexConfig.codex_bin. An absolute path
+    # that which can't resolve is passed through verbatim (so the SDK fails loud, not the bundle).
     await codex.CodexAdapter("/custom/codex").run("p", "gpt-5.5", tmp_path, tmp_path / "log")
     assert codex_sdk.captured["config"].codex_bin == "/custom/codex"
 

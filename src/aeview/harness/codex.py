@@ -3,8 +3,8 @@
 Runs Codex through the `openai-codex` SDK (`AsyncCodex().thread_start(...)` + a streamed `turn()`,
 so every notification tees to the live event log) instead of shelling out to `codex exec`. The SDK
 resolves its own bundled `codex` binary by default (the
-`openai-codex-cli-bin` dep wheel); a `settings.harnessBinaries["codex"]` entry overrides it via
-`CodexConfig.codex_bin`.
+`openai-codex-cli-bin` dep wheel); a `settings.overrideHarnessBinaries["codex"]` entry
+overrides it via `CodexConfig.codex_bin`.
 
 Read-only is Codex's native `sandbox=read-only` + `approval_mode=deny_all` (== approval policy
 "never"): the sandbox allows reads anywhere on disk (rg / read-only git still work) and blocks all
@@ -88,8 +88,8 @@ class CodexAdapter:
     auth_status_args: list[str] = ["login", "status"]  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
-        # settings.harnessBinaries["codex"], threaded to the SDK via CodexConfig.codex_bin. None
-        # (incl. an empty string) → the SDK's bundled codex binary.
+        # settings.overrideHarnessBinaries["codex"], threaded to the SDK via CodexConfig.codex_bin.
+        # None (incl. an empty string) → the SDK's bundled codex binary.
         self._codex_bin = binary_override or None
         self.binary = binary_override or "codex"  # protocol attr / doctor display
 

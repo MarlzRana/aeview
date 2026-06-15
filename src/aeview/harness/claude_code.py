@@ -2,7 +2,7 @@
 
 Runs Claude Code through the `claude-agent-sdk` Python SDK (`query`) instead of shelling out to
 the `claude` CLI. The SDK resolves its own bundled `claude` binary by default; a
-`settings.harnessBinaries["claude-code"]` entry overrides it via `cli_path`.
+`settings.overrideHarnessBinaries["claude-code"]` entry overrides it via `cli_path`.
 
 Read-only is the same two-layer defense the CLI path used, preserved byte-for-byte:
 - the OS sandbox, passed through the SDK's `settings=` field (an inline JSON string ==
@@ -82,8 +82,8 @@ class ClaudeCodeAdapter:
     auth_status_args: list[str] = ["auth", "status"]  # noqa: RUF012
 
     def __init__(self, binary_override: str | None = None) -> None:
-        # settings.harnessBinaries["claude-code"], threaded to the SDK as cli_path. None (incl. an
-        # empty string) → the SDK's own resolution (bundled binary, then PATH).
+        # settings.overrideHarnessBinaries["claude-code"], threaded to the SDK as cli_path.
+        # None (incl. an empty string) → the SDK's own resolution (bundled binary, then PATH).
         self._cli_path = binary_override or None
 
     async def run_structured(

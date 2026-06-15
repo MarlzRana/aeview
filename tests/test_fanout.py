@@ -124,8 +124,8 @@ async def test_failed_review_persisted_to_disk(aeview_home, monkeypatch):
 
 
 async def test_fan_out_resolves_binary_override_per_harness(aeview_home, monkeypatch):
-    # fan_out resolves harness_binaries[entry.harness] PER harness and passes the resolved path to
-    # get_adapter — each worker gets its own harness's override, not the whole map.
+    # fan_out resolves override_harness_binaries[entry.harness] PER harness and passes
+    # the resolved path to get_adapter — each worker gets its own harness's override, not the map.
     seen: dict = {}
 
     def fake_get_adapter(harness, override=None):
@@ -143,6 +143,6 @@ async def test_fan_out_resolves_binary_override_per_harness(aeview_home, monkeyp
         entries,
         {"default": "p", "r": "p"},
         aeview_home,
-        harness_binaries={"claude-code": "/a/claude", "codex": "/b/codex"},
+        override_harness_binaries={"claude-code": "/a/claude", "codex": "/b/codex"},
     )
     assert seen == {"claude-code": "/a/claude", "codex": "/b/codex"}

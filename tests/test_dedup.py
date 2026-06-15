@@ -45,7 +45,7 @@ class _StubAdapter:
 
 
 async def test_run_dedup_threads_override_to_get_adapter(aeview_home, monkeypatch, tmp_path):
-    # The dedup harness honors settings.harnessBinaries too (run_dedup → get_adapter).
+    # The dedup harness honors settings.overrideHarnessBinaries too (run_dedup → get_adapter).
     seen: dict = {}
 
     def fake_get_adapter(harness, override=None):

@@ -112,9 +112,9 @@ async def fan_out(
     prompt_by_reviewer: dict[str, str],
     cwd: Path,
     timeout: float | None = None,
-    harness_binaries: dict[str, str] | None = None,
+    override_harness_binaries: dict[str, str] | None = None,
 ) -> list[ReviewResult]:
-    overrides = harness_binaries or {}
+    overrides = override_harness_binaries or {}
     # Resolve each entry's binary override here (per harness) so the workers carry just the
     # resolved path, not the whole map.
     tasks = [

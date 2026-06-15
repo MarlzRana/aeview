@@ -283,8 +283,8 @@ def test_resolve_cli_default_resolves_a_real_binary():
 
 
 def test_empty_override_normalizes_to_sdk_default():
-    # An empty harnessBinaries entry must not become cli_path="" (which the SDK treats as a path);
-    # it coerces to None so the SDK uses its own resolution.
+    # An empty overrideHarnessBinaries entry must not become cli_path=""
+    # (which the SDK treats as a path); it coerces to None so the SDK uses its own resolution.
     assert claude_code.ClaudeCodeAdapter("")._cli_path is None
 
 

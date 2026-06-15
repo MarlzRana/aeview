@@ -383,18 +383,22 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> Report:
         prompt_by_reviewer,
         cwd,
         settings.review_timeout_seconds,
-        settings.harness_binaries,
+        settings.override_harness_binaries,
     )
 
 
-def _merge_settings(dedup: DedupPlan | None, harness_binaries: dict[str, str]) -> Settings:
+def _merge_settings(dedup: DedupPlan | None, override_harness_binaries: dict[str, str]) -> Settings:
     """Settings carrying the run's *pinned* dedup harness (so a re-merge uses the harness frozen in
-    run.json, never whatever settings.json says now) plus the live harnessBinaries overrides — a
+    run.json, never whatever settings.json says now) plus the live binary-path overrides — a
     binary path is an install/env concern read live, not part of the pinned review identity."""
     if dedup is None:
-        return Settings(deduplication_harness=None, harness_binaries=harness_binaries)
+        return Settings(
+            deduplication_harness=None, override_harness_binaries=override_harness_binaries
+        )
     instance = HarnessInstance(harness=dedup.harness, model=dedup.model, thinking=dedup.thinking)
-    return Settings(deduplication_harness=instance, harness_binaries=harness_binaries)
+    return Settings(
+        deduplication_harness=instance, override_harness_binaries=override_harness_binaries
+    )
 
 
 async def _run_reviews_and_merge(
@@ -404,17 +408,17 @@ async def _run_reviews_and_merge(
     prompt_by_reviewer: dict[str, str],
     cwd: Path,
     timeout: float | None,
-    harness_binaries: dict[str, str],
+    override_harness_binaries: dict[str, str],
 ) -> Report:
     """Run the given roster entries (fresh run = all; resume = the non-done subset), then merge
     *all* on-disk reviews. The shared core of `run` and `resume`: it reads the persisted prompts
     + frozen bundle and re-merges via the run.json-pinned dedup plan, so completion truth comes
-    from the run dir, not the in-memory plan. `harness_binaries` (live) feeds the binary override
-    to both the review fan-out and the dedup harness."""
+    from the run dir, not the in-memory plan. The live binary overrides feed both the review
+    fan-out and the dedup harness."""
     if entries:
-        await fan_out(store, entries, prompt_by_reviewer, cwd, timeout, harness_binaries)
+        await fan_out(store, entries, prompt_by_reviewer, cwd, timeout, override_harness_binaries)
     report = await merge_reviews(
-        store.read_reviews(), _merge_settings(manifest.dedup, harness_binaries), store, cwd
+        store.read_reviews(), _merge_settings(manifest.dedup, override_harness_binaries), store, cwd
     )
     store.write_report(report)
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"
@@ -654,7 +658,7 @@ def resume(
             prompts,
             cwd,
             settings.review_timeout_seconds,
-            settings.harness_binaries,
+            settings.override_harness_binaries,
         )
     )
     _emit_report(report, json_out)

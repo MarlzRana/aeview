@@ -106,7 +106,7 @@ async def _dedup_and_apply(
 
     outcome = await run_dedup(
         pool, instance, store, cwd, DEDUP_TIMEOUT_S,
-        binary_override=settings.harness_binaries.get(instance.harness),
+        binary_override=settings.override_harness_binaries.get(instance.harness),
     )
     if outcome.status != "ok":
         return (

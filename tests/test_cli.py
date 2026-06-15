@@ -250,21 +250,25 @@ def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_cl
     monkeypatch.chdir(git_repo)
     aeview_home.mkdir(parents=True, exist_ok=True)
     (aeview_home / "settings.json").write_text(
-        json.dumps({"reviewTimeoutSeconds": 555, "harnessBinaries": {"claude-code": "/x/claude"}})
+        json.dumps(
+            {"reviewTimeoutSeconds": 555, "overrideHarnessBinaries": {"claude-code": "/x/claude"}}
+        )
     )
     captured: dict = {}
 
-    async def fake_fan_out(store, roster, prompts, cwd, timeout=None, harness_binaries=None):
+    async def fake_fan_out(
+        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None
+    ):
         captured["timeout"] = timeout
-        captured["harness_binaries"] = harness_binaries
+        captured["override_harness_binaries"] = override_harness_binaries
         return []
 
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     CliRunner().invoke(app, ["run", "--scope", "working-tree"])
     assert captured["timeout"] == 555
-    # settings.harnessBinaries also threads to fan_out (the per-harness binary override).
-    assert captured["harness_binaries"] == {"claude-code": "/x/claude"}
+    # settings.overrideHarnessBinaries also threads to fan_out (the per-harness binary override).
+    assert captured["override_harness_binaries"] == {"claude-code": "/x/claude"}
 
 
 def test_dry_run_does_not_write_output(aeview_home, git_repo, tmp_path, monkeypatch):
@@ -446,7 +450,8 @@ def test_merge_settings_carries_the_pinned_dedup_plan():
     pinned = settings.deduplication_harness
     assert pinned is not None
     assert (pinned.harness, pinned.model, pinned.thinking) == ("codex", "gpt-5.5", "high")
-    assert settings.harness_binaries == {"codex": "/x/codex"}  # live overrides ride alongside
+    # live overrides ride alongside the pinned dedup harness
+    assert settings.override_harness_binaries == {"codex": "/x/codex"}
     assert _merge_settings(None, {}).deduplication_harness is None
 
 
