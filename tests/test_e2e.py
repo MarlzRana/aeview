@@ -190,6 +190,18 @@ def test_plan_filters_multi_commit_scope(aeview_home, git_repo):
     assert "one.lock" not in plan.bundle.diff and "two.lock" not in plan.bundle.diff
 
 
+def test_all_ignored_commits_scope_drops_preamble(aeview_home, git_repo):
+    # A commits-scope diff carries a git-show commit-header preamble; when every file block is
+    # ignored, that preamble must drop too so the scope reads empty (not a lone surviving header).
+    commit(git_repo, ".aeviewignore", "*.lock\n", "add ignore")
+    (git_repo / "only.lock").write_text("x\n")
+    git(git_repo, "add", "only.lock")
+    git(git_repo, "commit", "-q", "--no-verify", "-m", "lock only")
+    sha = git(git_repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(ScopeError, match="matched .aeviewignore"):
+        _plan_run(["default"], "commits", sha, git_repo, False, False, None, load_settings())
+
+
 _HARNESS = [{"harness": "claude-code", "model": "opus"}]
 
 

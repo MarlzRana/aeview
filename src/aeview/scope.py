@@ -395,7 +395,7 @@ def _parse_commit_refs(value: str | None) -> list[str]:
     # the user's order. Each is shown against its own parent, never merged into one range diff.
     if value is None:
         return ["HEAD"]
-    refs = list(dict.fromkeys(r.strip() for r in value.split(",") if r.strip()))
+    refs = list(dict.fromkeys(s for r in value.split(",") if (s := r.strip())))
     if not refs:
         raise ScopeError("commits scope needs at least one commit ref (e.g. commits:<sha>)")
     for ref in refs:
