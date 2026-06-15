@@ -84,6 +84,10 @@ class _Controller:
         # (and stop() must still run after).
         self._state["delete_error"] = exc
 
+    def set_delete_delay(self, seconds: float) -> None:
+        # Make client.delete_session() hang so _teardown_client's wait_for must bound it.
+        self._state["delete_delay"] = seconds
+
 
 @pytest.fixture
 def copilot_sdk(monkeypatch):
@@ -102,6 +106,7 @@ def copilot_sdk(monkeypatch):
         "start_error": None,
         "create_error": None,
         "delete_error": None,
+        "delete_delay": 0.0,
     }
     captured: dict = {
         "clients": 0,
@@ -179,6 +184,8 @@ def copilot_sdk(monkeypatch):
         async def delete_session(self, session_id):
             captured["teardown_order"].append("delete")
             captured["deleted"].append(session_id)
+            if state["delete_delay"]:
+                await asyncio.sleep(state["delete_delay"])
             if state["delete_error"] is not None:
                 raise state["delete_error"]
 
@@ -198,6 +205,9 @@ def copilot_sdk(monkeypatch):
 
         async def create_session(self, **kwargs):
             captured["created"] += 1
+            # Capture the adapter's pre-generated session_id even on failure, so a create-error
+            # test can assert teardown still tried to delete it.
+            captured["session_id"] = kwargs.get("session_id")
             if state["create_error"] is not None:
                 raise state["create_error"]
             return FakeSession(kwargs)
@@ -393,7 +403,8 @@ async def test_delete_session_failure_is_suppressed(copilot_sdk, tmp_path):
     # still runs (that one session dir just leaks — best-effort, like the rest of teardown).
     copilot_sdk.set_delete_error(RuntimeError("session.delete failed"))
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert out.review.verdict == "approve"  # result preserved
+    assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]  # delete tried
+    assert out.review.verdict == "approve"  # result preserved despite the delete error
     assert copilot_sdk.captured["stopped"] == 1  # stop() still ran after the failed delete
 
 
@@ -406,14 +417,49 @@ async def test_session_deleted_even_when_the_run_fails(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
 
 
-async def test_no_delete_when_session_never_created(copilot_sdk, tmp_path):
-    # create_session failing means there's no session/dir to clean, so delete_session is skipped
-    # (session_id stays None) — but the client is still torn down.
+async def test_create_failure_still_attempts_delete(copilot_sdk, tmp_path):
+    # The id is pre-generated and passed to create_session, so even if create fails after the
+    # runtime may have allocated the dir, teardown still tries to delete that id (best-effort,
+    # suppressed if nothing was allocated) — then stops the client.
     copilot_sdk.set_create_error(RuntimeError("handshake failed"))
     with pytest.raises(AdapterError):
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert copilot_sdk.captured["deleted"] == []  # nothing to delete
-    assert copilot_sdk.captured["stopped"] == 1  # client still torn down
+    assert copilot_sdk.captured["deleted"] == [copilot_sdk.captured["session_id"]]
+    assert copilot_sdk.captured["stopped"] == 1
+
+
+async def test_no_delete_when_start_fails(copilot_sdk, tmp_path):
+    # start() failing means the runtime never connected and no session id was generated yet, so
+    # delete is skipped (session_id stays None) — the client is still torn down.
+    copilot_sdk.set_start_error(RuntimeError("spawn failed"))
+    with pytest.raises(AdapterError):
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert copilot_sdk.captured["deleted"] == []  # nothing was allocated → nothing to delete
+    assert copilot_sdk.captured["stopped"] == 1
+
+
+async def test_delete_session_hang_is_bounded(copilot_sdk, tmp_path, monkeypatch):
+    # A hung delete_session must be bounded by _TEARDOWN_GRACE (suppressed on timeout) so it can't
+    # block teardown, and stop() still runs after. Shrink the grace so the test isn't slow.
+    monkeypatch.setattr(copilot, "_TEARDOWN_GRACE", 0.05)
+    copilot_sdk.set_delete_delay(0.5)  # > grace → wait_for bounds it out
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert out.review.verdict == "approve"  # the bounded-out delete didn't mask the result
+    assert copilot_sdk.captured["stopped"] == 1  # stop() still ran after the delete was bounded
+
+
+def test_real_sdk_session_contract_pinned():
+    # Tier-2 SDK-drift pin for the leak fix: it calls client.delete_session(session_id), passes a
+    # pre-generated session_id to create_session, and reads session.session_id. If a copilot-sdk
+    # upgrade renames/moves any of these, the faked tests still pass but the real run re-leaks — so
+    # pin the real symbols here.
+    import inspect
+
+    from copilot import CopilotClient, CopilotSession
+
+    assert "session_id" in inspect.signature(CopilotClient.delete_session).parameters
+    assert "session_id" in inspect.signature(CopilotClient.create_session).parameters
+    assert "session_id" in inspect.signature(CopilotSession.__init__).parameters
 
 
 async def test_sdk_runs_off_the_caller_thread(copilot_sdk, tmp_path):

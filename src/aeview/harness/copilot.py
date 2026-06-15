@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import threading
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
@@ -220,15 +221,19 @@ class CopilotAdapter:
                 # the SDK's feature flags (host git ops, skills, MCP, file hooks, config discovery —
                 # all None/off here) at their defaults can't bypass it. We deliberately do NOT add a
                 # second tool-gating layer (the user chose handler-only); live-proven write-nowhere.
+                # Pre-generate the id and pass it to create_session so the finally can delete this
+                # session on EVERY path the runtime may have allocated it — including a create that
+                # times out or errors AFTER allocating the dir but before returning the session.
+                # (stop() preserves the dir; aeview never resumes.) Deleting a never-allocated id is
+                # a harmless suppressed no-op.
+                session_id = str(uuid.uuid4())
                 session = await client.create_session(
+                    session_id=session_id,
                     model=model or None,
                     reasoning_effort=effort,
                     on_permission_request=_deny_by_default_permission,
                     working_directory=cwd,
                 )
-                # Capture the id so the finally can delete this session's disk state on any path
-                # (stop() preserves it; aeview never resumes), not just the success path.
-                session_id = session.session_id
 
                 # One subscription tees every SessionEvent to the live log AND feeds the usage
                 # collector — session.on already delivers the full event stream (we previously kept
