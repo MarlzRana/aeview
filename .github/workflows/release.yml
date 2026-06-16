@@ -43,6 +43,7 @@ jobs:
       - name: Verify the tag matches the package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          # `uv version --short` prints the project version from pyproject, not uv's own version.
           pkg="$(uv version --short)"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match pyproject version $pkg"
@@ -50,4 +51,6 @@ jobs:
           fi
       - name: Build sdist + wheel
         run: uv build
+      - name: Validate the artifacts before the immutable upload
+        run: uvx twine check --strict dist/*
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
