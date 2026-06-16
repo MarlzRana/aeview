@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "aeview"
-version = "0.0.1"
+version = "0.0.2"
 description = "Fan code reviewers across multiple agent harnesses and merge one verdict."
 readme = "README.md"
 requires-python = ">=3.14"
