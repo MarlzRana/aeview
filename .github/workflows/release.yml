@@ -18,9 +18,10 @@ on:
 permissions:
   contents: read
 
-# Serialize releases so two tag pushes can't race the (immutable) PyPI upload.
+# Serialize all releases (one static group) so two tag pushes can't race the immutable PyPI upload;
+# never cancel an in-flight publish.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -35,11 +36,11 @@ jobs:
       id-token: write # OIDC for Trusted Publishing; scoped to this job only
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # python-version sets UV_PYTHON=3.14; uv auto-downloads it on first use (the version read + build).
       - name: Install uv + Python 3.14
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.14"
-      - run: uv python install 3.14
       - name: Verify the tag matches the package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
