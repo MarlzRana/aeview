@@ -69,16 +69,16 @@ Everything is persisted under `~/.aeview/runs/<id>/`, so a killed run can be `re
 ## Install
 
 ```sh
-uv tool install aeview      # recommended
+uv tool install --prerelease=allow aeview   # recommended (see the note); also fetches Python 3.14
 # or
 pipx install aeview
 ```
 
-> **Note — no special flags needed.** aeview currently depends on a *prerelease* Codex runtime
-> (the Codex Python SDK is still in beta), so you'll see `openai-codex` / `openai-codex-cli-bin`
-> alpha/beta versions in your install. Both `uv` and `pip` resolve these automatically because the
-> prerelease markers are baked into aeview's own dependencies — you do **not** need
-> `--prerelease=allow` or `--pre`. (Homebrew support is planned.)
+> **Why `--prerelease=allow` for uv?** aeview pulls a *prerelease* Codex runtime (the Codex Python
+> SDK is still in beta), so you'll see `openai-codex` / `openai-codex-cli-bin` alpha/beta versions.
+> **pip / pipx** allow that automatically (the dependency specifier names the prerelease), but
+> **uv** requires `--prerelease=allow` (or `UV_PRERELEASE=allow`) for a *transitive* prerelease.
+> The flag goes away once `openai-codex` ships a stable release. (Homebrew support is planned.)
 
 After install, sanity-check your setup:
 
