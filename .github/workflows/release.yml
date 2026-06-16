@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # python-version sets UV_PYTHON=3.14; uv auto-downloads it on first use (the version read + build).
       - name: Install uv + Python 3.14
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           python-version: "3.14"
       - name: Verify the tag matches the package version
