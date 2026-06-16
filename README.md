@@ -11,7 +11,7 @@ The bet: a *reviewer* is a versioned artifact (a prompt + the harnesses it runs 
 independent models catches what any single model misses.
 
 ```sh
-uv tool install aeview
+uv tool install --prerelease=allow aeview   # pip/pipx need no flag; see Install
 cd your-repo
 aeview run          # review your current changes (auto mode); exit 1 if anything needs attention
 ```
