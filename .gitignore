@@ -10,3 +10,4 @@ build/
 .pyright/
 .DS_Store
 *.local.md
+.claude/worktrees/
