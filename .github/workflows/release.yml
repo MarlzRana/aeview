@@ -43,8 +43,8 @@ jobs:
       - name: Verify the tag matches the package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          # `uv version --short` prints the project version from pyproject, not uv's own version.
-          pkg="$(uv version --short)"
+          # Read [project].version with a TOML parser on uv's managed Python (no project sync).
+          pkg="$(uv run --no-project python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match pyproject version $pkg"
             exit 1
