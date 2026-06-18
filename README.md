@@ -28,6 +28,7 @@ aeview run          # review your current changes (auto mode); exit 1 if anythin
 - [Reviewers](#reviewers)
 - [Auto mode, activation & `.aeviewignore`](#auto-mode-activation--aeviewignore)
 - [Harnesses](#harnesses)
+- [Deduplication](#deduplication)
 - [Configuration](#configuration)
 - [Commands](#commands)
 - [The report & exit codes](#the-report--exit-codes)
@@ -49,7 +50,7 @@ One `aeview run` does this:
 4. **Fan out** — run every `reviewer × harness` pair concurrently, each in a **read-only** sandbox
    (read anywhere, write nothing). Each emits findings against a fixed schema.
 5. **Dedupe & merge** — an LLM judge groups duplicate findings across the panel; survivors are kept
-   verbatim with their provenance and an agreement count.
+   verbatim with their provenance and an agreement count. See [Deduplication](#deduplication).
 6. **Report** — write `report.json` and exit `0` / `1` / `2`.
 
 Everything is persisted under `~/.aeview/runs/<id>/`, so a killed run can be `resume`d.
@@ -239,6 +240,46 @@ read-only sandboxes; Copilot uses a deny-by-default permission handler that only
 Each SDK ships a **pinned binary**, so aeview is insulated from your own CLI upgrades. To point a
 harness at a different binary, set [`overrideHarnessBinaries`](#configuration).
 
+## Deduplication
+
+A panel of independent reviewers will report the *same* issue more than once. After the fan-out,
+aeview pools every finding and hands the pool to a single **dedup judge** — the harness named by
+[`deduplicationHarness`](#configuration) — whose job is deliberately narrow: it **only groups**.
+
+- **It never rewrites, re-scores, or summarizes** a finding. Per group it just names one `survivor`
+  (kept verbatim) and the `duplicate` ids merged into it; anything it doesn't mention stays as its
+  own group of one.
+- **Precision over recall.** It's instructed to merge only when confident, because a wrong *merge*
+  hides a distinct problem while a wrong *split* only shows two views of one issue — the cheaper
+  mistake. When in doubt, findings stay separate.
+- **"Same issue" means same root cause at substantially the same location** — not merely the same
+  file, category, or severity.
+
+Each survivor becomes one finding in the report carrying its whole group's provenance:
+[`agreement`](#the-report--exit-codes) (the group size) and `sources` (one entry per merged finding,
+naming the review it came from). Findings are handed to the judge as untrusted **data**, not
+instructions, so a crafted finding can't steer it into over-merging (and silently hiding real
+issues).
+
+### Customizing the judge
+
+The judge's full instructions are a prompt file seeded to **`~/.aeview/DEDUPLICATION.md`** on first
+run — write-if-absent, so your edits are never clobbered. Edit it to tune how aggressively findings
+merge (or how `survivor` is chosen); any YAML frontmatter is stripped before it's sent to the
+harness. (Leaving `deduplicationHarness` unset leaves findings ungrouped — but aeview reports that
+as a `failed` dedup with a warning, not a silent off-switch; see below.)
+
+### When dedup is skipped or fails
+
+The panel's findings are **never discarded** — if the judge doesn't run or errors, they pass through
+as a raw union (one group each). `dedup.status` in the report records what happened:
+
+| `dedup.status` | When | Findings |
+|---|---|---|
+| `ok` | the judge ran and grouped | merged (deduplicated) |
+| `skipped` | only one review contributed, or only one finding total — nothing could be a duplicate | raw union, no billed call |
+| `failed` | the judge errored/timed out, or no `deduplicationHarness` is configured | raw union **+** a loud `warning` that duplicates were *not* removed; `resume` re-runs it |
+
 ## Configuration
 
 Global settings live in `~/.aeview/settings.json`, seeded (write-if-absent) on first run. Its keys
@@ -312,6 +353,9 @@ The full merged artifact is `report.json` — what `aeview result` and the on-di
   "usage": { "reviews": {...}, "dedup": {...}, "total": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0 } }
 }
 ```
+
+The `agreement` count, the `sources` provenance, and the `dedup` block all come from
+[Deduplication](#deduplication).
 
 **`aeview run` prints a *gate*, not the full report:** it's `report.json` with a top-level `run_id`
 added and the result-only detail omitted — `findings[].id`, `next_steps`, `usage`, and the `dedup`
