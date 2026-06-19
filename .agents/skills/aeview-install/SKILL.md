@@ -29,17 +29,19 @@ pipx install aeview
 
 ## 2. Install the skills globally
 
-Pull the aeview skills (this one, plus `aeview`, `aeview-pr`, `aeview-loop`, `aeview-commits`,
-`aeview-effective-pr`) from the public repo and install them globally, with no prompts:
+Pull the aeview skills — this one, plus `aeview`, `aeview-pr`, `aeview-loop`, `aeview-commits`, and
+`aeview-effective-pr` — from the public repo and install them globally, with no prompts:
 
 ```bash
-npx skills add MarlzRana/aeview -g -y --skill '*'
+npx skills add MarlzRana/aeview -g -y \
+  --skill aeview aeview-install aeview-pr aeview-loop aeview-commits aeview-effective-pr
 ```
 
-`-g` installs for every project (the global agent dir), `--skill '*'` takes all the aeview skills
-instead of the interactive picker, and `-y` skips the remaining confirmation prompts — installing to
-whichever agents the `skills` CLI detects on this machine. (Bare `npx skills add MarlzRana/aeview -g`
-would instead prompt you to multi-select skills and confirm.)
+`-g` installs for every project (the global agent dir) and `-y` skips the prompts. The skills are
+listed by name — not `--skill '*'` — so only the `aeview*` skills install: the repo also carries a
+maintainer-only `release` skill that end users shouldn't get, and the `skills` CLI matches `--skill`
+names exactly (there's no `aeview*` glob). It installs to whichever agents the CLI detects on this
+machine.
 
 ## 3. Verify
 
