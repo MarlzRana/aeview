@@ -145,6 +145,7 @@ description: Hunts auth, injection, and trust-boundary bugs.
 harnesses:
   - { harness: claude-code, model: claude-opus-4-8 }
   - { harness: codex, model: gpt-5.5, thinking: xhigh }
+  - { harness: copilot, model: gemini-3.1-pro-preview }
 auto-activate-paths:
   - "src/api/**"
 ---
