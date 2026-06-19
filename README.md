@@ -11,7 +11,8 @@ The bet: a *reviewer* is a versioned artifact (a prompt + the harnesses it runs 
 independent models catches what any single model misses.
 
 ```sh
-uv tool install --prerelease=allow aeview   # pip/pipx need no flag; see Install
+# install the aeview-install skill, then run /aeview-install in your agent to set up the CLI:
+npx skills add MarlzRana/aeview --skill aeview-install --global
 cd your-repo
 aeview run          # review your current changes (auto mode); exit 1 if anything needs attention
 ```
@@ -69,6 +70,18 @@ Everything is persisted under `~/.aeview/runs/<id>/`, so a killed run can be `re
 
 ## Install
 
+Install the `aeview-install` skill, then run it — it installs the aeview CLI, installs the reviewer
+skills, and verifies your setup:
+
+```sh
+npx skills add MarlzRana/aeview --skill aeview-install --global
+```
+
+Then run `/aeview-install` in your agent (Claude Code, …).
+
+<details>
+<summary>Prefer to install by hand?</summary>
+
 ```sh
 uv tool install --prerelease=allow aeview   # recommended (see the note); also fetches Python 3.14
 # or
@@ -86,6 +99,8 @@ After install, sanity-check your setup:
 ```sh
 aeview doctor
 ```
+
+</details>
 
 ## Quickstart
 
