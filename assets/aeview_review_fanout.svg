@@ -1,0 +1,40 @@
+<svg width="100%" viewBox="13 17 933 558" xmlns="http://www.w3.org/2000/svg" font-family="'Anthropic Sans','Helvetica Neue',Arial,sans-serif">
+<rect x="0" y="0" width="960" height="610" fill="#FFFFFF"/>
+<path d="M230,133 C300.0,133 300.0,67 370,67" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M230,133 C300.0,133 300.0,133 370,133" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M230,133 C300.0,133 300.0,199 370,199" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M230,426 C300.0,426 300.0,393 370,393" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M230,426 C300.0,426 300.0,459 370,459" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M610,67 C675.0,67 675.0,232 740,232" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M610,133 C675.0,133 675.0,248 740,248" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M610,199 C675.0,199 675.0,262 740,262" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M610,393 C675.0,393 675.0,278 740,278" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<path d="M610,459 C675.0,459 675.0,294 740,294" fill="none" stroke="#AEB9C3" stroke-width="1.4"/>
+<rect x="40" y="101" width="190" height="64" rx="12" fill="#FFFFFF" stroke="#2B3A4A" stroke-width="2"/>
+<text x="135" y="128" text-anchor="middle" font-size="13" fill="#5B6B7A">REVIEWER.md:</text>
+<text x="135" y="148" text-anchor="middle" font-size="15" font-weight="600" fill="#1B2733">security</text>
+<rect x="40" y="394" width="190" height="64" rx="12" fill="#FFFFFF" stroke="#2B3A4A" stroke-width="2"/>
+<text x="135" y="421" text-anchor="middle" font-size="13" fill="#5B6B7A">REVIEWER.md:</text>
+<text x="135" y="441" text-anchor="middle" font-size="15" font-weight="600" fill="#1B2733">python</text>
+<rect x="370" y="44" width="240" height="46" rx="12" fill="#FFFFFF" stroke="#F2794E" stroke-width="2"/>
+<text x="490.0" y="72" text-anchor="middle" font-size="14" fill="#2B3A4A">security × claude-code</text>
+<rect x="370" y="110" width="240" height="46" rx="12" fill="#FFFFFF" stroke="#16A34A" stroke-width="2"/>
+<text x="490.0" y="138" text-anchor="middle" font-size="14" fill="#2B3A4A">security × codex</text>
+<rect x="370" y="176" width="240" height="46" rx="12" fill="#FFFFFF" stroke="#6D4AE0" stroke-width="2"/>
+<text x="490.0" y="204" text-anchor="middle" font-size="14" fill="#2B3A4A">security × copilot</text>
+<rect x="370" y="370" width="240" height="46" rx="12" fill="#FFFFFF" stroke="#F2794E" stroke-width="2"/>
+<text x="490.0" y="398" text-anchor="middle" font-size="14" fill="#2B3A4A">python × claude-code</text>
+<rect x="370" y="436" width="240" height="46" rx="12" fill="#FFFFFF" stroke="#16A34A" stroke-width="2"/>
+<text x="490.0" y="464" text-anchor="middle" font-size="14" fill="#2B3A4A">python × codex</text>
+<rect x="740" y="217" width="178" height="92" rx="12" fill="#FFFFFF" stroke="#2B3A4A" stroke-width="2.5"/>
+<text x="829.0" y="257.0" text-anchor="middle" font-size="13" fill="#5B6B7A">DEDUPLICATION.md:</text>
+<text x="829.0" y="278.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1B2733">merge + dedupe</text>
+<text x="479.0" y="292" text-anchor="middle" font-size="13" fill="#5B6B7A">all 5 reviews run concurrently</text>
+<text x="479.0" y="312" text-anchor="middle" font-size="13" fill="#5B6B7A">2 reviewers × their harnesses</text>
+<rect x="300" y="535" width="14" height="14" rx="3" fill="#F2794E"/>
+<text x="322" y="546" font-size="13" fill="#2B3A4A">claude-code</text>
+<rect x="417" y="535" width="14" height="14" rx="3" fill="#16A34A"/>
+<text x="439" y="546" font-size="13" fill="#2B3A4A">codex</text>
+<rect x="497" y="535" width="14" height="14" rx="3" fill="#6D4AE0"/>
+<text x="519" y="546" font-size="13" fill="#2B3A4A">copilot</text>
+</svg>

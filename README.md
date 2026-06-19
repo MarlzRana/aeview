@@ -1,5 +1,9 @@
 # aeview
 
+<p align="center">
+  <img src="assets/aeview_review_fanout.svg" alt="aeview fans a change across multiple reviewers and agent harnesses, then merges one deduplicated verdict" width="880">
+</p>
+
 **Fan code reviewers across multiple AI agent harnesses, then merge one deduplicated verdict.**
 
 aeview runs the *same* change past several reviewers — each a prompt you check into your repo —
