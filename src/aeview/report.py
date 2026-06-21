@@ -37,7 +37,7 @@ def exit_code(report: Report) -> int:
     return _EXIT_BY_LABEL[report_verdict_label(report)]
 
 
-def run_gate_dict(report: Report, run_id: str) -> dict:
+def run_gate_dict(report: Report, run_id: str) -> dict[str, object]:
     """The `aeview run` stdout shape: the report minus the fields reserved for `aeview result`
     (each finding's `id`, plus `next_steps` / `usage` / the `dedup` detail beyond `status`), with
     `run_id` added so a caller can fetch the exact `result`. The kept fields keep their report.json
