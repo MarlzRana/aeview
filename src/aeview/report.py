@@ -41,15 +41,22 @@ def run_gate_dict(report: Report, run_id: str) -> dict:
     """The `aeview run` stdout shape: the report minus the fields reserved for `aeview result`
     (each finding's `id`, plus `next_steps` / `usage` / the `dedup` detail beyond `status`), with
     `run_id` added so a caller can fetch the exact `result`. The kept fields keep their report.json
-    names, so a consumer reading only these fields works against both `run` and `result`."""
-    return {
+    names, so a consumer reading only these fields works against both `run` and `result`.
+
+    `dedup` is reported only for a multi-review roster; a lone review has nothing to dedup, so the
+    gate omits it. The full `dedup` block stays in `report.json` / `aeview result` regardless."""
+    gate: dict[str, object] = {
         "verdict": report.verdict,
         "summary": report.summary,
         "run_id": run_id,
         "findings": [f.model_dump(exclude={"id"}) for f in report.findings],
         "coverage": report.coverage.model_dump(),
-        "dedup": {"status": report.dedup.status},
     }
+    # Roster size = reviews that contributed + failed (one ReviewResult per roster entry); dedup is
+    # only meaningful across a panel, so a single-review run reports no dedup outcome in the gate.
+    if report.coverage.contributed + report.coverage.failed > 1:
+        gate["dedup"] = {"status": report.dedup.status}
+    return gate
 
 
 def render_human(report: Report, *, gate: bool = False) -> str:

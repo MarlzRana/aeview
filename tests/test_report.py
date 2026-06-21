@@ -133,6 +133,20 @@ def test_run_gate_keeps_report_fields_verbatim_minus_result_only():
     }
 
 
+def test_run_gate_omits_dedup_for_single_review_roster():
+    # A roster of one review has nothing to dedup, so the run gate drops `dedup` entirely. The full
+    # `dedup` block still lives in report.json / `aeview result` (covered end-to-end in test_cli).
+    gate = run_gate_dict(_report(coverage=Coverage(contributed=1, failed=0)), "RID")
+    assert "dedup" not in gate
+
+
+def test_run_gate_keeps_dedup_keyed_on_roster_size_not_contributed():
+    # The trigger is roster size (contributed + failed), not the contributing count: a 2-review
+    # roster where one review failed still reports the dedup outcome.
+    report = _report(coverage=Coverage(contributed=1, failed=1), dedup=Dedup(status="skipped"))
+    assert run_gate_dict(report, "RID")["dedup"] == {"status": "skipped"}
+
+
 def test_render_human_gate_trims_cost_and_dedup_detail():
     # The run gate (gate=True) drops the result-only detail so the human form matches the JSON gate.
     report = _report()  # total cost 0.12

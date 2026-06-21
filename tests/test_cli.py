@@ -338,7 +338,9 @@ def test_run_json_is_the_gate_while_result_stays_full(
     assert result.exit_code == 1  # the stub plants a bug -> needs-attention -> exit 1
     assert gate["run_id"]  # exposed so a caller can fetch the exact result
     assert "usage" not in gate and "next_steps" not in gate
-    assert set(gate["dedup"]) == {"status"}  # dedup detail (harness/reason/warning) is result-only
+    # the seeded default reviewer is a single-review roster, so the gate omits dedup entirely
+    # (nothing to deduplicate); the full dedup block still lives in report.json / result, below
+    assert "dedup" not in gate
     assert gate["findings"], "the stub plants a finding"
     f = gate["findings"][0]
     assert "id" not in f  # per-finding id is result-only

@@ -379,8 +379,9 @@ The `agreement` count, the `sources` provenance, and the `dedup` block all come 
 
 **`aeview run` prints a *gate*, not the full report:** it's `report.json` with a top-level `run_id`
 added and the result-only detail omitted — `findings[].id`, `next_steps`, `usage`, and the `dedup`
-fields other than `status`. The kept fields keep their `report.json` names, so a consumer that reads
-only the gate's fields works against both `run` and `result`. The dropped detail (token/cost
+fields other than `status` (and `dedup` is dropped entirely when the run had a single review —
+there's nothing to deduplicate). The kept fields keep their `report.json` names, so a consumer that
+reads only the gate's fields works against both `run` and `result`. The dropped detail (token/cost
 accounting, per-review next steps, dedup provenance, per-finding ids) lives in `aeview result`.
 
 **Exit codes** (the loop-until-clean contract):
