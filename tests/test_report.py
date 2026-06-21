@@ -140,11 +140,20 @@ def test_run_gate_omits_dedup_for_single_review_roster():
     assert "dedup" not in gate
 
 
-def test_run_gate_keeps_dedup_keyed_on_roster_size_not_contributed():
+def test_run_gate_omits_dedup_for_single_failed_review():
+    # Roster size counts failures: a lone review that FAILED is still a single-review roster
+    # (0 contributed + 1 failed), so the gate omits dedup just like a single successful review.
+    gate = run_gate_dict(_report(coverage=Coverage(contributed=0, failed=1)), "RID")
+    assert "dedup" not in gate
+
+
+def test_run_gate_keeps_dedup_for_multi_review_roster_including_failures():
     # The trigger is roster size (contributed + failed), not the contributing count: a 2-review
-    # roster where one review failed still reports the dedup outcome.
-    report = _report(coverage=Coverage(contributed=1, failed=1), dedup=Dedup(status="skipped"))
-    assert run_gate_dict(report, "RID")["dedup"] == {"status": "skipped"}
+    # roster reports the dedup outcome even when one — or both — of its reviews failed.
+    one_failed = _report(coverage=Coverage(contributed=1, failed=1), dedup=Dedup(status="skipped"))
+    both_failed = _report(coverage=Coverage(contributed=0, failed=2), dedup=Dedup(status="skipped"))
+    assert run_gate_dict(one_failed, "RID")["dedup"] == {"status": "skipped"}
+    assert run_gate_dict(both_failed, "RID")["dedup"] == {"status": "skipped"}
 
 
 def test_render_human_gate_trims_cost_and_dedup_detail():
