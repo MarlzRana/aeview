@@ -385,6 +385,7 @@ def test_run_json_gate_keeps_dedup_for_multi_review_roster(
         app, ["run", "--reviewers", "multi", "--scope", "working-tree", "--json"]
     )
     gate = json.loads(result.stdout)
+    assert result.exit_code == 1  # the stub plants a bug -> needs-attention, a real verdict path
     assert gate["dedup"] == {"status": "ok"}  # stub dedup groups nothing -> ok, and it IS reported
     full = json.loads((runs_dir() / gate["run_id"] / "report.json").read_text())
     assert {"harness", "reason", "warning"} <= set(full["dedup"])  # result keeps the full block
