@@ -1,22 +1,24 @@
 ---
 name: aeview-loop-with-confirmation
-description: Like aeview-loop, but pauses every cycle to confirm each reviewer finding with you before acting. For each finding it presents the issue, tailored resolution options (always including Ignore) and its recommendation via AskUserQuestion, then applies your choice. Use when you want to approve every fix the loop makes; for the autonomous version use aeview-loop.
+description: Like aeview-loop — run after you and the user have planned and implemented a change — but it pauses every cycle to confirm each reviewer finding with the user before acting. For each finding it presents the issue, tailored resolution options (always including Ignore) and its recommendation via AskUserQuestion, then applies the chosen option. Use when you want to approve every fix the loop makes; for the autonomous version use aeview-loop.
 argument-hint: '[--reviewers a,b] [--no-commit] [--min-cycles n] [--max-cycles n] [what to build or fix]'
 disable-model-invocation: true
 ---
 
 # aeview-loop-with-confirmation
 
-Like the `aeview-loop` skill — implement, then loop with the `aeview` reviewer panel until it
-converges — **but the user confirms every finding before anything is fixed or ignored**. Each cycle,
-the findings go to the user via AskUserQuestion, with tailored resolution options and your
-recommendation; you act only on what they pick. **You are the implementer** — you write the code,
-run the gates, run the panel, and apply the chosen resolutions. You do **not** triage on your own:
-you recommend, the user decides.
+Like the `aeview-loop` skill — run after you and the user have planned and implemented a change,
+then loop with the `aeview` reviewer panel until it converges — **but the user confirms every
+finding before anything is fixed or ignored**. Each cycle, the findings go to the user via
+AskUserQuestion, with tailored resolution options and your recommendation; you act only on what they
+pick. You run the gates, run the panel, and apply the chosen resolutions — the change is already
+written before you start, so you fix what the panel finds rather than build from scratch. You do
+**not** triage on your own: you recommend, the user decides.
 
 Raw arguments: `$ARGUMENTS`
 
-- Freeform text is the task to implement (and any scope/files to focus on).
+- Freeform text is context for the review — the scope/files to focus on, or a note on what the
+  change does.
 - `--reviewers a,b` and other `aeview run` flags pass straight through to the panel.
 - `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope, see
   step 4).
@@ -29,10 +31,11 @@ Read [the convergence reference](references/convergence.md) once — it defines 
 confirmation, how to surface context the reviewers can't see, the gate-discovery guidance, and the
 bounds. Then run the loop:
 
-### 1. Implement / fix
+### 1. Start from the implemented change
 
-Cycle 1: make the change the user asked for. Later cycles: the user's chosen fixes from the previous
-cycle were already applied at the end of step 5 — this cycle just re-gates and re-reviews them.
+Cycle 1: the change is already implemented — you built it with the user before invoking this skill,
+so go straight to the gates. Later cycles: the user's chosen fixes from the previous cycle were
+applied at the end of step 5, so this cycle just re-gates and re-reviews them.
 
 ### 2. Run the project's hard gates
 

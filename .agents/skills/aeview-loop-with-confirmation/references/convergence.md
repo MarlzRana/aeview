@@ -1,9 +1,9 @@
 # The convergence loop, with confirmation (when to keep iterating, when to stop)
 
-The rule for when an implement-and-review loop is **done** — the variant where **the user confirms
-every finding**. You are the implementer: you write the code, run the gates, run the panel, and
-apply the resolutions the user picks. You do **not** triage autonomously — you recommend, the user
-decides.
+The rule for when a **review-and-fix loop** is done — the variant where **the user confirms every
+finding**. The change is already implemented — you and the user planned and built it before this
+loop starts; here you run the gates, run the panel, and apply the resolutions the user picks. You do
+**not** triage autonomously — you recommend, the user decides.
 
 ## One-liner
 
@@ -12,8 +12,8 @@ only findings already decided in an earlier cycle. Convergence is **not** "zero 
 
 ## The loop
 
-1. **Implement / fix.** Cycle 1: make the change. Later cycles: the user's chosen fixes from the
-   previous cycle were already applied at the end of step 5 — this cycle re-gates and re-reviews them.
+1. **Start from the implemented change.** Cycle 1: the change is already implemented — go to the
+   gates. Later cycles: the user's chosen fixes were applied in step 5, so re-gate and re-review.
 2. **Run the project's hard gates** (tests, lint, type-check — see *Gates* below). These must pass
    before you go on; fix any failures first.
 3. **Commit** the cycle's work with a conventional message (skip if the user asked for `--no-commit`).

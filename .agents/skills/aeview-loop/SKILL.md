@@ -1,18 +1,21 @@
 ---
 name: aeview-loop
-description: Implement or fix code and then iterate with the aeview reviewer panel until it converges. Use when the user wants you to build, change, or fix something and keep going until it passes the project's gates and the panel finds no new issues — an implement-review-fix loop, "review until clean", or "loop until the panel is happy". For a one-shot review with no changes use the aeview skill instead; for a plain edit with no review loop, just edit.
+description: After you and the user have planned and implemented a change, loop with the aeview reviewer panel until it converges — running the project's gates, reviewing with the panel, and fixing the findings each cycle. Use when a change is already written and the user wants it reviewed and fixed until it passes the gates and the panel finds no new issues — "review until clean" or "loop until the panel is happy". It fixes what the panel finds; it does not build the change from scratch. For a one-shot review with no fixes, use the aeview skill instead.
 argument-hint: '[--reviewers a,b] [--no-commit] [--min-cycles n] [--max-cycles n] [what to build or fix]'
 ---
 
 # aeview-loop
 
-Implement a change, then loop with the `aeview` reviewer panel until it converges. **You are the
-implementer** — you write the code, run the gates, run the panel, triage the findings, and fix.
-Unlike the `aeview` skill (review-only), this skill *does* change code: that's the whole point.
+You and the user have already planned and implemented the change. This skill loops with the
+`aeview` reviewer panel until it converges — you run the gates, run the panel, triage the findings,
+and **fix** them. Unlike the `aeview` skill (review-only), this skill changes code; but the change
+is already written before you start, so here you fix what the panel finds rather than build from
+scratch.
 
 Raw arguments: `$ARGUMENTS`
 
-- Treat the freeform text as the task to implement (and, if given, the scope/files to focus on).
+- Freeform text is context for the review — the scope/files to focus on, or a note on what the
+  change does.
 - `--reviewers a,b` and other `aeview run` flags pass straight through to the panel.
 - `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope, see
   step 4).
@@ -24,10 +27,11 @@ Raw arguments: `$ARGUMENTS`
 Read [the convergence reference](references/convergence.md) once — it defines convergence, the
 triage rules, the gate-discovery guidance, and the bounds. Then run the loop:
 
-### 1. Implement / fix
+### 1. Start from the implemented change
 
-Cycle 1: make the change the user asked for. Later cycles: fix the actionable findings from the
-previous panel.
+Cycle 1: the change is already implemented — you built it with the user before invoking this skill,
+so go straight to the gates. Later cycles: the previous panel's fixes were applied in step 5, so
+this cycle just re-gates and re-reviews them.
 
 ### 2. Run the project's hard gates
 
