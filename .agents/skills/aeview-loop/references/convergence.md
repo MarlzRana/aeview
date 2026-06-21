@@ -70,13 +70,14 @@ than assuming a stack:
   trusts; mirror those.
 - If none are discoverable or they're ambiguous, **ask the user** which commands count as the gates.
 
-## Hard bounds
+## Cycle bounds
 
-- **Minimum 2 cycles** — even if cycle 1 looks clean. Fixes can regress, so every fix round gets
-  re-reviewed at least once.
-- **Maximum 5 cycles** — a hard cap. If it hasn't converged by cycle 5, **stop anyway** and report
-  the remaining open findings rather than looping further. (Not converging in 5 cycles is itself
-  worth surfacing.)
+- **Minimum** — run at least this many cycles even if cycle 1 looks clean; fixes can regress, so
+  every fix round gets re-reviewed at least once. **Default 2.**
+- **Maximum** — a cap so the loop can't run away; if it hasn't converged by then, stop and report
+  the open findings. **Default 5.**
+- **The user sets these.** If the user specifies a minimum and/or maximum — via `--min-cycles <n>` /
+  `--max-cycles <n>` or in their request — use those values instead of the defaults.
 
 ## Required summary after the last cycle
 
