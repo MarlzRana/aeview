@@ -365,6 +365,31 @@ def test_run_json_is_the_gate_while_result_stays_full(
     assert gate["findings"][0] == {k: v for k, v in result_full["findings"][0].items() if k != "id"}
 
 
+def test_run_json_gate_keeps_dedup_for_multi_review_roster(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # A multi-review roster's gate carries dedup status (run_gate_dict's keep-branch), exercised
+    # end-to-end through run -> merge -> coverage -> gate; report.json keeps the full dedup block.
+    # (The single-review omit-branch is covered by the test above.)
+    make_reviewer(
+        git_repo,
+        "multi",
+        harnesses=[
+            {"harness": "claude-code", "model": "opus"},
+            {"harness": "claude-code", "model": "sonnet"},
+        ],
+    )
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--reviewers", "multi", "--scope", "working-tree", "--json"]
+    )
+    gate = json.loads(result.stdout)
+    assert gate["dedup"] == {"status": "ok"}  # stub dedup groups nothing -> ok, and it IS reported
+    full = json.loads((runs_dir() / gate["run_id"] / "report.json").read_text())
+    assert {"harness", "reason", "warning"} <= set(full["dedup"])  # result keeps the full block
+
+
 def test_run_human_gate_omits_cost(aeview_home, git_repo, stub_claude, monkeypatch):
     # The human `run` gate suppresses the cost line (usage is result-only). The stub emits a nonzero
     # cost, so a regression that flips this path back to render_human's default (gate=False, full)

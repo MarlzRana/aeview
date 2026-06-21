@@ -37,7 +37,7 @@ def exit_code(report: Report) -> int:
     return _EXIT_BY_LABEL[report_verdict_label(report)]
 
 
-def run_gate_dict(report: Report, run_id: str) -> dict[str, object]:
+def run_gate_dict(report: Report, run_id: str) -> dict:
     """The `aeview run` stdout shape: the report minus the fields reserved for `aeview result`
     (each finding's `id`, plus `next_steps` / `usage` / the `dedup` detail beyond `status`), with
     `run_id` added so a caller can fetch the exact `result`. The kept fields keep their report.json
@@ -45,6 +45,9 @@ def run_gate_dict(report: Report, run_id: str) -> dict[str, object]:
 
     `dedup` is reported only for a multi-review roster; a lone review has nothing to dedup, so the
     gate omits it. The full `dedup` block stays in `report.json` / `aeview result` regardless."""
+    # Return a bare dict: the gate is a JSON-serialization boundary callers/tests index dynamically
+    # (gate["dedup"], gate[key]); object-typed values would make every read a type error. The local
+    # is typed only so the conditional dedup add below type-checks.
     gate: dict[str, object] = {
         "verdict": report.verdict,
         "summary": report.summary,
