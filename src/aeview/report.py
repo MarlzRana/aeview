@@ -55,8 +55,7 @@ def run_gate_dict(report: Report, run_id: str) -> dict:
         "findings": [f.model_dump(exclude={"id"}) for f in report.findings],
         "coverage": report.coverage.model_dump(),
     }
-    # contributed + failed == roster size (one ReviewResult per roster entry); a lone review has
-    # nothing to dedup, so the gate reports a dedup outcome only across a panel of more than one.
+    # contributed + failed == roster size: done/failed partition the one-per-roster-entry results.
     roster_size = report.coverage.contributed + report.coverage.failed
     if roster_size > 1:
         gate["dedup"] = {"status": report.dedup.status}

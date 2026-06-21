@@ -26,6 +26,8 @@ def _report(**over) -> Report:
         summary="1 finding across 2 reviews.",
         findings=[],
         next_steps=[],
+        # multi-review roster (size 2), so run_gate_dict includes `dedup` in the gate — the
+        # anti-leak / verbatim gate tests below rely on that default.
         coverage=Coverage(contributed=2, failed=0),
         dedup=Dedup(status="ok"),
         usage=UsageBreakdown(
