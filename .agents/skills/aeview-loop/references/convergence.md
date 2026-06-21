@@ -1,7 +1,8 @@
 # The convergence loop (when to keep iterating, when to stop)
 
-The rule for when an implement-and-review loop is **done**. You are the implementer: you write the
-code, run the gates, run the panel, triage, and fix.
+The rule for when a **review-and-fix loop** is done. The change is already implemented — you and
+the user planned and built it before this loop starts; here you run the gates, run the panel,
+triage, and fix what it finds.
 
 ## One-liner
 
@@ -10,8 +11,8 @@ things already triaged away — and the trend has flattened. Convergence is **no
 
 ## The loop
 
-1. **Implement / fix.** Cycle 1: make the change. Later cycles: fix the actionable findings from the
-   previous panel.
+1. **Start from the implemented change.** Cycle 1: the change is already implemented — go to the
+   gates. Later cycles: the previous panel's fixes were applied in step 5, so re-gate and re-review.
 2. **Run the project's hard gates** (tests, lint, type-check — see *Gates* below). These must pass
    before you go on; fix any failures first.
 3. **Commit** the cycle's work with a conventional message (skip if the user asked for `--no-commit`).
@@ -70,13 +71,14 @@ than assuming a stack:
   trusts; mirror those.
 - If none are discoverable or they're ambiguous, **ask the user** which commands count as the gates.
 
-## Hard bounds
+## Cycle bounds
 
-- **Minimum 2 cycles** — even if cycle 1 looks clean. Fixes can regress, so every fix round gets
-  re-reviewed at least once.
-- **Maximum 5 cycles** — a hard cap. If it hasn't converged by cycle 5, **stop anyway** and report
-  the remaining open findings rather than looping further. (Not converging in 5 cycles is itself
-  worth surfacing.)
+- **Minimum** — run at least this many cycles even if cycle 1 looks clean; fixes can regress, so
+  every fix round gets re-reviewed at least once. **Default 2.**
+- **Maximum** — a cap so the loop can't run away; if it hasn't converged by then, stop and report
+  the open findings. **Default 5.**
+- **The user sets these.** If the user specifies a minimum and/or maximum — via `--min-cycles <n>` /
+  `--max-cycles <n>` or in their request — use those values instead of the defaults.
 
 ## Required summary after the last cycle
 
