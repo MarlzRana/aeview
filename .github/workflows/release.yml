@@ -35,7 +35,7 @@ jobs:
       contents: read # job-level perms fully replace the workflow default, so re-grant checkout read
       id-token: write # OIDC for Trusted Publishing; scoped to this job only
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # python-version sets UV_PYTHON=3.14; uv auto-downloads it on first use (the version read + build).
       - name: Install uv + Python 3.14
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
