@@ -92,6 +92,23 @@ def test_diff_line_index_tracks_right_and_left_per_file():
     assert idx["old.py"].right == {1}  # only the surviving context line
 
 
+def test_diff_line_index_handles_content_lines_that_look_like_headers():
+    # An added line whose own text starts with '++ ' makes the diff line read '+++ ...'; inside a
+    # hunk that's content, not a new-file header. The parser must keep counting, not reset on it.
+    diff = (
+        "diff --git a/x.md b/x.md\n"
+        "--- a/x.md\n"
+        "+++ b/x.md\n"
+        "@@ -1,1 +1,3 @@\n"
+        " title\n"
+        "+++ a bullet whose text starts with plus-plus\n"
+        "+normal added line\n"
+    )
+    idx = _diff_line_index(diff)
+    assert set(idx) == {"x.md"}  # the '+++ a bullet...' content line was NOT taken as a header
+    assert idx["x.md"].right == {1, 2, 3}  # context line + the two real additions
+
+
 def test_anchor_prefers_right_then_left_then_none():
     idx = _diff_line_index(_DIFF)
     assert _anchor(Location(file="pr_file.py", line_start=2, line_end=2), idx) == (2, "RIGHT")

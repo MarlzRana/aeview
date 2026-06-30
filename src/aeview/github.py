@@ -122,23 +122,29 @@ _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 def _diff_line_index(diff: str) -> dict[str, _FileLines]:
     """Map each changed file to the line numbers a comment can anchor to. RIGHT carries additions +
-    context (new-file numbering); LEFT carries deletions + context (old-file numbering)."""
+    context (new-file numbering); LEFT carries deletions + context (old-file numbering).
+
+    Header lines (`+++ `/`--- `) and hunk-body content lines are told apart by hunk state, not by
+    prefix alone: an *added* line whose own text starts with `++ ` reads `+++ ...` in the diff, and
+    a *deleted* line starting with `-- ` reads `--- ...` — inside a hunk those are content, and
+    treating them as headers would reset/skip the counter and corrupt every later anchor."""
     index: dict[str, _FileLines] = {}
     current: _FileLines | None = None
+    in_hunk = False
     old_no = new_no = 0
     for line in diff.splitlines():
         if line.startswith("diff --git"):
-            current = None  # reset until the next +++; skips the index/mode/rename header lines
-            continue
-        if line.startswith("+++ "):
-            path = line[4:].split("\t", 1)[0].removeprefix("b/")
-            current = None if path == "/dev/null" else index.setdefault(path, _FileLines())
-            continue
-        if line.startswith("--- "):
+            current, in_hunk = None, False  # next file; its +++/--- header + counts come before @@
             continue
         if line.startswith("@@"):
             if m := _HUNK.match(line):
                 old_no, new_no = int(m.group(1)), int(m.group(2))
+                in_hunk = True
+            continue
+        if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
+            if line.startswith("+++ "):
+                path = line[4:].split("\t", 1)[0].removeprefix("b/")
+                current = None if path == "/dev/null" else index.setdefault(path, _FileLines())
             continue
         if current is None:
             continue
