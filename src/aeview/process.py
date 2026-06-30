@@ -31,7 +31,14 @@ def _spawn_failure(args: list[str], cwd: Path | None) -> ProcResult:
     return ProcResult(_CMD_NOT_FOUND, "", f"{args[0]}: command not found")
 
 
-def run_sync(args: list[str], cwd: Path | None = None, timeout: float | None = None) -> ProcResult:
+def run_sync(
+    args: list[str],
+    cwd: Path | None = None,
+    timeout: float | None = None,
+    input_text: str | None = None,
+) -> ProcResult:
+    # input_text feeds the child on stdin (parallels run_async) — how `gh api ... --input -` takes a
+    # JSON payload without an ARG_MAX-bound argv element. None leaves the child's stdin inherited.
     try:
         proc = subprocess.run(  # noqa: S603 - args are constructed internally, not shell
             args,
@@ -40,6 +47,7 @@ def run_sync(args: list[str], cwd: Path | None = None, timeout: float | None = N
             text=True,
             check=False,
             timeout=timeout,
+            input=input_text,
         )
     except FileNotFoundError:
         # A missing binary/cwd must look like a failed command, not an uncaught exception,

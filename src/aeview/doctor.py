@@ -80,7 +80,7 @@ def _check_harness(harness: str, binary_override: str | None) -> Check:
 
 def _check_gh() -> Check:
     if which("gh") is None:
-        return Check("gh", "warn", "gh not found (needed only for --scope pr)")
+        return Check("gh", "warn", "gh not found (needed for --scope pr and --post-comments)")
     if run_sync(["gh", "auth", "status"], timeout=AUTH_PROBE_TIMEOUT).returncode == 0:
         return Check("gh", "ok", "present and authenticated")
     return Check("gh", "warn", "present but not authenticated")

@@ -68,9 +68,9 @@ Everything is persisted under `~/.aeview/runs/<id>/`, so a killed run can be `re
   binary** — you don't install Claude Code / Codex / Copilot separately. You *do* need to be
   authenticated with each harness a reviewer uses. Run [`aeview doctor`](#commands) to see exactly
   what's missing for the reviewers you have.
-- **`gh`** (GitHub CLI) — for `--scope pr`, and to auto-detect a branch's base from its open PR.
-  Optional: aeview falls back to `origin/HEAD`, then `main`/`master`/`trunk`, when `gh` or a PR
-  isn't available.
+- **`gh`** (GitHub CLI) — for `--scope pr`, for `--post-comments` (posting the review onto the PR),
+  and to auto-detect a branch's base from its open PR. Optional otherwise: aeview falls back to
+  `origin/HEAD`, then `main`/`master`/`trunk`, when `gh` or a PR isn't available.
 
 ## Install
 
@@ -152,6 +152,24 @@ Notes:
   `auto`, or `staged`; it's a no-op on `working-tree`.
 - **`--allow-conflicts`** reviews despite an in-progress merge/rebase (refused by default).
 - Base resolution order: explicit value → the PR base → `origin/HEAD` → `main`/`master`/`trunk`.
+
+### Posting the review to a PR
+
+With `--scope pr`, add `--post-comments` to publish the merged review onto the PR on GitHub (via
+`gh`). aeview posts **one review per run** — a GitHub *review* with event `COMMENT`, so it never
+approves or requests changes and can't gate your merge — made of:
+
+- a **summary** comment (verdict, summary, coverage), and
+- one **inline comment** per finding, anchored to its file and line in the PR diff. A finding whose
+  line isn't part of the diff (reviewers can read your whole tree) is listed in the summary instead,
+  so nothing is dropped.
+
+Findings on the same line are combined into one comment; each run posts a fresh review, so re-running
+across a loop leaves a thread-per-finding audit trail on the PR. A clean run still posts a short
+"approved — no findings" note. Every comment is authored by your `gh` account (aeview has no separate
+identity), so it carries a visible `aeview (automated review panel)` badge and names the reviewer(s)
+behind each finding. `--post-comments` requires an **open** PR and authenticated `gh`, and it's an
+error to pass it with any scope other than `pr`.
 
 ## Reviewers
 
@@ -339,8 +357,9 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
 | `aeview doctor` | Preflight: reviewer config, harness binaries + auth, and `gh`. Exits 1 on failure. |
 | `aeview version` | Print the version. |
 
-Common `run` flags: `--scope`, `--reviewers`, `--include-dirty`, `--allow-conflicts`, `--dry-run`,
-`--json`. Most commands accept `--json` for machine-readable output.
+Common `run` flags: `--scope`, `--reviewers`, `--include-dirty`, `--allow-conflicts`,
+`--post-comments` (with `--scope pr`), `--dry-run`, `--json`. Most commands accept `--json` for
+machine-readable output.
 
 ## The report & exit codes
 

@@ -18,6 +18,7 @@ from aeview.cli import (
     app,
 )
 from aeview.config import HarnessInstance, Settings, runs_dir
+from aeview.github import PrTarget
 from aeview.resolve import ResolveError
 from aeview.runstore import RunStore
 from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
@@ -506,6 +507,65 @@ def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["run", "--reviewers", "nope", "--scope", "working-tree"])
     assert result.exit_code == 2  # unknown reviewer -> planning fails before prune
     assert (runs_dir() / "stale-run").exists()
+
+
+# --- --post-comments ------------------------------------------------------------------
+
+
+def test_dry_run_render_includes_post_comments_target():
+    target = PrTarget(number=7, head_sha="abc", url="https://github.com/o/r/pull/7")
+    out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None), target)
+    assert "post-comments: will post a review to PR #7" in out
+
+
+def test_post_comments_requires_pr_scope(aeview_home, git_repo, monkeypatch):
+    # The flag is meaningless off --scope pr; reject it loudly before any work (exit 2).
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--post-comments"])
+    assert result.exit_code == 2
+    assert "--post-comments only works with --scope pr" in result.stderr
+
+
+def test_post_comments_no_open_pr_errors(aeview_home, git_repo, stub_claude, stub_gh, monkeypatch):
+    # No PR for the branch -> fail fast before the fan-out, with an actionable message.
+    monkeypatch.setenv("AEVIEW_GH_NO_PR", "1")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert result.exit_code == 2
+    assert "found none" in result.stderr and "gh pr create" in result.stderr
+
+
+def test_post_comments_dry_run_reports_target(aeview_home, git_repo, stub_gh, monkeypatch):
+    # --dry-run resolves (and requires) the PR and previews the post, but posts nothing.
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments", "--dry-run"]
+    )
+    assert result.exit_code == 0
+    assert "post-comments: will post a review to PR #7" in result.stdout
+
+
+def test_post_comments_posts_review_to_pr(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # End-to-end: a real run posts one COMMENT review to the PR. The stub finding (app.py:2) isn't
+    # in the canned pr diff (pr_file.py), so it lands in the summary, not as an inline comment.
+    cap = tmp_path / "review.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments", "--json"]
+    )
+    assert result.exit_code == 1  # the stub plants a finding -> needs-attention
+    json.loads(result.stdout)  # the --json gate stays valid JSON on stdout (post line is on stderr)
+    assert "posted a review to the PR (0 inline, 1 in the summary)" in result.stderr
+    posted = json.loads(cap.read_text())
+    assert posted["event"] == "COMMENT"
+    assert posted["commit_id"] == "deadbeefcafe"  # the stub PR head sha, anchoring the review
+    assert "comments" not in posted  # the unanchored finding is summarised, not inline
+    assert "<!-- aeview:review run=" in posted["body"]
 
 
 def test_merge_settings_carries_the_pinned_dedup_plan():
