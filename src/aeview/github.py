@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .process import run_sync
@@ -108,73 +108,57 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
 
 # --- diff line index (which lines can carry an inline comment) ------------------------
 
-
-@dataclass(slots=True)
-class _FileLines:
-    """Line numbers present in the diff for one file, per side (RIGHT=new, LEFT=old)."""
-
-    right: set[int] = field(default_factory=set)
-    left: set[int] = field(default_factory=set)
+_HUNK = re.compile(r"^@@ -(?:\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-_HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+def _diff_added_lines(diff: str) -> dict[str, set[int]]:
+    """Map each changed file to the new-file line numbers a comment can anchor to (additions +
+    context). Findings cite post-change lines, so anchoring is RIGHT-side only — an old-file line
+    (a deletion) has no new-file number and can't be anchored, so it isn't tracked.
 
-
-def _diff_line_index(diff: str) -> dict[str, _FileLines]:
-    """Map each changed file to the line numbers a comment can anchor to. RIGHT carries additions +
-    context (new-file numbering); LEFT carries deletions + context (old-file numbering).
-
-    Header lines (`+++ `/`--- `) and hunk-body content lines are told apart by hunk state, not by
-    prefix alone: an *added* line whose own text starts with `++ ` reads `+++ ...` in the diff, and
-    a *deleted* line starting with `-- ` reads `--- ...` — inside a hunk those are content, and
-    treating them as headers would reset/skip the counter and corrupt every later anchor."""
-    index: dict[str, _FileLines] = {}
-    current: _FileLines | None = None
+    Header lines (`+++ `) and hunk-body content are told apart by hunk state, not prefix alone: an
+    added line whose own text starts with `++ ` reads `+++ ...` in the diff — inside a hunk that's
+    content, and treating it as a header would reset the counter and corrupt every later line."""
+    index: dict[str, set[int]] = {}
+    current: set[int] | None = None
     in_hunk = False
-    old_no = new_no = 0
+    new_no = 0
     for line in diff.splitlines():
         if line.startswith("diff --git"):
-            current, in_hunk = None, False  # next file; its +++/--- header + counts come before @@
+            current, in_hunk = None, False  # next file; its +++ header + counts come before @@
             continue
         if line.startswith("@@"):
             if m := _HUNK.match(line):
-                old_no, new_no = int(m.group(1)), int(m.group(2))
+                new_no = int(m.group(1))  # the +new hunk start (RIGHT/new-file numbering)
                 in_hunk = True
             continue
         if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
             if line.startswith("+++ "):
                 path = line[4:].split("\t", 1)[0].removeprefix("b/")
-                current = None if path == "/dev/null" else index.setdefault(path, _FileLines())
+                current = None if path == "/dev/null" else index.setdefault(path, set())
             continue
         if current is None:
             continue
-        if line.startswith("+"):
-            current.right.add(new_no)
+        if line.startswith("+"):  # an added line: a new-file line a comment can anchor to
+            current.add(new_no)
             new_no += 1
-        elif line.startswith("-"):
-            current.left.add(old_no)
-            old_no += 1
-        elif line.startswith("\\"):  # "\ No newline at end of file" — not a content line
-            continue
-        else:  # context line: present on both sides
-            current.right.add(new_no)
-            current.left.add(old_no)
+        elif line.startswith("-") or line.startswith("\\"):
+            continue  # a deletion (old-file only) or the "\ No newline" marker: no new-file line
+        else:  # context line: present in the new file too
+            current.add(new_no)
             new_no += 1
-            old_no += 1
     return index
 
 
-def _anchor(loc: Location, index: dict[str, _FileLines]) -> tuple[int, str] | None:
-    """The (line, side) an inline comment can use for this finding, or None if its line isn't in the
-    diff. Prefer RIGHT (the new code under review); fall back to LEFT for a deleted line."""
-    fl = index.get(loc.file)
-    if fl is None:
+def _anchor(loc: Location, index: dict[str, set[int]]) -> int | None:
+    """The new-file line an inline comment can anchor to (always RIGHT side), or None if the
+    finding's line isn't in the diff (then it falls to the summary). Findings always cite
+    post-change lines, so a coincidental match against an old-file line would mis-place the comment
+    — hence RIGHT only."""
+    lines = index.get(loc.file)
+    if lines is None or loc.line_start not in lines:
         return None
-    if loc.line_start in fl.right:
-        return loc.line_start, "RIGHT"
-    if loc.line_start in fl.left:
-        return loc.line_start, "LEFT"
-    return None
+    return loc.line_start
 
 
 # --- review payload -------------------------------------------------------------------
@@ -246,25 +230,24 @@ def _review_body(
 def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped)."""
-    index = _diff_line_index(diff)
-    groups: dict[tuple[str, int, str], list[MergedFinding]] = {}
+    index = _diff_added_lines(diff)
+    groups: dict[tuple[str, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
     for f in report.findings:
-        hit = _anchor(f.location, index)
-        if hit is None:
+        line = _anchor(f.location, index)
+        if line is None:
             unanchored.append(f)
         else:
-            line, side = hit
-            groups.setdefault((f.location.file, line, side), []).append(f)
+            groups.setdefault((f.location.file, line), []).append(f)
     comments = [
         {
             "path": path,
             "line": line,
-            "side": side,
+            "side": "RIGHT",  # findings cite post-change lines; we only anchor on the new file
             # Same-line findings share one comment (one thread): the API can't thread siblings.
             "body": "\n\n---\n\n".join(_finding_md(f, run_id, show_location=False) for f in fs),
         }
-        for (path, line, side), fs in groups.items()
+        for (path, line), fs in groups.items()
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",

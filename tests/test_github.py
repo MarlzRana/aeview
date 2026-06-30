@@ -8,7 +8,7 @@ from aeview.github import (
     GitHubError,
     PrTarget,
     _anchor,
-    _diff_line_index,
+    _diff_added_lines,
     build_review,
     post_review,
     resolve_pr_target,
@@ -84,15 +84,15 @@ def _report(findings, *, verdict: Verdict = "needs-attention", contributed=1, fa
 # --- diff line index ------------------------------------------------------------------
 
 
-def test_diff_line_index_tracks_right_and_left_per_file():
-    idx = _diff_line_index(_DIFF)
-    assert idx["pr_file.py"].right == {1, 2, 3}  # context line 1 + the two additions
-    assert idx["pr_file.py"].left == {1}  # only the context line on the old side
-    assert idx["old.py"].left == {1, 2}  # context + the deletion
-    assert idx["old.py"].right == {1}  # only the surviving context line
+def test_diff_added_lines_tracks_new_file_lines_only():
+    idx = _diff_added_lines(_DIFF)
+    assert idx["pr_file.py"] == {1, 2, 3}  # context line 1 + the two additions
+    # old.py's only change is a deletion (old-file side); the surviving context line is its sole
+    # new-file line — deletions have no new-file number, so they aren't anchorable.
+    assert idx["old.py"] == {1}
 
 
-def test_diff_line_index_handles_content_lines_that_look_like_headers():
+def test_diff_added_lines_handles_content_lines_that_look_like_headers():
     # An added line whose own text starts with '++ ' makes the diff line read '+++ ...'; inside a
     # hunk that's content, not a new-file header. The parser must keep counting, not reset on it.
     diff = (
@@ -104,16 +104,17 @@ def test_diff_line_index_handles_content_lines_that_look_like_headers():
         "+++ a bullet whose text starts with plus-plus\n"
         "+normal added line\n"
     )
-    idx = _diff_line_index(diff)
+    idx = _diff_added_lines(diff)
     assert set(idx) == {"x.md"}  # the '+++ a bullet...' content line was NOT taken as a header
-    assert idx["x.md"].right == {1, 2, 3}  # context line + the two real additions
+    assert idx["x.md"] == {1, 2, 3}  # context line + the two real additions
 
 
-def test_anchor_prefers_right_then_left_then_none():
-    idx = _diff_line_index(_DIFF)
-    assert _anchor(Location(file="pr_file.py", line_start=2, line_end=2), idx) == (2, "RIGHT")
-    # old.py line 2 is a deletion -> not on RIGHT, anchors LEFT.
-    assert _anchor(Location(file="old.py", line_start=2, line_end=2), idx) == (2, "LEFT")
+def test_anchor_is_right_side_only():
+    idx = _diff_added_lines(_DIFF)
+    assert _anchor(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
+    # old.py line 2 is a deletion (old-file numbering) — findings cite post-change lines, so we
+    # never anchor there; it falls through to the summary instead.
+    assert _anchor(Location(file="old.py", line_start=2, line_end=2), idx) is None
     # A line not in the diff, and an unknown file, are both unanchorable.
     assert _anchor(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
     assert _anchor(Location(file="nope.py", line_start=1, line_end=1), idx) is None
