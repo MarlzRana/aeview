@@ -143,6 +143,11 @@ silence a check.
 ## Code conventions (match these)
 
 - `from __future__ import annotations` everywhere; strict typing, avoid `Any`.
+- **Multi-except uses the bare `except A, B:` form** (no parens): valid on the 3.14 floor via
+  [PEP 758](https://peps.python.org/pep-0758/), and — decisively — `ruff format` (our gate) *strips*
+  the parens from `except (A, B):`, so bare is formatter-canonical. Don't parenthesize it (the
+  formatter reverts it); it is **not** a `SyntaxError` on 3.14. Reviewers unaware of PEP 758 flag it
+  as a critical SyntaxError — a **known false positive**, don't act on it.
 - **`Literal` aliases** for closed enums (not `Enum`); closed shapes via Pydantic `extra="forbid"`.
 - **Pydantic `BaseModel`** for anything serialized to disk; **`@dataclass(slots=True)`** for
   in-memory-only structures (never serialized). This split is firm.
