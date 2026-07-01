@@ -212,7 +212,15 @@ def run(
     run_id, report = asyncio.run(_execute(plan, settings, cwd))
 
     if pr_target is not None:
-        _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
+        if report.coverage.contributed:
+            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
+        else:
+            # No review contributed -> the verdict is `error`, not a real review. Don't post a
+            # content-free "error" note to the PR.
+            typer.echo(
+                "aeview: not posting to the PR — no reviews contributed (nothing to review)",
+                err=True,
+            )
 
     # `run` emits the gate (full findings minus the result-only fields); the full report is
     # persisted to the run dir (read it via `aeview result`). The human form is the gate too
@@ -570,7 +578,7 @@ def _terminal_exit_code(rid: str) -> int:
     # (interrupted/failed before merge) is an error.
     try:
         return exit_code(RunStore(rid).read_report())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return EXIT_ERROR
 
 
@@ -696,7 +704,7 @@ def resume(
         # otherwise (crashed before merge) fall through to a merge-only resume.
         try:
             report = store.read_report()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             pass
         else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
@@ -744,7 +752,7 @@ def _run_row(manifest: RunManifest) -> dict:
     if state != "running":
         try:
             report = RunStore(manifest.run_id).read_report()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             report = None
         if report is not None:
             verdict = report_verdict_label(report)  # shares the contributed==0 rule with result

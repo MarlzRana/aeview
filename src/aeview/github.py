@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .process import run_sync
+from .process import ProcResult, run_sync
 from .report import report_verdict_label
 from .schema import Location, MergedFinding, Report
 
@@ -45,6 +46,18 @@ _GH_API_HEADERS = (
     "-H",
     "X-GitHub-Api-Version: 2022-11-28",
 )
+# Posting is a quick HTTP call made after the run already finished; bound it so a stalled gh
+# (auth prompt, network) can't hang the CLI — critical for the loop-until-clean automation.
+_GH_TIMEOUT_S = 60
+# Cap model-controlled text in a posted comment; the untruncated finding stays in report.json, and
+# the cap keeps a verbose review well under GitHub's per-comment size limit.
+_FIELD_CAP = 1500
+# `@` before a word char is a GitHub mention — a zero-width space defuses it (finding text is model
+# output from an untrusted diff, posted under the user's account; it must not ping people).
+_MENTION = re.compile(r"@(?=[A-Za-z0-9])")
+# The PR's own repo, parsed from its html_url (fork-safe: `gh api {owner}/{repo}` would resolve the
+# local fork, not the upstream the PR lives on). Falls back to gh's placeholders if unparsed.
+_PR_URL = re.compile(r"://[^/]+/([^/]+)/([^/]+)/pull/\d+")
 
 
 class GitHubError(Exception):
@@ -58,6 +71,10 @@ class PrTarget:
     number: int
     head_sha: str  # anchors comments to the PR head; stale if a commit lands mid-run
     url: str
+    # The PR's own repo; used to address the API explicitly instead of gh's cwd-derived
+    # {owner}/{repo} (which would target a local fork, not the upstream the PR lives on).
+    owner: str = "{owner}"
+    repo: str = "{repo}"
 
 
 @dataclass(slots=True)
@@ -82,7 +99,7 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
     if value:
         args.append(value)
     args += ["--json", "number,state,headRefOid,url"]
-    res = run_sync(args, cwd=cwd)
+    res = run_sync(args, cwd=cwd, timeout=_GH_TIMEOUT_S)
     if res.returncode != 0:
         where = f"PR #{value}" if value else "an open PR for the current branch"
         detail = res.stderr.strip()
@@ -103,7 +120,10 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
     number, head_sha, url = data.get("number"), data.get("headRefOid"), data.get("url")
     if not (isinstance(number, int) and isinstance(head_sha, str) and isinstance(url, str)):
         raise GitHubError("`gh pr view` returned an incomplete PR record (number/headRefOid/url).")
-    return PrTarget(number=number, head_sha=head_sha, url=url)
+    target = PrTarget(number=number, head_sha=head_sha, url=url)
+    if m := _PR_URL.search(url):  # address the PR's own repo, not gh's cwd-derived placeholders
+        target.owner, target.repo = m.group(1), m.group(2)
+    return target
 
 
 # --- diff line index (which lines can carry an inline comment) ------------------------
@@ -150,15 +170,22 @@ def _diff_added_lines(diff: str) -> dict[str, set[int]]:
     return index
 
 
-def _anchor(loc: Location, index: dict[str, set[int]]) -> int | None:
-    """The new-file line an inline comment can anchor to (always RIGHT side), or None if the
-    finding's line isn't in the diff (then it falls to the summary). Findings always cite
-    post-change lines, so a coincidental match against an old-file line would mis-place the comment
-    — hence RIGHT only."""
+def _anchor_position(loc: Location, index: dict[str, set[int]]) -> dict[str, object] | None:
+    """The inline-comment position (the GitHub `line`/`side` payload) for a finding, or None if its
+    start line isn't in the diff — then it falls to the summary. RIGHT-side only: findings cite
+    post-change lines, so a coincidental match against an old-file line would mis-place the comment.
+    A multi-line finding whose end line is also in the diff anchors the whole range."""
     lines = index.get(loc.file)
     if lines is None or loc.line_start not in lines:
         return None
-    return loc.line_start
+    if loc.line_end > loc.line_start and loc.line_end in lines:
+        return {
+            "start_line": loc.line_start,
+            "start_side": "RIGHT",
+            "line": loc.line_end,
+            "side": "RIGHT",
+        }
+    return {"line": loc.line_start, "side": "RIGHT"}
 
 
 # --- review payload -------------------------------------------------------------------
@@ -166,13 +193,32 @@ def _anchor(loc: Location, index: dict[str, set[int]]) -> int | None:
 
 @dataclass(slots=True)
 class BuiltReview:
-    payload: dict
+    payload: dict[str, object]
     inline_findings: int
     body_findings: int
 
 
+def _sanitize(text: str) -> str:
+    """Defuse model-controlled text before posting it to GitHub under the user's account: break
+    @mentions (they would ping people) and HTML-comment delimiters (they could spoof our hidden
+    markers or hide content). A zero-width space is invisible but breaks both constructs. GitHub
+    already neutralizes other raw HTML."""
+    zwsp = chr(0x200B)  # zero-width space: invisible, but breaks the mention / comment token
+    text = _MENTION.sub(f"@{zwsp}", text)
+    return text.replace("<!--", f"<!{zwsp}--").replace("-->", f"--{zwsp}>")
+
+
+def _clip(text: str, run_id: str) -> str:
+    """Bound one model-controlled field so a verbose finding can't blow the comment size limit; the
+    untruncated text stays in the persisted report."""
+    if len(text) <= _FIELD_CAP:
+        return text
+    return text[:_FIELD_CAP] + f"… _(truncated — full text in `aeview result {run_id}`)_"
+
+
 def _location_md(loc: Location) -> str:
-    loc_str = f"{loc.file}:{loc.line_start}"
+    # loc.file is model output; strip backticks so it can't break out of its code span.
+    loc_str = f"{loc.file.replace('`', '')}:{loc.line_start}"
     if loc.line_end != loc.line_start:
         loc_str += f"-{loc.line_end}"
     return f"`{loc_str}`"
@@ -190,15 +236,18 @@ def _provenance(f: MergedFinding) -> str:
 
 def _finding_md(f: MergedFinding, run_id: str, *, show_location: bool) -> str:
     """Render one finding. `show_location` is for body-listed (unanchored) findings, where there is
-    no inline anchor to convey the file/line; inline comments omit it (the anchor shows it)."""
-    head = f"`{f.severity}` · {f.category} — **{f.title}**"
+    no inline anchor to convey the file/line; inline comments omit it (the anchor shows it).
+
+    title/body/recommendation are model output derived from an untrusted diff, so they're sanitized
+    (mentions/markers) and length-capped before they're posted under the user's account."""
+    head = f"`{f.severity}` · {f.category} — **{_sanitize(f.title.strip())}**"
     if show_location:
         head = f"{_location_md(f.location)} · {head}"
     blocks = [
         _BADGE,
         head,
-        f.body.strip(),
-        f"**Fix:** {f.recommendation.strip()}",
+        _clip(_sanitize(f.body.strip()), run_id),
+        f"**Fix:** {_clip(_sanitize(f.recommendation.strip()), run_id)}",
         _provenance(f),
         _FINDING_MARKER.format(run_id=run_id, finding_id=f.id),
     ]
@@ -231,23 +280,29 @@ def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> Built
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped)."""
     index = _diff_added_lines(diff)
-    groups: dict[tuple[str, int], list[MergedFinding]] = {}
+    groups: dict[tuple[str, int, int], list[MergedFinding]] = {}
+    positions: dict[tuple[str, int, int], dict[str, object]] = {}
     unanchored: list[MergedFinding] = []
     for f in report.findings:
-        line = _anchor(f.location, index)
-        if line is None:
+        pos = _anchor_position(f.location, index)
+        if pos is None:
             unanchored.append(f)
-        else:
-            groups.setdefault((f.location.file, line), []).append(f)
+            continue
+        # Key on the resolved anchor (derived from the finding's own line ints) so findings on the
+        # exact same line/range share one thread — the API can't thread siblings — while different
+        # ranges stay separate comments.
+        loc = f.location
+        anchor_line = loc.line_end if "start_line" in pos else loc.line_start
+        key = (loc.file, anchor_line, loc.line_start)
+        groups.setdefault(key, []).append(f)
+        positions[key] = pos
     comments = [
         {
-            "path": path,
-            "line": line,
-            "side": "RIGHT",  # findings cite post-change lines; we only anchor on the new file
-            # Same-line findings share one comment (one thread): the API can't thread siblings.
+            "path": key[0],
+            **positions[key],
             "body": "\n\n---\n\n".join(_finding_md(f, run_id, show_location=False) for f in fs),
         }
-        for (path, line), fs in groups.items()
+        for key, fs in groups.items()
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
@@ -266,20 +321,22 @@ def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> Built
 # --- posting --------------------------------------------------------------------------
 
 
-def _gh_api_post(endpoint: str, body_json: str, cwd: Path):
-    # {owner}/{repo} are filled by gh from the repo at cwd; the JSON body is piped on stdin so a
-    # comments[] array (which `-f` flags can't express) and large bodies both pass cleanly.
+def _gh_api_post(endpoint: str, payload: Mapping[str, object], cwd: Path) -> ProcResult:
+    # The JSON body is encoded here (the single JSON boundary) and piped on stdin, so a comments[]
+    # array (which `-f` flags can't express) and large bodies both pass cleanly. Bounded by a
+    # timeout so a stalled gh can't hang the CLI after the run already produced its report.
     return run_sync(
         ["gh", "api", "--method", "POST", *_GH_API_HEADERS, endpoint, "--input", "-"],
         cwd=cwd,
-        input_text=body_json,
+        input_text=json.dumps(payload),
+        timeout=_GH_TIMEOUT_S,
     )
 
 
 def _html_url(stdout: str, fallback: str) -> str:
     try:
         return json.loads(stdout).get("html_url") or fallback
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return fallback
 
 
@@ -288,8 +345,8 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
     comment with every finding so nothing is lost. Raises GitHubError only if both posts fail."""
     built = build_review(report, run_id, target.head_sha, diff)
     res = _gh_api_post(
-        f"repos/{{owner}}/{{repo}}/pulls/{target.number}/reviews",
-        json.dumps(built.payload),
+        f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
+        built.payload,
         cwd,
     )
     if res.returncode == 0:
@@ -308,8 +365,8 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
     )
     body = _review_body(report, run_id, list(report.findings), note=note)
     cres = _gh_api_post(
-        f"repos/{{owner}}/{{repo}}/issues/{target.number}/comments",
-        json.dumps({"body": body}),
+        f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
+        {"body": body},
         cwd,
     )
     if cres.returncode != 0:

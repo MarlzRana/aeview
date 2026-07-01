@@ -568,6 +568,23 @@ def test_post_comments_posts_review_to_pr(
     assert "<!-- aeview:review run=" in posted["body"]
 
 
+def test_post_comments_skips_post_when_no_reviews_contributed(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # Every review fails -> contributed == 0 -> verdict is `error`, not a real review. Don't post a
+    # content-free "error" note to the PR.
+    stub_claude("error")
+    cap = tmp_path / "review.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert result.exit_code == 2  # error verdict (no reviews contributed)
+    assert "not posting to the PR" in result.stderr
+    assert not cap.exists()  # nothing was posted to GitHub
+
+
 def test_merge_settings_carries_the_pinned_dedup_plan():
     # run/resume re-merge with the harness frozen in run.json, never current settings.json.
     from aeview.cli import _merge_settings

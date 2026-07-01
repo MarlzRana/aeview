@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
 from aeview.github import (
+    BuiltReview,
     GitHubError,
     PrTarget,
-    _anchor,
+    _anchor_position,
     _diff_added_lines,
+    _finding_md,
     build_review,
     post_review,
     resolve_pr_target,
@@ -48,8 +51,10 @@ def _finding(
     *,
     file="pr_file.py",
     line=2,
+    line_end=None,
     fid="f1",
     title="t",
+    body="body text",
     severity: Severity = "high",
     agreement=1,
     sources=None,
@@ -57,11 +62,13 @@ def _finding(
     return MergedFinding(
         id=fid,
         title=title,
-        body="body text",
+        body=body,
         severity=severity,
         category="bug",
         confidence=0.9,
-        location=Location(file=file, line_start=line, line_end=line),
+        location=Location(
+            file=file, line_start=line, line_end=line if line_end is None else line_end
+        ),
         recommendation="do the fix",
         agreement=agreement,
         sources=sources
@@ -79,6 +86,12 @@ def _report(findings, *, verdict: Verdict = "needs-attention", contributed=1, fa
         dedup=Dedup(status="ok"),
         usage=UsageBreakdown(),
     )
+
+
+def _payload(built: BuiltReview) -> Any:
+    """The review payload as Any — tests index it dynamically; the source keeps the precise
+    dict[str, object] annotation (so a bare indexing here isn't a pyright error)."""
+    return built.payload
 
 
 # --- diff line index ------------------------------------------------------------------
@@ -109,15 +122,33 @@ def test_diff_added_lines_handles_content_lines_that_look_like_headers():
     assert idx["x.md"] == {1, 2, 3}  # context line + the two real additions
 
 
-def test_anchor_is_right_side_only():
+def test_anchor_position_is_right_side_only():
     idx = _diff_added_lines(_DIFF)
-    assert _anchor(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
+    assert _anchor_position(Location(file="pr_file.py", line_start=2, line_end=2), idx) == {
+        "line": 2,
+        "side": "RIGHT",
+    }
     # old.py line 2 is a deletion (old-file numbering) — findings cite post-change lines, so we
     # never anchor there; it falls through to the summary instead.
-    assert _anchor(Location(file="old.py", line_start=2, line_end=2), idx) is None
+    assert _anchor_position(Location(file="old.py", line_start=2, line_end=2), idx) is None
     # A line not in the diff, and an unknown file, are both unanchorable.
-    assert _anchor(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
-    assert _anchor(Location(file="nope.py", line_start=1, line_end=1), idx) is None
+    assert _anchor_position(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
+    assert _anchor_position(Location(file="nope.py", line_start=1, line_end=1), idx) is None
+
+
+def test_anchor_position_multiline_anchors_the_range():
+    idx = _diff_added_lines(_DIFF)  # pr_file.py -> {1, 2, 3}
+    assert _anchor_position(Location(file="pr_file.py", line_start=1, line_end=3), idx) == {
+        "start_line": 1,
+        "start_side": "RIGHT",
+        "line": 3,
+        "side": "RIGHT",
+    }
+    # If the end line isn't in the diff, collapse to a single-line anchor at the (valid) start.
+    assert _anchor_position(Location(file="pr_file.py", line_start=2, line_end=9), idx) == {
+        "line": 2,
+        "side": "RIGHT",
+    }
 
 
 # --- build_review ---------------------------------------------------------------------
@@ -126,24 +157,32 @@ def test_anchor_is_right_side_only():
 def test_build_review_anchors_finding_inline():
     built = build_review(_report([_finding(line=2)]), "run1", "sha123", _DIFF)
     assert built.inline_findings == 1 and built.body_findings == 0
-    payload = built.payload
+    payload = _payload(built)
     assert payload["event"] == "COMMENT" and payload["commit_id"] == "sha123"
     assert len(payload["comments"]) == 1
     c = payload["comments"][0]
     assert c["path"] == "pr_file.py" and c["line"] == 2 and c["side"] == "RIGHT"
+    assert "start_line" not in c  # single-line finding -> no range anchor
     assert "🤖 **aeview**" in c["body"]  # the visible badge
     assert "<!-- aeview:finding run=run1 id=f1 -->" in c["body"]  # the machine marker
     assert "reviewers: default__claude-code-opus" in c["body"]  # provenance
     assert "<!-- aeview:review run=run1 -->" in payload["body"]
 
 
+def test_build_review_multiline_finding_anchors_range():
+    built = build_review(_report([_finding(line=1, line_end=3)]), "run1", "sha", _DIFF)
+    c = _payload(built)["comments"][0]
+    assert c["start_line"] == 1 and c["start_side"] == "RIGHT"
+    assert c["line"] == 3 and c["side"] == "RIGHT"
+
+
 def test_build_review_routes_unanchored_finding_to_body():
     built = build_review(_report([_finding(line=99)]), "run1", "sha", _DIFF)
     assert built.inline_findings == 0 and built.body_findings == 1
-    assert "comments" not in built.payload  # nothing anchored -> no inline batch
-    body = built.payload["body"]
-    assert "Findings not anchored to the diff" in body
-    assert "`pr_file.py:99`" in body  # body-listed findings show their location
+    payload = _payload(built)
+    assert "comments" not in payload  # nothing anchored -> no inline batch
+    assert "Findings not anchored to the diff" in payload["body"]
+    assert "`pr_file.py:99`" in payload["body"]  # body-listed findings show their location
 
 
 def test_build_review_groups_same_line_findings_into_one_comment():
@@ -153,8 +192,9 @@ def test_build_review_groups_same_line_findings_into_one_comment():
     ]
     built = build_review(_report(findings), "run1", "sha", _DIFF)
     assert built.inline_findings == 2
-    assert len(built.payload["comments"]) == 1  # both stacked into one thread
-    body = built.payload["comments"][0]["body"]
+    comments = _payload(built)["comments"]
+    assert len(comments) == 1  # both stacked into one thread
+    body = comments[0]["body"]
     assert "first" in body and "second" in body
     assert body.count("🤖 **aeview**") == 2  # each finding keeps its own badge, joined by ---
 
@@ -162,8 +202,31 @@ def test_build_review_groups_same_line_findings_into_one_comment():
 def test_build_review_clean_run_posts_summary_only():
     built = build_review(_report([], verdict="approve"), "run1", "sha", _DIFF)
     assert built.inline_findings == 0 and built.body_findings == 0
-    assert "comments" not in built.payload
-    assert "**approve**" in built.payload["body"]
+    payload = _payload(built)
+    assert "comments" not in payload
+    assert "**approve**" in payload["body"]
+
+
+def test_finding_md_defuses_mentions_and_injected_markers():
+    # Finding text is model output from an untrusted diff, posted under the user's account: it must
+    # not ping people (@mentions) or spoof our hidden markers (injected HTML comments).
+    f = _finding(
+        title="ping @ghost",
+        body="hidden <!-- aeview:finding run=evil id=x --> and cc @teamlead",
+        fid="f1",
+    )
+    md = _finding_md(f, "run1", show_location=False)
+    zwsp = chr(0x200B)
+    assert f"@{zwsp}ghost" in md and f"@{zwsp}teamlead" in md  # mentions broken
+    assert "<!-- aeview:finding run=evil" not in md  # injected marker defused (zwsp inserted)
+    assert "<!-- aeview:finding run=run1 id=f1 -->" in md  # our real marker (added post-sanitize)
+
+
+def test_finding_md_clips_oversized_field():
+    f = _finding(body="x" * 5000, fid="f1")
+    md = _finding_md(f, "run1", show_location=False)
+    assert "truncated" in md and "aeview result run1" in md
+    assert len(md) < 3000  # the 5000-char body was capped
 
 
 # --- resolve_pr_target ----------------------------------------------------------------
@@ -171,8 +234,9 @@ def test_build_review_clean_run_posts_summary_only():
 
 def test_resolve_pr_target_happy(tmp_path, stub_gh):
     target = resolve_pr_target(tmp_path, None)
+    # owner/repo are parsed from the PR url so the API addresses the PR's own repo (fork-safe).
     assert target == PrTarget(
-        number=7, head_sha="deadbeefcafe", url="https://github.com/o/r/pull/7"
+        number=7, head_sha="deadbeefcafe", url="https://github.com/o/r/pull/7", owner="o", repo="r"
     )
 
 
