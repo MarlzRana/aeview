@@ -10,7 +10,7 @@ from aeview.github import (
     GitHubError,
     PrTarget,
     _anchor_position,
-    _diff_added_lines,
+    _diff_anchorable_lines,
     _finding_md,
     build_review,
     post_review,
@@ -97,15 +97,15 @@ def _payload(built: BuiltReview) -> Any:
 # --- diff line index ------------------------------------------------------------------
 
 
-def test_diff_added_lines_tracks_new_file_lines_only():
-    idx = _diff_added_lines(_DIFF)
+def test_diff_anchorable_lines_tracks_new_file_lines_only():
+    idx = _diff_anchorable_lines(_DIFF)
     assert idx["pr_file.py"] == {1, 2, 3}  # context line 1 + the two additions
     # old.py's only change is a deletion (old-file side); the surviving context line is its sole
     # new-file line — deletions have no new-file number, so they aren't anchorable.
     assert idx["old.py"] == {1}
 
 
-def test_diff_added_lines_handles_content_lines_that_look_like_headers():
+def test_diff_anchorable_lines_handles_content_lines_that_look_like_headers():
     # An added line whose own text starts with '++ ' makes the diff line read '+++ ...'; inside a
     # hunk that's content, not a new-file header. The parser must keep counting, not reset on it.
     diff = (
@@ -117,13 +117,13 @@ def test_diff_added_lines_handles_content_lines_that_look_like_headers():
         "+++ a bullet whose text starts with plus-plus\n"
         "+normal added line\n"
     )
-    idx = _diff_added_lines(diff)
+    idx = _diff_anchorable_lines(diff)
     assert set(idx) == {"x.md"}  # the '+++ a bullet...' content line was NOT taken as a header
     assert idx["x.md"] == {1, 2, 3}  # context line + the two real additions
 
 
 def test_anchor_position_is_right_side_only():
-    idx = _diff_added_lines(_DIFF)
+    idx = _diff_anchorable_lines(_DIFF)
     assert _anchor_position(Location(file="pr_file.py", line_start=2, line_end=2), idx) == {
         "line": 2,
         "side": "RIGHT",
@@ -137,7 +137,7 @@ def test_anchor_position_is_right_side_only():
 
 
 def test_anchor_position_multiline_anchors_the_range():
-    idx = _diff_added_lines(_DIFF)  # pr_file.py -> {1, 2, 3}
+    idx = _diff_anchorable_lines(_DIFF)  # pr_file.py -> {1, 2, 3}
     assert _anchor_position(Location(file="pr_file.py", line_start=1, line_end=3), idx) == {
         "start_line": 1,
         "start_side": "RIGHT",
@@ -280,3 +280,15 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     assert "could not attach inline comments" in body
     assert "<!-- aeview:finding run=run1 id=f1 -->" in body  # every finding carried over
     assert "<!-- aeview:finding run=run1 id=f2 -->" in body
+
+
+def test_post_review_timeout_does_not_fall_back(tmp_path, stub_gh, monkeypatch):
+    # A timed-out reviews POST is ambiguous — GitHub may have created it server-side. Falling back
+    # to a comment would double-post, so we raise instead and post nothing more.
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "timeout")
+    cap = tmp_path / "comment.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE_COMMENT", str(cap))
+    target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
+    with pytest.raises(GitHubError, match="timed out"):
+        post_review(target, _report([_finding(line=2)]), "run1", _DIFF, tmp_path)
+    assert not cap.exists()  # no fallback comment -> no duplicate artifact

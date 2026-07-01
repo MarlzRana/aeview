@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .process import ProcResult, run_sync
+from .process import TIMED_OUT, ProcResult, run_sync
 from .report import report_verdict_label
 from .schema import Location, MergedFinding, Report
 
@@ -131,7 +131,7 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
 _HUNK = re.compile(r"^@@ -(?:\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def _diff_added_lines(diff: str) -> dict[str, set[int]]:
+def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
     """Map each changed file to the new-file line numbers a comment can anchor to (additions +
     context). Findings cite post-change lines, so anchoring is RIGHT-side only — an old-file line
     (a deletion) has no new-file number and can't be anchored, so it isn't tracked.
@@ -162,7 +162,7 @@ def _diff_added_lines(diff: str) -> dict[str, set[int]]:
         if line.startswith("+"):  # an added line: a new-file line a comment can anchor to
             current.add(new_no)
             new_no += 1
-        elif line.startswith("-") or line.startswith("\\"):
+        elif line.startswith(("-", "\\")):
             continue  # a deletion (old-file only) or the "\ No newline" marker: no new-file line
         else:  # context line: present in the new file too
             current.add(new_no)
@@ -279,7 +279,7 @@ def _review_body(
 def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped)."""
-    index = _diff_added_lines(diff)
+    index = _diff_anchorable_lines(diff)
     groups: dict[tuple[str, int, int], list[MergedFinding]] = {}
     positions: dict[tuple[str, int, int], dict[str, object]] = {}
     unanchored: list[MergedFinding] = []
@@ -355,9 +355,16 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
             inline=built.inline_findings,
             in_body=built.body_findings,
         )
+    if res.returncode == TIMED_OUT:
+        # A timed-out POST is ambiguous: GitHub may have created the review server-side, so falling
+        # back to a comment would double-post. Surface it instead of guessing (idempotency test).
+        raise GitHubError(
+            f"posting the review to PR #{target.number} timed out after {_GH_TIMEOUT_S}s; it may "
+            "or may not have been created — check the PR before re-running --post-comments."
+        )
 
-    # The create-review call is all-or-nothing; rather than drop the findings, post them all as one
-    # top-level PR comment (an issue comment) and tell the caller we degraded.
+    # A definite (non-timeout) rejection: the review was NOT created. Rather than drop the findings,
+    # post them all as one top-level PR comment (an issue comment) and tell the caller we degraded.
     reason = res.stderr.strip() or f"gh exited {res.returncode}"
     note = (
         "_aeview could not attach inline comments to the diff "
