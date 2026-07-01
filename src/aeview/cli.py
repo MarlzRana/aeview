@@ -26,6 +26,7 @@ from .bundle import Bundle, build_bundle
 from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
 from .fanout import fan_out
+from .github import GitHubError, PostResult, PrTarget, post_review, resolve_pr_target
 from .ignore import filter_resolved
 from .merge import merge_reviews
 from .prompt import compose_prompt
@@ -159,6 +160,14 @@ def run(
             help="Preview roster, scope, and bundle size; make no model calls, persist nothing.",
         ),
     ] = False,
+    post_comments: Annotated[
+        bool,
+        typer.Option(
+            "--post-comments",
+            help="Only with --scope pr: post the merged review onto the PR on GitHub (one review "
+            "per run, via `gh`). Needs an open PR and authenticated `gh`.",
+        ),
+    ] = False,
     json_out: Annotated[
         bool,
         typer.Option(
@@ -174,16 +183,20 @@ def run(
     try:
         names = _split_reviewers(reviewers)
         stype, value = parse_scope(scope)
+        _validate_post_comments(post_comments, stype)
         patch_text = _read_patch(value) if stype == "patch" else None
         plan = _plan_run(
             names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings
         )
-    except (ScopeError, ResolveError) as exc:
+        # Resolve (and require an open) PR before the fan-out, so --post-comments fails fast instead
+        # of spending a whole panel only to find nowhere to post.
+        pr_target = resolve_pr_target(cwd, value) if post_comments else None
+    except (ScopeError, ResolveError, GitHubError) as exc:
         typer.echo(f"aeview: {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
 
     if dry_run:
-        typer.echo(_render_dry_run(plan, settings))
+        typer.echo(_render_dry_run(plan, settings, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
@@ -197,6 +210,17 @@ def run(
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
     run_id, report = asyncio.run(_execute(plan, settings, cwd))
+
+    if pr_target is not None:
+        # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
+        # than re-deriving the threshold: an `error` verdict means no real review to post.
+        if report_verdict_label(report) != "error":
+            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
+        else:
+            typer.echo(
+                "aeview: not posting to the PR — no reviews contributed (nothing to review)",
+                err=True,
+            )
 
     # `run` emits the gate (full findings minus the result-only fields); the full report is
     # persisted to the run dir (read it via `aeview result`). The human form is the gate too
@@ -250,6 +274,42 @@ def _read_patch(value: str | None) -> str:
     if not path.is_file():
         raise ScopeError(f"patch file not found: {value}")
     return path.read_text(encoding="utf-8")
+
+
+def _validate_post_comments(post_comments: bool, stype: str) -> None:
+    """--post-comments only has meaning for --scope pr (it posts onto that PR). Reject the
+    combination loudly and early, with a fix the agent driving the CLI can act on."""
+    if post_comments and stype != "pr":
+        raise ScopeError(
+            f"--post-comments only works with --scope pr, but the scope is '{stype}'. "
+            "Re-run with --scope pr to post the panel's review to that PR on GitHub, "
+            "or drop --post-comments."
+        )
+
+
+def _post_to_pr(target: PrTarget, report: Report, run_id: str, diff: str, cwd: Path) -> None:
+    """Post the merged report onto the PR and report what landed on stderr (so --json stdout stays
+    the pure gate). The review already ran, so a posting failure is surfaced, never fatal."""
+    try:
+        posted = post_review(target, report, run_id, diff, cwd)
+    except GitHubError as exc:
+        typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
+        return
+    typer.echo(_posted_summary(posted), err=True)
+
+
+def _posted_summary(p: PostResult) -> str:
+    if p.fallback_reason:
+        return (
+            f"aeview: GitHub rejected the inline review ({p.fallback_reason}); posted all "
+            f"{p.in_body} finding(s) as one summary comment: {p.url}"
+        )
+    if p.inline + p.in_body == 0:
+        return f"aeview: posted an approval note to the PR: {p.url}"
+    return (
+        f"aeview: posted a review to the PR "
+        f"({p.inline} inline, {p.in_body} in the summary): {p.url}"
+    )
 
 
 def _dedup_plan(roster: list[RosterEntry], settings: Settings) -> DedupPlan | None:
@@ -442,7 +502,7 @@ async def _run_reviews_and_merge(
     return report
 
 
-def _render_dry_run(plan: _Plan, settings: Settings) -> str:
+def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None = None) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
     ignored_display = ", ".join(plan.ignored) or "—"
@@ -466,6 +526,10 @@ def _render_dry_run(plan: _Plan, settings: Settings) -> str:
         lines.append("dedup: skipped (single review)")
     else:
         lines.append("dedup: not configured (findings pass through as a raw union)")
+    if pr_target is not None:
+        lines.append(
+            f"post-comments: will post a review to PR #{pr_target.number} ({pr_target.url})"
+        )
     return "\n".join(lines)
 
 

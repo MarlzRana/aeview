@@ -1,19 +1,56 @@
 #!/usr/bin/env python3
 """Offline stub of the `gh` CLI for Tier-1 tests.
 
-Handles just what aeview's pr scope uses:
-  gh pr view --json baseRefName   -> {"baseRefName": "<AEVIEW_GH_BASE or main>"}
-  gh pr diff [<number>]           -> a small canned unified diff
+Handles just what aeview uses:
+  gh pr view [<n>] --json <fields>  -> a PR record (baseRefName/number/state/headRefOid/url)
+  gh pr diff [<number>]             -> a small canned unified diff
+  gh api ... /pulls/<n>/reviews     -> records the posted review body, returns a fake html_url
+  gh api ... /issues/<n>/comments   -> records the posted comment body, returns a fake html_url
+
+Behaviour is steered by env vars so a test can simulate the non-happy paths:
+  AEVIEW_GH_BASE         base branch name (default "main")
+  AEVIEW_GH_NO_PR        if set, `gh pr view` exits 1 (no PR for the branch)
+  AEVIEW_GH_PR_STATE     PR state for `gh pr view` (default "OPEN")
+  AEVIEW_GH_PR_NUMBER    PR number (default 7)
+  AEVIEW_GH_HEAD_SHA     PR head sha (default "deadbeefcafe")
+  AEVIEW_GH_PR_URL       PR url (default https://github.com/o/r/pull/7)
+  AEVIEW_GH_API_FAIL     "reviews" -> reviews POST exits 1 (forces the comment fallback);
+                         "timeout" -> reviews POST exits 124 (mimics a run_sync timeout)
+  AEVIEW_GH_CAPTURE          file to write the reviews POST body to
+  AEVIEW_GH_CAPTURE_COMMENT  file to write the issues-comment POST body to
 """
 
 import json
 import os
 import sys
+from pathlib import Path
 
 argv = sys.argv[1:]
 
+
+def _read_input(args):
+    """Return the request body for `gh api ... --input <src>` (`-` means stdin)."""
+    if "--input" not in args:
+        return ""
+    src = args[args.index("--input") + 1]
+    return sys.stdin.read() if src == "-" else Path(src).read_text()
+
+
 if argv[:2] == ["pr", "view"]:
-    sys.stdout.write(json.dumps({"baseRefName": os.environ.get("AEVIEW_GH_BASE", "main")}))
+    if os.environ.get("AEVIEW_GH_NO_PR"):
+        sys.stderr.write("no pull requests found for the current branch\n")
+        sys.exit(1)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "baseRefName": os.environ.get("AEVIEW_GH_BASE", "main"),
+                "number": int(os.environ.get("AEVIEW_GH_PR_NUMBER", "7")),
+                "state": os.environ.get("AEVIEW_GH_PR_STATE", "OPEN"),
+                "headRefOid": os.environ.get("AEVIEW_GH_HEAD_SHA", "deadbeefcafe"),
+                "url": os.environ.get("AEVIEW_GH_PR_URL", "https://github.com/o/r/pull/7"),
+            }
+        )
+    )
     sys.exit(0)
 
 if argv[:2] == ["pr", "diff"]:
@@ -27,6 +64,28 @@ if argv[:2] == ["pr", "diff"]:
         "+y = 2\n"
     )
     sys.exit(0)
+
+if argv[:1] == ["api"]:
+    endpoint = next((a for a in argv if "/pulls/" in a or "/issues/" in a), "")
+    body = _read_input(argv)
+    url = os.environ.get("AEVIEW_GH_PR_URL", "https://github.com/o/r/pull/7")
+    if endpoint.endswith("/reviews"):
+        if os.environ.get("AEVIEW_GH_API_FAIL") == "reviews":
+            sys.stderr.write("HTTP 422: Validation Failed (line must be part of the diff)\n")
+            sys.exit(1)
+        if os.environ.get("AEVIEW_GH_API_FAIL") == "timeout":
+            sys.exit(124)  # mimic run_sync's TIMED_OUT return (ambiguous: may have posted)
+        if cap := os.environ.get("AEVIEW_GH_CAPTURE"):
+            Path(cap).write_text(body)
+        sys.stdout.write(json.dumps({"html_url": f"{url}#pullrequestreview-1"}))
+        sys.exit(0)
+    if endpoint.endswith("/comments"):
+        if cap := os.environ.get("AEVIEW_GH_CAPTURE_COMMENT"):
+            Path(cap).write_text(body)
+        sys.stdout.write(json.dumps({"html_url": f"{url}#issuecomment-1"}))
+        sys.exit(0)
+    sys.stderr.write(f"gh stub: unhandled api endpoint {endpoint!r}\n")
+    sys.exit(1)
 
 sys.stderr.write(f"gh stub: unhandled args {argv}\n")
 sys.exit(1)
