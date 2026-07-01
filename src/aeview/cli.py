@@ -212,11 +212,11 @@ def run(
     run_id, report = asyncio.run(_execute(plan, settings, cwd))
 
     if pr_target is not None:
-        if report.coverage.contributed:
+        # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
+        # than re-deriving the threshold: an `error` verdict means no real review to post.
+        if report_verdict_label(report) != "error":
             _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
         else:
-            # No review contributed -> the verdict is `error`, not a real review. Don't post a
-            # content-free "error" note to the PR.
             typer.echo(
                 "aeview: not posting to the PR — no reviews contributed (nothing to review)",
                 err=True,

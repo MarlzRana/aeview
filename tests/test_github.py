@@ -9,7 +9,7 @@ from aeview.github import (
     BuiltReview,
     GitHubError,
     PrTarget,
-    _anchor_position,
+    _anchor_line,
     _diff_anchorable_lines,
     _finding_md,
     build_review,
@@ -122,33 +122,32 @@ def test_diff_anchorable_lines_handles_content_lines_that_look_like_headers():
     assert idx["x.md"] == {1, 2, 3}  # context line + the two real additions
 
 
-def test_anchor_position_is_right_side_only():
+def test_diff_anchorable_lines_unquotes_paths_with_spaces():
+    # git C-quotes a path containing a space: `+++ "b/weird name.py"`. Unwrap the quotes so the
+    # finding's real path can still match and anchor inline.
+    diff = (
+        'diff --git "a/weird name.py" "b/weird name.py"\n'
+        '--- "a/weird name.py"\n'
+        '+++ "b/weird name.py"\n'
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+y = 2\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    assert idx == {"weird name.py": {1, 2}}
+
+
+def test_anchor_line_is_right_side_only_and_single_line():
     idx = _diff_anchorable_lines(_DIFF)
-    assert _anchor_position(Location(file="pr_file.py", line_start=2, line_end=2), idx) == {
-        "line": 2,
-        "side": "RIGHT",
-    }
-    # old.py line 2 is a deletion (old-file numbering) — findings cite post-change lines, so we
-    # never anchor there; it falls through to the summary instead.
-    assert _anchor_position(Location(file="old.py", line_start=2, line_end=2), idx) is None
+    assert _anchor_line(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
+    # A multi-line finding still anchors at its (single) start line — no cross-hunk range anchor.
+    assert _anchor_line(Location(file="pr_file.py", line_start=1, line_end=3), idx) == 1
+    # old.py line 2 is a deletion (old-file numbering); findings cite post-change lines, so it
+    # never anchors there and falls through to the summary.
+    assert _anchor_line(Location(file="old.py", line_start=2, line_end=2), idx) is None
     # A line not in the diff, and an unknown file, are both unanchorable.
-    assert _anchor_position(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
-    assert _anchor_position(Location(file="nope.py", line_start=1, line_end=1), idx) is None
-
-
-def test_anchor_position_multiline_anchors_the_range():
-    idx = _diff_anchorable_lines(_DIFF)  # pr_file.py -> {1, 2, 3}
-    assert _anchor_position(Location(file="pr_file.py", line_start=1, line_end=3), idx) == {
-        "start_line": 1,
-        "start_side": "RIGHT",
-        "line": 3,
-        "side": "RIGHT",
-    }
-    # If the end line isn't in the diff, collapse to a single-line anchor at the (valid) start.
-    assert _anchor_position(Location(file="pr_file.py", line_start=2, line_end=9), idx) == {
-        "line": 2,
-        "side": "RIGHT",
-    }
+    assert _anchor_line(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
+    assert _anchor_line(Location(file="nope.py", line_start=1, line_end=1), idx) is None
 
 
 # --- build_review ---------------------------------------------------------------------
@@ -169,11 +168,13 @@ def test_build_review_anchors_finding_inline():
     assert "<!-- aeview:review run=run1 -->" in payload["body"]
 
 
-def test_build_review_multiline_finding_anchors_range():
+def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
+    # Single-line anchor at the start (no fragile cross-hunk range); the full span is in the body.
     built = build_review(_report([_finding(line=1, line_end=3)]), "run1", "sha", _DIFF)
     c = _payload(built)["comments"][0]
-    assert c["start_line"] == 1 and c["start_side"] == "RIGHT"
-    assert c["line"] == 3 and c["side"] == "RIGHT"
+    assert c["line"] == 1 and c["side"] == "RIGHT"
+    assert "start_line" not in c  # no native multi-line range anchor
+    assert "lines 1–3" in c["body"]  # the span is conveyed in the comment text instead
 
 
 def test_build_review_routes_unanchored_finding_to_body():
@@ -282,13 +283,14 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     assert "<!-- aeview:finding run=run1 id=f2 -->" in body
 
 
-def test_post_review_timeout_does_not_fall_back(tmp_path, stub_gh, monkeypatch):
-    # A timed-out reviews POST is ambiguous — GitHub may have created it server-side. Falling back
-    # to a comment would double-post, so we raise instead and post nothing more.
-    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "timeout")
+def test_post_review_ambiguous_failure_does_not_fall_back(tmp_path, stub_gh, monkeypatch):
+    # A timed-out (or otherwise non-4xx) reviews POST is ambiguous — GitHub may have created it
+    # server-side. Falling back to a comment would double-post, so we raise and post nothing more.
+    # (A definite 4xx rejection, by contrast, DOES fall back — see the test above.)
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "timeout")  # exits 124, no "HTTP 4xx" in stderr
     cap = tmp_path / "comment.json"
     monkeypatch.setenv("AEVIEW_GH_CAPTURE_COMMENT", str(cap))
     target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
-    with pytest.raises(GitHubError, match="timed out"):
+    with pytest.raises(GitHubError, match="ambiguously"):
         post_review(target, _report([_finding(line=2)]), "run1", _DIFF, tmp_path)
     assert not cap.exists()  # no fallback comment -> no duplicate artifact

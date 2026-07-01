@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .process import TIMED_OUT, ProcResult, run_sync
+from .process import ProcResult, run_sync
 from .report import report_verdict_label
 from .schema import Location, MergedFinding, Report
 
@@ -58,6 +58,9 @@ _MENTION = re.compile(r"@(?=[A-Za-z0-9])")
 # The PR's own repo, parsed from its html_url (fork-safe: `gh api {owner}/{repo}` would resolve the
 # local fork, not the upstream the PR lives on). Falls back to gh's placeholders if unparsed.
 _PR_URL = re.compile(r"://[^/]+/([^/]+)/([^/]+)/pull/\d+")
+# A 4xx from `gh api` means the request was rejected and the review was NOT created (safe to salvage
+# via a comment). `gh` prints the status like "(HTTP 422)" on stderr; anything else is ambiguous.
+_CLIENT_REJECTION = re.compile(r"HTTP 4\d\d")
 
 
 class GitHubError(Exception):
@@ -120,10 +123,11 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
     number, head_sha, url = data.get("number"), data.get("headRefOid"), data.get("url")
     if not (isinstance(number, int) and isinstance(head_sha, str) and isinstance(url, str)):
         raise GitHubError("`gh pr view` returned an incomplete PR record (number/headRefOid/url).")
-    target = PrTarget(number=number, head_sha=head_sha, url=url)
-    if m := _PR_URL.search(url):  # address the PR's own repo, not gh's cwd-derived placeholders
-        target.owner, target.repo = m.group(1), m.group(2)
-    return target
+    # Address the PR's own repo (parsed from its url), not gh's cwd-derived {owner}/{repo}.
+    owner, repo = "{owner}", "{repo}"
+    if m := _PR_URL.search(url):
+        owner, repo = m.group(1), m.group(2)
+    return PrTarget(number=number, head_sha=head_sha, url=url, owner=owner, repo=repo)
 
 
 # --- diff line index (which lines can carry an inline comment) ------------------------
@@ -154,7 +158,10 @@ def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
             continue
         if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
             if line.startswith("+++ "):
-                path = line[4:].split("\t", 1)[0].removeprefix("b/")
+                raw = line[4:].split("\t", 1)[0]
+                if raw.startswith('"') and raw.endswith('"'):
+                    raw = raw[1:-1]  # git C-quotes paths with spaces/specials; unwrap the quotes
+                path = raw.removeprefix("b/")
                 current = None if path == "/dev/null" else index.setdefault(path, set())
             continue
         if current is None:
@@ -170,22 +177,19 @@ def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
     return index
 
 
-def _anchor_position(loc: Location, index: dict[str, set[int]]) -> dict[str, object] | None:
-    """The inline-comment position (the GitHub `line`/`side` payload) for a finding, or None if its
+def _anchor_line(loc: Location, index: dict[str, set[int]]) -> int | None:
+    """The new-file line an inline comment anchors to (always RIGHT side), or None if the finding's
     start line isn't in the diff — then it falls to the summary. RIGHT-side only: findings cite
     post-change lines, so a coincidental match against an old-file line would mis-place the comment.
-    A multi-line finding whose end line is also in the diff anchors the whole range."""
+
+    Single-line by design: GitHub requires a multi-line range's two ends to sit in the *same* hunk,
+    and a cross-hunk range 422s the *entire* review batch (dumping every inline comment to the
+    fallback). Not worth that fragility — we anchor the start line and put the full range in the
+    comment body instead (see `_provenance`)."""
     lines = index.get(loc.file)
     if lines is None or loc.line_start not in lines:
         return None
-    if loc.line_end > loc.line_start and loc.line_end in lines:
-        return {
-            "start_line": loc.line_start,
-            "start_side": "RIGHT",
-            "line": loc.line_end,
-            "side": "RIGHT",
-        }
-    return {"line": loc.line_start, "side": "RIGHT"}
+    return loc.line_start
 
 
 # --- review payload -------------------------------------------------------------------
@@ -229,6 +233,9 @@ def _provenance(f: MergedFinding) -> str:
     clear which panel member spoke even though the comment is authored by the gh user."""
     reviewers = ", ".join(s.review for s in f.sources) or "—"
     bits = [f"reviewers: {reviewers}", f"confidence {f.confidence:.2f}"]
+    loc = f.location
+    if loc.line_end != loc.line_start:  # anchor is single-line; convey the full span here
+        bits.append(f"lines {loc.line_start}–{loc.line_end}")
     if f.agreement > 1:
         bits.append(f"agreement ×{f.agreement}")
     return "<sub>" + " · ".join(bits) + "</sub>"
@@ -280,29 +287,23 @@ def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> Built
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped)."""
     index = _diff_anchorable_lines(diff)
-    groups: dict[tuple[str, int, int], list[MergedFinding]] = {}
-    positions: dict[tuple[str, int, int], dict[str, object]] = {}
+    groups: dict[tuple[str, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
     for f in report.findings:
-        pos = _anchor_position(f.location, index)
-        if pos is None:
+        line = _anchor_line(f.location, index)
+        if line is None:
             unanchored.append(f)
-            continue
-        # Key on the resolved anchor (derived from the finding's own line ints) so findings on the
-        # exact same line/range share one thread — the API can't thread siblings — while different
-        # ranges stay separate comments.
-        loc = f.location
-        anchor_line = loc.line_end if "start_line" in pos else loc.line_start
-        key = (loc.file, anchor_line, loc.line_start)
-        groups.setdefault(key, []).append(f)
-        positions[key] = pos
+        else:
+            # Findings on the same line share one comment/thread (the API can't thread siblings).
+            groups.setdefault((f.location.file, line), []).append(f)
     comments = [
         {
-            "path": key[0],
-            **positions[key],
+            "path": path,
+            "line": line,
+            "side": "RIGHT",  # findings cite post-change lines; we only anchor on the new file
             "body": "\n\n---\n\n".join(_finding_md(f, run_id, show_location=False) for f in fs),
         }
-        for key, fs in groups.items()
+        for (path, line), fs in groups.items()
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
@@ -355,17 +356,18 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
             inline=built.inline_findings,
             in_body=built.body_findings,
         )
-    if res.returncode == TIMED_OUT:
-        # A timed-out POST is ambiguous: GitHub may have created the review server-side, so falling
-        # back to a comment would double-post. Surface it instead of guessing (idempotency test).
+    reason = res.stderr.strip() or f"gh exited {res.returncode}"
+    # Only a definite 4xx rejection proves the review was NOT created (safe to salvage via a
+    # comment). Anything else (timeout, 5xx, network) is ambiguous — the review may exist, so a
+    # fallback would double-post; raise instead.
+    if not _CLIENT_REJECTION.search(res.stderr):
         raise GitHubError(
-            f"posting the review to PR #{target.number} timed out after {_GH_TIMEOUT_S}s; it may "
-            "or may not have been created — check the PR before re-running --post-comments."
+            f"posting the review to PR #{target.number} failed ambiguously ({reason}); it may or "
+            "may not have been created — check the PR before re-running --post-comments."
         )
 
-    # A definite (non-timeout) rejection: the review was NOT created. Rather than drop the findings,
-    # post them all as one top-level PR comment (an issue comment) and tell the caller we degraded.
-    reason = res.stderr.strip() or f"gh exited {res.returncode}"
+    # Definite rejection: rather than drop the findings, post them all as one top-level PR comment
+    # (an issue comment) and tell the caller we degraded.
     note = (
         "_aeview could not attach inline comments to the diff "
         f"({reason}); all findings are listed below._"
