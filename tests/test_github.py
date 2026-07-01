@@ -261,7 +261,7 @@ def test_post_review_posts_one_review(tmp_path, stub_gh, monkeypatch):
     monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
     target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
     result = post_review(target, _report([_finding(line=2)]), "run1", _DIFF, tmp_path)
-    assert not result.fell_back
+    assert result.fallback_reason is None
     assert result.inline == 1 and result.in_body == 0
     assert "pullrequestreview" in result.url
     posted = json.loads(cap.read_text())
@@ -276,7 +276,7 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
     findings = [_finding(line=2, fid="f1"), _finding(line=99, fid="f2")]
     result = post_review(target, _report(findings), "run1", _DIFF, tmp_path)
-    assert result.fell_back and result.in_body == 2 and result.inline == 0
+    assert result.fallback_reason and result.in_body == 2 and result.inline == 0
     body = json.loads(cap.read_text())["body"]
     assert "could not attach inline comments" in body
     assert "<!-- aeview:finding run=run1 id=f1 -->" in body  # every finding carried over

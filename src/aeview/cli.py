@@ -299,9 +299,9 @@ def _post_to_pr(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
 
 
 def _posted_summary(p: PostResult) -> str:
-    if p.fell_back:
+    if p.fallback_reason:
         return (
-            f"aeview: GitHub rejected the inline review ({p.reason}); posted all "
+            f"aeview: GitHub rejected the inline review ({p.fallback_reason}); posted all "
             f"{p.in_body} finding(s) as one summary comment: {p.url}"
         )
     if p.inline + p.in_body == 0:

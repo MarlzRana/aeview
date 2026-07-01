@@ -87,8 +87,9 @@ class PostResult:
     url: str
     inline: int  # findings posted as inline comments
     in_body: int  # findings listed in the summary body (unanchored, or all of them on fallback)
-    fell_back: bool = False  # the review API rejected the batch; posted one summary comment instead
-    reason: str | None = None
+    # Set (and the review became a single top-level comment) iff the inline post was rejected and we
+    # degraded; None on the normal path. One field, since it fully encodes "did we fall back".
+    fallback_reason: str | None = None
 
 
 # --- PR target resolution -------------------------------------------------------------
@@ -372,7 +373,7 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
         "_aeview could not attach inline comments to the diff "
         f"({reason}); all findings are listed below._"
     )
-    body = _review_body(report, run_id, list(report.findings), note=note)
+    body = _review_body(report, run_id, report.findings, note=note)
     cres = _gh_api_post(
         f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
         {"body": body},
@@ -387,6 +388,5 @@ def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: P
         url=_html_url(cres.stdout, target.url),
         inline=0,
         in_body=len(report.findings),
-        fell_back=True,
-        reason=reason,
+        fallback_reason=reason,
     )
