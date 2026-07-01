@@ -570,7 +570,7 @@ def _terminal_exit_code(rid: str) -> int:
     # (interrupted/failed before merge) is an error.
     try:
         return exit_code(RunStore(rid).read_report())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return EXIT_ERROR
 
 
@@ -696,7 +696,7 @@ def resume(
         # otherwise (crashed before merge) fall through to a merge-only resume.
         try:
             report = store.read_report()
-        except OSError, ValueError:
+        except (OSError, ValueError):
             pass
         else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
@@ -744,7 +744,7 @@ def _run_row(manifest: RunManifest) -> dict:
     if state != "running":
         try:
             report = RunStore(manifest.run_id).read_report()
-        except OSError, ValueError:
+        except (OSError, ValueError):
             report = None
         if report is not None:
             verdict = report_verdict_label(report)  # shares the contributed==0 rule with result

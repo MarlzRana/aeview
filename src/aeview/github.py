@@ -279,7 +279,7 @@ def _gh_api_post(endpoint: str, body_json: str, cwd: Path):
 def _html_url(stdout: str, fallback: str) -> str:
     try:
         return json.loads(stdout).get("html_url") or fallback
-    except json.JSONDecodeError, AttributeError:
+    except (json.JSONDecodeError, AttributeError):
         return fallback
 
 
