@@ -138,10 +138,10 @@ def test_diff_anchorable_lines_unquotes_paths_with_spaces():
 
 
 def test_diff_anchorable_lines_splits_on_newline_only():
-    # str.splitlines() breaks on \f \x85 U+2028 U+2029 (and more), so a diff *content* line carrying
-    # one of those would be split in two — a phantom iteration that throws new_no off by one for the
+    # str.splitlines() breaks on \v \f \x1c-\x1e \x85 U+2028 U+2029, so a diff *content* line
+    # carrying one would be split in two — a phantom iteration that throws new_no off by one for the
     # rest of the hunk. Splitting on "\n" alone (with a \r rstrip) keeps the numbering correct.
-    exotic = "a\u2028b\u2029c\fd\x85e"  # separators splitlines() breaks on, inside one line
+    exotic = "a\u2028b\u2029c\fd\x85e\vf\x1c\x1d\x1eg"  # every separator splitlines() splits on
     diff = (
         "diff --git a/x.py b/x.py\n"
         "--- a/x.py\n"
