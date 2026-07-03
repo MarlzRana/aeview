@@ -424,10 +424,11 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     head_before = _pr_head(cwd, value) if capture_head else None
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
+    # Pin the head only if the pre-diff read succeeded and the post-diff read still matches it. The
+    # `head_before and` guard short-circuits the second read when capture is off / the first failed.
     head_sha = None
-    if capture_head:
-        head_after = _pr_head(cwd, value)
-        head_sha = head_before if head_before and head_before == head_after else None
+    if head_before and head_before == _pr_head(cwd, value):
+        head_sha = head_before
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
