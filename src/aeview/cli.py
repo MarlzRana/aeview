@@ -215,7 +215,7 @@ def run(
         # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
         # than re-deriving the threshold: an `error` verdict means no real review to post.
         if report_verdict_label(report) != "error":
-            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
+            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, plan.bundle.head_sha, cwd)
         else:
             typer.echo(
                 "aeview: not posting to the PR — no reviews contributed (nothing to review)",
@@ -287,11 +287,13 @@ def _validate_post_comments(post_comments: bool, stype: str) -> None:
         )
 
 
-def _post_to_pr(target: PrTarget, report: Report, run_id: str, diff: str, cwd: Path) -> None:
+def _post_to_pr(
+    target: PrTarget, report: Report, run_id: str, diff: str, head_sha: str | None, cwd: Path
+) -> None:
     """Post the merged report onto the PR and report what landed on stderr (so --json stdout stays
     the pure gate). The review already ran, so a posting failure is surfaced, never fatal."""
     try:
-        posted = post_review(target, report, run_id, diff, cwd)
+        posted = post_review(target, report, run_id, diff, head_sha, cwd)
     except GitHubError as exc:
         typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
         return

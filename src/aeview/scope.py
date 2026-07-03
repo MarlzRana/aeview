@@ -57,6 +57,9 @@ class ResolvedScope:
     inspect: list[str] = field(default_factory=list)
     commits: str = ""
     inline_only: bool = False
+    # For pr scope: the head commit the diff was taken against, captured with the diff so a review
+    # posted later anchors its comments to the *reviewed* commit — not a commit pushed afterwards.
+    head_sha: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -92,8 +95,15 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
 # readable; noprefix/mnemonicprefix=false -> always the standard a//b/ prefixes the diff parser
 # (summarize_diff, .aeviewignore) depends on.
 _GIT_BASE = (
-    "git", "-c", "core.pager=cat", "-c", "core.quotePath=false",
-    "-c", "diff.noprefix=false", "-c", "diff.mnemonicprefix=false",
+    "git",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicprefix=false",
 )
 
 
@@ -201,6 +211,19 @@ def _pr_base(cwd: Path) -> str | None:
         return None
     try:
         return json.loads(res.stdout).get("baseRefName") or None
+    except json.JSONDecodeError:
+        return None
+
+
+def _pr_head(cwd: Path, value: str | None) -> str | None:
+    """The PR's current head commit SHA. Captured right after `gh pr diff` so it names the exact
+    commit the reviewed diff was taken against (used to anchor posted comments to it)."""
+    args = ["gh", "pr", "view", *([value] if value else []), "--json", "headRefOid"]
+    res = run_sync(args, cwd=cwd)
+    if res.returncode != 0:
+        return None
+    try:
+        return json.loads(res.stdout).get("headRefOid") or None
     except json.JSONDecodeError:
         return None
 
@@ -334,7 +357,12 @@ def _validate_include_dirty(raw_type: str, include_dirty: bool) -> None:
 
 
 def _result(
-    stype: str, base: str | None, diff: str, inspect: list[str], commits: str = ""
+    stype: str,
+    base: str | None,
+    diff: str,
+    inspect: list[str],
+    commits: str = "",
+    head_sha: str | None = None,
 ) -> ResolvedScope:
     return ResolvedScope(
         spec=ScopeSpec(type=stype, base=base),
@@ -342,6 +370,7 @@ def _result(
         summary=summarize_diff(diff),
         inspect=inspect,
         commits=commits,
+        head_sha=head_sha,
     )
 
 
@@ -384,10 +413,15 @@ def _resolve_effective_pr(cwd: Path, value: str | None) -> ResolvedScope:
 def _resolve_pr(cwd: Path, value: str | None) -> ResolvedScope:
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
+    # Capture the head immediately after the diff so it names the commit the diff was taken against.
+    # `--post-comments` anchors its comments to this SHA, so they land on the reviewed commit even
+    # when the author pushes more commits later (GitHub marks such threads outdated; it never moves
+    # them onto the new commits).
+    head_sha = _pr_head(cwd, value)
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
-    return _result("pr", base, diff, [])
+    return _result("pr", base, diff, [], head_sha=head_sha)
 
 
 def _parse_commit_refs(value: str | None) -> list[str]:

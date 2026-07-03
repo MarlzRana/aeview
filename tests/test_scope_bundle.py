@@ -345,6 +345,8 @@ def test_pr_scope_uses_gh_diff(git_repo, stub_gh):
     r = _resolve(git_repo, "pr")
     assert "pr_file.py" in r.diff
     assert r.spec.base == "main"
+    # the head the diff was taken against is captured so posted comments anchor to it
+    assert r.head_sha == "deadbeefcafe"
 
 
 # --- effective-pr (local remote + fetch) ----------------------------------------------
