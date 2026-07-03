@@ -154,7 +154,7 @@ def test_anchor_line_is_right_side_only_and_single_line():
 
 
 def test_build_review_anchors_finding_inline():
-    built = build_review(_report([_finding(line=2)]), "run1", "sha123", _DIFF)
+    built = build_review(_report([_finding(line=2)]), "run1", _DIFF, "sha123")
     assert built.inline_findings == 1 and built.body_findings == 0
     payload = _payload(built)
     assert payload["event"] == "COMMENT" and payload["commit_id"] == "sha123"
@@ -170,16 +170,16 @@ def test_build_review_anchors_finding_inline():
 
 def test_build_review_pins_commit_id_to_reviewed_head_or_omits_when_unknown():
     # The reviewed head is sent as commit_id so comments anchor to that commit, not a later one.
-    pinned = _payload(build_review(_report([_finding(line=2)]), "run1", "abc123", _DIFF))
+    pinned = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, "abc123"))
     assert pinned["commit_id"] == "abc123"
     # If the head couldn't be captured, omit commit_id (GitHub then defaults to the latest commit).
-    unknown = _payload(build_review(_report([_finding(line=2)]), "run1", None, _DIFF))
+    unknown = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, None))
     assert "commit_id" not in unknown
 
 
 def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
     # Single-line anchor at the start (no fragile cross-hunk range); the full span is in the body.
-    built = build_review(_report([_finding(line=1, line_end=3)]), "run1", "sha", _DIFF)
+    built = build_review(_report([_finding(line=1, line_end=3)]), "run1", _DIFF, "sha")
     c = _payload(built)["comments"][0]
     assert c["line"] == 1 and c["side"] == "RIGHT"
     assert "start_line" not in c  # no native multi-line range anchor
@@ -187,7 +187,7 @@ def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
 
 
 def test_build_review_routes_unanchored_finding_to_body():
-    built = build_review(_report([_finding(line=99)]), "run1", "sha", _DIFF)
+    built = build_review(_report([_finding(line=99)]), "run1", _DIFF, "sha")
     assert built.inline_findings == 0 and built.body_findings == 1
     payload = _payload(built)
     assert "comments" not in payload  # nothing anchored -> no inline batch
@@ -200,7 +200,7 @@ def test_build_review_groups_same_line_findings_into_one_comment():
         _finding(line=2, fid="f1", title="first"),
         _finding(line=2, fid="f2", title="second"),
     ]
-    built = build_review(_report(findings), "run1", "sha", _DIFF)
+    built = build_review(_report(findings), "run1", _DIFF, "sha")
     assert built.inline_findings == 2
     comments = _payload(built)["comments"]
     assert len(comments) == 1  # both stacked into one thread
@@ -210,7 +210,7 @@ def test_build_review_groups_same_line_findings_into_one_comment():
 
 
 def test_build_review_clean_run_posts_summary_only():
-    built = build_review(_report([], verdict="approve"), "run1", "sha", _DIFF)
+    built = build_review(_report([], verdict="approve"), "run1", _DIFF, "sha")
     assert built.inline_findings == 0 and built.body_findings == 0
     payload = _payload(built)
     assert "comments" not in payload

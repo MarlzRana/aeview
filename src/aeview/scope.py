@@ -20,6 +20,7 @@ from .schema import ScopeSpec
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's well-known empty tree object
 UNTRACKED_FILE_CAP = 24 * 1024  # bytes of diff emitted per untracked file
+_GH_VIEW_TIMEOUT = 30  # bound `gh pr view` so a stalled network call can't hang the run
 
 # Scopes that require an explicit :value (no sensible default).
 _VALUE_REQUIRED = {"range", "patch"}
@@ -205,27 +206,26 @@ def _in_progress_conflict(cwd: Path) -> str | None:
 # --- base resolution ------------------------------------------------------------------
 
 
-def _pr_base(cwd: Path) -> str | None:
-    res = run_sync(["gh", "pr", "view", "--json", "baseRefName"], cwd=cwd)
+def _pr_view_field(cwd: Path, value: str | None, field: str) -> str | None:
+    """One scalar field from `gh pr view` (bare = current branch's PR, else the given number).
+    Bounded by a timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
+    args = ["gh", "pr", "view", *([value] if value else []), "--json", field]
+    res = run_sync(args, cwd=cwd, timeout=_GH_VIEW_TIMEOUT)
     if res.returncode != 0:
         return None
     try:
-        return json.loads(res.stdout).get("baseRefName") or None
+        return json.loads(res.stdout).get(field) or None
     except json.JSONDecodeError:
         return None
+
+
+def _pr_base(cwd: Path) -> str | None:
+    return _pr_view_field(cwd, None, "baseRefName")
 
 
 def _pr_head(cwd: Path, value: str | None) -> str | None:
-    """The PR's current head commit SHA. Captured right after `gh pr diff` so it names the exact
-    commit the reviewed diff was taken against (used to anchor posted comments to it)."""
-    args = ["gh", "pr", "view", *([value] if value else []), "--json", "headRefOid"]
-    res = run_sync(args, cwd=cwd)
-    if res.returncode != 0:
-        return None
-    try:
-        return json.loads(res.stdout).get("headRefOid") or None
-    except json.JSONDecodeError:
-        return None
+    """The PR's current head commit SHA (headRefOid)."""
+    return _pr_view_field(cwd, value, "headRefOid")
 
 
 def _origin_head(cwd: Path) -> str | None:
@@ -411,13 +411,17 @@ def _resolve_effective_pr(cwd: Path, value: str | None) -> ResolvedScope:
 
 
 def _resolve_pr(cwd: Path, value: str | None) -> ResolvedScope:
+    # Bracket the diff fetch with head reads: if the head is identical before and after, it's the
+    # exact commit `gh pr diff` was computed against, so `--post-comments` can anchor comments to
+    # the reviewed commit (later pushes are then marked outdated, never re-anchored). If a push
+    # lands mid-fetch (head moved), we can't prove which commit the diff matches -> leave it None so
+    # posting omits commit_id and GitHub defaults to the latest (the inline batch, if mis-anchored,
+    # still degrades to the fallback summary comment). This closes the diff/SHA race.
+    head_before = _pr_head(cwd, value)
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
-    # Capture the head immediately after the diff so it names the commit the diff was taken against.
-    # `--post-comments` anchors its comments to this SHA, so they land on the reviewed commit even
-    # when the author pushes more commits later (GitHub marks such threads outdated; it never moves
-    # them onto the new commits).
-    head_sha = _pr_head(cwd, value)
+    head_after = _pr_head(cwd, value)
+    head_sha = head_before if head_before and head_before == head_after else None
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.

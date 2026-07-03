@@ -286,7 +286,7 @@ def _review_body(
     return "\n\n".join(parts)
 
 
-def build_review(report: Report, run_id: str, head_sha: str | None, diff: str) -> BuiltReview:
+def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped).
 
@@ -355,7 +355,7 @@ def post_review(
     """Post the merged report as one PR review. `head_sha` is the commit the reviewed diff was taken
     against — comments anchor to it. On API rejection, fall back to a single top-level comment with
     every finding so nothing is lost. Raises GitHubError only if both posts fail."""
-    built = build_review(report, run_id, head_sha, diff)
+    built = build_review(report, run_id, diff, head_sha)
     res = _gh_api_post(
         f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
         built.payload,
