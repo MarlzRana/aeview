@@ -291,18 +291,23 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
     Findings whose line isn't in the diff are listed in the body instead (never dropped).
 
     `head_sha` is the commit the diff was taken against; sent as `commit_id` so comments anchor to
-    the reviewed commit (not a commit pushed later). If it's unknown (None), we omit commit_id and
-    GitHub defaults to the PR's latest commit."""
-    index = _diff_anchorable_lines(diff)
+    the reviewed commit (not a commit pushed later). If it's unknown (None) — the head couldn't be
+    captured or moved mid-fetch — we can't anchor safely: inline comments would bind to GitHub's
+    *latest* commit, whose diff may differ. So we then post NO inline comments and route every
+    finding into the summary body instead."""
     groups: dict[tuple[str, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
-    for f in report.findings:
-        line = _anchor_line(f.location, index)
-        if line is None:
-            unanchored.append(f)
-        else:
-            # Findings on the same line share one comment/thread (the API can't thread siblings).
-            groups.setdefault((f.location.file, line), []).append(f)
+    if head_sha is None:
+        unanchored = list(report.findings)  # no known commit to anchor against -> summarize all
+    else:
+        index = _diff_anchorable_lines(diff)
+        for f in report.findings:
+            line = _anchor_line(f.location, index)
+            if line is None:
+                unanchored.append(f)
+            else:
+                # Same-line findings share one comment/thread (the API can't thread siblings).
+                groups.setdefault((f.location.file, line), []).append(f)
     comments = [
         {
             "path": path,

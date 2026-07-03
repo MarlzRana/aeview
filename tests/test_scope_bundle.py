@@ -345,8 +345,26 @@ def test_pr_scope_uses_gh_diff(git_repo, stub_gh):
     r = _resolve(git_repo, "pr")
     assert "pr_file.py" in r.diff
     assert r.spec.base == "main"
-    # the head the diff was taken against is captured so posted comments anchor to it
+    # No head SHA fetched unless the caller will post (capture_head); a plain review shouldn't pay.
+    assert r.head_sha is None
+
+
+def test_pr_scope_captures_head_for_posting(git_repo, stub_gh):
+    # With capture_head (set when --post-comments), the head the diff was taken against is pinned so
+    # posted comments anchor to it. The stub reports a stable head before + after the diff.
+    r = _resolve(git_repo, "pr", capture_head=True)
     assert r.head_sha == "deadbeefcafe"
+
+
+def test_pr_scope_head_moved_midfetch_yields_no_head_sha(git_repo, stub_gh, monkeypatch):
+    # If the PR head differs before vs after the diff fetch, we can't prove which commit the diff
+    # matches -> head_sha is None (posting then drops to a summary-only comment).
+    from aeview import scope
+
+    heads = iter(["sha_before", "sha_after"])
+    monkeypatch.setattr(scope, "_pr_head", lambda cwd, value: next(heads))
+    r = _resolve(git_repo, "pr", capture_head=True)
+    assert r.head_sha is None
 
 
 # --- effective-pr (local remote + fetch) ----------------------------------------------

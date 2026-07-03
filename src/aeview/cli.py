@@ -186,7 +186,15 @@ def run(
         _validate_post_comments(post_comments, stype)
         patch_text = _read_patch(value) if stype == "patch" else None
         plan = _plan_run(
-            names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings
+            names,
+            stype,
+            value,
+            cwd,
+            include_dirty,
+            allow_conflicts,
+            patch_text,
+            settings,
+            capture_head=post_comments,
         )
         # Resolve (and require an open) PR before the fan-out, so --post-comments fails fast instead
         # of spending a whole panel only to find nowhere to post.
@@ -352,15 +360,19 @@ def _plan_run(
     allow_conflicts: bool,
     patch_text: str | None,
     settings: Settings,
+    capture_head: bool = False,
 ) -> _Plan:
     """Resolve reviewers + scope and build the bundle — the sync front half shared by `run` and
     `--dry-run`. Raises ScopeError/ResolveError; makes no model calls and writes no run dir.
 
     Scope is resolved + .aeviewignore-filtered first because auto mode (names is None) selects
     reviewers from the changed files; the same order means a scope error surfaces ahead of a
-    reviewer error in every mode.
+    reviewer error in every mode. `capture_head` (set when posting) pins the pr scope's reviewed
+    head SHA onto the bundle.
     """
-    resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
+    resolved = resolve_scope(
+        stype, value, cwd, include_dirty, allow_conflicts, patch_text, capture_head=capture_head
+    )
     if resolved.is_empty:
         raise ScopeError(f"nothing to review for scope '{stype}'")
     # Drop .aeviewignore'd files before measuring/bundling, so the byte count, the prompt, and

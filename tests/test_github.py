@@ -169,12 +169,15 @@ def test_build_review_anchors_finding_inline():
 
 
 def test_build_review_pins_commit_id_to_reviewed_head_or_omits_when_unknown():
-    # The reviewed head is sent as commit_id so comments anchor to that commit, not a later one.
+    # With a known head: anchor inline and send it as commit_id.
     pinned = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, "abc123"))
-    assert pinned["commit_id"] == "abc123"
-    # If the head couldn't be captured, omit commit_id (GitHub then defaults to the latest commit).
-    unknown = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, None))
-    assert "commit_id" not in unknown
+    assert pinned["commit_id"] == "abc123" and pinned["comments"]
+    # Unknown head (couldn't capture / raced): no commit_id AND no inline comments — every finding
+    # is summarized in the body so nothing binds to GitHub's latest commit.
+    built = build_review(_report([_finding(line=2)]), "run1", _DIFF, None)
+    unknown = _payload(built)
+    assert "commit_id" not in unknown and "comments" not in unknown
+    assert built.inline_findings == 0 and built.body_findings == 1
 
 
 def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():

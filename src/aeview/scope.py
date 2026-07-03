@@ -206,15 +206,18 @@ def _in_progress_conflict(cwd: Path) -> str | None:
 # --- base resolution ------------------------------------------------------------------
 
 
-def _pr_view_field(cwd: Path, value: str | None, field: str) -> str | None:
+def _pr_view_field(cwd: Path, value: str | None, field_name: str) -> str | None:
     """One scalar field from `gh pr view` (bare = current branch's PR, else the given number).
     Bounded by a timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
-    args = ["gh", "pr", "view", *([value] if value else []), "--json", field]
+    args = ["gh", "pr", "view"]
+    if value:
+        args.append(value)
+    args += ["--json", field_name]
     res = run_sync(args, cwd=cwd, timeout=_GH_VIEW_TIMEOUT)
     if res.returncode != 0:
         return None
     try:
-        return json.loads(res.stdout).get(field) or None
+        return json.loads(res.stdout).get(field_name) or None
     except json.JSONDecodeError:
         return None
 
@@ -307,6 +310,7 @@ def resolve(
     include_dirty: bool = False,
     allow_conflicts: bool = False,
     patch_text: str | None = None,
+    capture_head: bool = False,
 ) -> ResolvedScope:
     if raw_type == "patch":
         return _resolve_patch(value, patch_text)
@@ -338,7 +342,7 @@ def resolve(
     if raw_type == "effective-pr":
         return _resolve_effective_pr(cwd, value)
     if raw_type == "pr":
-        return _resolve_pr(cwd, value)
+        return _resolve_pr(cwd, value, capture_head)
     if raw_type == "commits":
         return _resolve_commits(cwd, value)
     if raw_type == "range":
@@ -410,18 +414,20 @@ def _resolve_effective_pr(cwd: Path, value: str | None) -> ResolvedScope:
     return _result("effective-pr", base_ref, diff, [f"git diff {mb}"], commits)
 
 
-def _resolve_pr(cwd: Path, value: str | None) -> ResolvedScope:
-    # Bracket the diff fetch with head reads: if the head is identical before and after, it's the
-    # exact commit `gh pr diff` was computed against, so `--post-comments` can anchor comments to
-    # the reviewed commit (later pushes are then marked outdated, never re-anchored). If a push
-    # lands mid-fetch (head moved), we can't prove which commit the diff matches -> leave it None so
-    # posting omits commit_id and GitHub defaults to the latest (the inline batch, if mis-anchored,
-    # still degrades to the fallback summary comment). This closes the diff/SHA race.
-    head_before = _pr_head(cwd, value)
+def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedScope:
+    # capture_head is set only when the caller will post comments. Then we bracket the diff fetch
+    # with head reads: if the head is identical before and after, it's the exact commit `gh pr diff`
+    # was computed against, so comments can anchor to the reviewed commit (later pushes are marked
+    # outdated, never re-anchored). If a push lands mid-fetch (head moved), leave head_sha None so
+    # posting drops to a summary-only comment. This closes the diff/SHA race. When not posting we
+    # skip both head reads — a plain `--scope pr` review shouldn't pay for a SHA it won't use.
+    head_before = _pr_head(cwd, value) if capture_head else None
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
-    head_after = _pr_head(cwd, value)
-    head_sha = head_before if head_before and head_before == head_after else None
+    head_sha = None
+    if capture_head:
+        head_after = _pr_head(cwd, value)
+        head_sha = head_before if head_before and head_before == head_after else None
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
