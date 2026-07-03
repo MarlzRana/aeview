@@ -150,7 +150,13 @@ def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
     current: set[int] | None = None
     in_hunk = False
     new_no = 0
-    for line in diff.splitlines():
+    # Split on "\n" only, NOT str.splitlines(): the latter also breaks on \v \f \x1c-\x1e
+    # \x85 U+2028 U+2029, so one of those inside a content line would split it in two, adding a
+    # phantom iteration that bumps new_no and mis-anchors every later line in the hunk.
+    for line in diff.split("\n"):
+        line = line.rstrip("\r")  # keep CRLF diffs parsing as splitlines() did (drop the diff CR)
+        if not line:
+            continue  # split()'s trailing ""; a real diff line is " " or "+", never empty
         if line.startswith("diff --git"):
             current, in_hunk = None, False  # next file; its +++ header + counts come before @@
             continue

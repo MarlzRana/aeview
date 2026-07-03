@@ -137,6 +137,42 @@ def test_diff_anchorable_lines_unquotes_paths_with_spaces():
     assert idx == {"weird name.py": {1, 2}}
 
 
+def test_diff_anchorable_lines_splits_on_newline_only():
+    # str.splitlines() breaks on \f \x85 U+2028 U+2029 (and more), so a diff *content* line carrying
+    # one of those would be split in two — a phantom iteration that throws new_no off by one for the
+    # rest of the hunk. Splitting on "\n" alone (with a \r rstrip) keeps the numbering correct.
+    exotic = "a\u2028b\u2029c\fd\x85e"  # separators splitlines() breaks on, inside one line
+    diff = (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1,1 +1,3 @@\n"
+        " keep = 1\n"
+        f'+weird = "{exotic}"\n'
+        "+after = 2\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    # context line 1 + the two additions — NOT the phantom lines the split content line would add.
+    assert idx == {"x.py": {1, 2, 3}}
+    # The line after the exotic one still anchors at 3, not shifted past it.
+    assert _anchor_line(Location(file="x.py", line_start=3, line_end=3), idx) == 3
+
+
+def test_diff_anchorable_lines_handles_crlf_terminated_diff():
+    # A CRLF diff leaves a trailing \r on every line after split("\n"); rstrip("\r") drops it so the
+    # +++ header path parses and content prefixes still match (matching old splitlines() behaviour).
+    diff = (
+        "diff --git a/c.py b/c.py\r\n"
+        "--- a/c.py\r\n"
+        "+++ b/c.py\r\n"
+        "@@ -1,1 +1,2 @@\r\n"
+        " x = 1\r\n"
+        "+y = 2\r\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    assert idx == {"c.py": {1, 2}}
+
+
 def test_anchor_line_is_right_side_only_and_single_line():
     idx = _diff_anchorable_lines(_DIFF)
     assert _anchor_line(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
