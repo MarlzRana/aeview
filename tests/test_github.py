@@ -178,6 +178,9 @@ def test_build_review_pins_commit_id_to_reviewed_head_or_omits_when_unknown():
     unknown = _payload(built)
     assert "commit_id" not in unknown and "comments" not in unknown
     assert built.inline_findings == 0 and built.body_findings == 1
+    # The body explains WHY it's summary-only, and doesn't mislabel it "not anchored to the diff".
+    assert "couldn't pin the exact reviewed commit" in unknown["body"]
+    assert "not anchored to the diff" not in unknown["body"]
 
 
 def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():

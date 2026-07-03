@@ -297,8 +297,13 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
     finding into the summary body instead."""
     groups: dict[tuple[str, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
+    note: str | None = None
     if head_sha is None:
         unanchored = list(report.findings)  # no known commit to anchor against -> summarize all
+        note = (
+            "_aeview couldn't pin the exact reviewed commit (the PR head moved or couldn't be read "
+            "during the review), so findings are summarized here rather than anchored to the diff._"
+        )
     else:
         index = _diff_anchorable_lines(diff)
         for f in report.findings:
@@ -319,7 +324,7 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
-        "body": _review_body(report, run_id, unanchored),
+        "body": _review_body(report, run_id, unanchored, note=note),
     }
     # Same `is None` test as the anchoring branch above, so the two decisions can't drift: a known
     # head means we both anchored inline and pin commit_id; None means neither.
