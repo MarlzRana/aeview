@@ -321,7 +321,9 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
         "event": "COMMENT",
         "body": _review_body(report, run_id, unanchored),
     }
-    if head_sha:  # anchor to the reviewed commit; omitting it lets GitHub default to the latest
+    # Same `is None` test as the anchoring branch above, so the two decisions can't drift: a known
+    # head means we both anchored inline and pin commit_id; None means neither.
+    if head_sha is not None:
         payload["commit_id"] = head_sha
     if comments:
         payload["comments"] = comments

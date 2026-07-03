@@ -194,7 +194,8 @@ def run(
             allow_conflicts,
             patch_text,
             settings,
-            capture_head=post_comments,
+            # Only a real posting run needs the reviewed head; dry-run just previews the target.
+            capture_head=post_comments and not dry_run,
         )
         # Resolve (and require an open) PR before the fan-out, so --post-comments fails fast instead
         # of spending a whole panel only to find nowhere to post.
