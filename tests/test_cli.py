@@ -513,7 +513,7 @@ def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
 
 
 def test_dry_run_render_includes_post_comments_target():
-    target = PrTarget(number=7, head_sha="abc", url="https://github.com/o/r/pull/7")
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
     out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None), target)
     assert "post-comments: will post a review to PR #7" in out
 

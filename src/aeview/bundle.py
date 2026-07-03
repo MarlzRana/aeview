@@ -28,6 +28,7 @@ class Bundle:
     inspect: list[str] = field(default_factory=list)
     commits: str = ""
     diff_bytes: int = 0
+    head_sha: str | None = None  # pr scope: the commit the diff was taken against (anchors posts)
 
     @property
     def is_empty(self) -> bool:
@@ -58,4 +59,5 @@ def build_bundle(resolved: ResolvedScope) -> Bundle:
         inspect=resolved.inspect,
         commits=resolved.commits,
         diff_bytes=diff_bytes,
+        head_sha=resolved.head_sha,
     )

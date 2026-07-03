@@ -154,7 +154,7 @@ def test_anchor_line_is_right_side_only_and_single_line():
 
 
 def test_build_review_anchors_finding_inline():
-    built = build_review(_report([_finding(line=2)]), "run1", "sha123", _DIFF)
+    built = build_review(_report([_finding(line=2)]), "run1", _DIFF, "sha123")
     assert built.inline_findings == 1 and built.body_findings == 0
     payload = _payload(built)
     assert payload["event"] == "COMMENT" and payload["commit_id"] == "sha123"
@@ -168,9 +168,24 @@ def test_build_review_anchors_finding_inline():
     assert "<!-- aeview:review run=run1 -->" in payload["body"]
 
 
+def test_build_review_pins_commit_id_to_reviewed_head_or_omits_when_unknown():
+    # With a known head: anchor inline and send it as commit_id.
+    pinned = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, "abc123"))
+    assert pinned["commit_id"] == "abc123" and pinned["comments"]
+    # Unknown head (couldn't capture / raced): no commit_id AND no inline comments — every finding
+    # is summarized in the body so nothing binds to GitHub's latest commit.
+    built = build_review(_report([_finding(line=2)]), "run1", _DIFF, None)
+    unknown = _payload(built)
+    assert "commit_id" not in unknown and "comments" not in unknown
+    assert built.inline_findings == 0 and built.body_findings == 1
+    # The body explains WHY it's summary-only, and doesn't mislabel it "not anchored to the diff".
+    assert "couldn't pin the exact reviewed commit" in unknown["body"]
+    assert "not anchored to the diff" not in unknown["body"]
+
+
 def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
     # Single-line anchor at the start (no fragile cross-hunk range); the full span is in the body.
-    built = build_review(_report([_finding(line=1, line_end=3)]), "run1", "sha", _DIFF)
+    built = build_review(_report([_finding(line=1, line_end=3)]), "run1", _DIFF, "sha")
     c = _payload(built)["comments"][0]
     assert c["line"] == 1 and c["side"] == "RIGHT"
     assert "start_line" not in c  # no native multi-line range anchor
@@ -178,7 +193,7 @@ def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
 
 
 def test_build_review_routes_unanchored_finding_to_body():
-    built = build_review(_report([_finding(line=99)]), "run1", "sha", _DIFF)
+    built = build_review(_report([_finding(line=99)]), "run1", _DIFF, "sha")
     assert built.inline_findings == 0 and built.body_findings == 1
     payload = _payload(built)
     assert "comments" not in payload  # nothing anchored -> no inline batch
@@ -191,7 +206,7 @@ def test_build_review_groups_same_line_findings_into_one_comment():
         _finding(line=2, fid="f1", title="first"),
         _finding(line=2, fid="f2", title="second"),
     ]
-    built = build_review(_report(findings), "run1", "sha", _DIFF)
+    built = build_review(_report(findings), "run1", _DIFF, "sha")
     assert built.inline_findings == 2
     comments = _payload(built)["comments"]
     assert len(comments) == 1  # both stacked into one thread
@@ -201,7 +216,7 @@ def test_build_review_groups_same_line_findings_into_one_comment():
 
 
 def test_build_review_clean_run_posts_summary_only():
-    built = build_review(_report([], verdict="approve"), "run1", "sha", _DIFF)
+    built = build_review(_report([], verdict="approve"), "run1", _DIFF, "sha")
     assert built.inline_findings == 0 and built.body_findings == 0
     payload = _payload(built)
     assert "comments" not in payload
@@ -236,9 +251,9 @@ def test_finding_md_clips_oversized_field():
 def test_resolve_pr_target_happy(tmp_path, stub_gh):
     target = resolve_pr_target(tmp_path, None)
     # owner/repo are parsed from the PR url so the API addresses the PR's own repo (fork-safe).
-    assert target == PrTarget(
-        number=7, head_sha="deadbeefcafe", url="https://github.com/o/r/pull/7", owner="o", repo="r"
-    )
+    # The head SHA is NOT resolved here — it's captured with the diff (in scope.py) so posts anchor
+    # to the reviewed commit.
+    assert target == PrTarget(number=7, url="https://github.com/o/r/pull/7", owner="o", repo="r")
 
 
 def test_resolve_pr_target_no_pr_errors(tmp_path, stub_gh, monkeypatch):
@@ -259,13 +274,13 @@ def test_resolve_pr_target_closed_pr_errors(tmp_path, stub_gh, monkeypatch):
 def test_post_review_posts_one_review(tmp_path, stub_gh, monkeypatch):
     cap = tmp_path / "review.json"
     monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
-    target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
-    result = post_review(target, _report([_finding(line=2)]), "run1", _DIFF, tmp_path)
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
+    result = post_review(target, _report([_finding(line=2)]), "run1", _DIFF, "sha9", tmp_path)
     assert result.fallback_reason is None
     assert result.inline == 1 and result.in_body == 0
     assert "pullrequestreview" in result.url
     posted = json.loads(cap.read_text())
-    assert posted["event"] == "COMMENT" and posted["commit_id"] == "sha9"
+    assert posted["event"] == "COMMENT" and posted["commit_id"] == "sha9"  # the reviewed head
     assert posted["comments"][0]["line"] == 2
 
 
@@ -273,9 +288,9 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     monkeypatch.setenv("AEVIEW_GH_API_FAIL", "reviews")  # the reviews POST 422s
     cap = tmp_path / "comment.json"
     monkeypatch.setenv("AEVIEW_GH_CAPTURE_COMMENT", str(cap))
-    target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
     findings = [_finding(line=2, fid="f1"), _finding(line=99, fid="f2")]
-    result = post_review(target, _report(findings), "run1", _DIFF, tmp_path)
+    result = post_review(target, _report(findings), "run1", _DIFF, "sha9", tmp_path)
     assert result.fallback_reason and result.in_body == 2 and result.inline == 0
     body = json.loads(cap.read_text())["body"]
     assert "could not attach inline comments" in body
@@ -290,7 +305,7 @@ def test_post_review_ambiguous_failure_does_not_fall_back(tmp_path, stub_gh, mon
     monkeypatch.setenv("AEVIEW_GH_API_FAIL", "timeout")  # exits 124, no "HTTP 4xx" in stderr
     cap = tmp_path / "comment.json"
     monkeypatch.setenv("AEVIEW_GH_CAPTURE_COMMENT", str(cap))
-    target = PrTarget(number=7, head_sha="sha9", url="https://github.com/o/r/pull/7")
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
     with pytest.raises(GitHubError, match="ambiguously"):
-        post_review(target, _report([_finding(line=2)]), "run1", _DIFF, tmp_path)
+        post_review(target, _report([_finding(line=2)]), "run1", _DIFF, "sha9", tmp_path)
     assert not cap.exists()  # no fallback comment -> no duplicate artifact

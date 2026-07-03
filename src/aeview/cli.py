@@ -186,7 +186,16 @@ def run(
         _validate_post_comments(post_comments, stype)
         patch_text = _read_patch(value) if stype == "patch" else None
         plan = _plan_run(
-            names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings
+            names,
+            stype,
+            value,
+            cwd,
+            include_dirty,
+            allow_conflicts,
+            patch_text,
+            settings,
+            # Only a real posting run needs the reviewed head; dry-run just previews the target.
+            capture_head=post_comments and not dry_run,
         )
         # Resolve (and require an open) PR before the fan-out, so --post-comments fails fast instead
         # of spending a whole panel only to find nowhere to post.
@@ -215,7 +224,7 @@ def run(
         # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
         # than re-deriving the threshold: an `error` verdict means no real review to post.
         if report_verdict_label(report) != "error":
-            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, cwd)
+            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, plan.bundle.head_sha, cwd)
         else:
             typer.echo(
                 "aeview: not posting to the PR — no reviews contributed (nothing to review)",
@@ -287,11 +296,13 @@ def _validate_post_comments(post_comments: bool, stype: str) -> None:
         )
 
 
-def _post_to_pr(target: PrTarget, report: Report, run_id: str, diff: str, cwd: Path) -> None:
+def _post_to_pr(
+    target: PrTarget, report: Report, run_id: str, diff: str, head_sha: str | None, cwd: Path
+) -> None:
     """Post the merged report onto the PR and report what landed on stderr (so --json stdout stays
     the pure gate). The review already ran, so a posting failure is surfaced, never fatal."""
     try:
-        posted = post_review(target, report, run_id, diff, cwd)
+        posted = post_review(target, report, run_id, diff, head_sha, cwd)
     except GitHubError as exc:
         typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
         return
@@ -350,15 +361,19 @@ def _plan_run(
     allow_conflicts: bool,
     patch_text: str | None,
     settings: Settings,
+    capture_head: bool = False,
 ) -> _Plan:
     """Resolve reviewers + scope and build the bundle — the sync front half shared by `run` and
     `--dry-run`. Raises ScopeError/ResolveError; makes no model calls and writes no run dir.
 
     Scope is resolved + .aeviewignore-filtered first because auto mode (names is None) selects
     reviewers from the changed files; the same order means a scope error surfaces ahead of a
-    reviewer error in every mode.
+    reviewer error in every mode. `capture_head` (set when posting) pins the pr scope's reviewed
+    head SHA onto the bundle.
     """
-    resolved = resolve_scope(stype, value, cwd, include_dirty, allow_conflicts, patch_text)
+    resolved = resolve_scope(
+        stype, value, cwd, include_dirty, allow_conflicts, patch_text, capture_head=capture_head
+    )
     if resolved.is_empty:
         raise ScopeError(f"nothing to review for scope '{stype}'")
     # Drop .aeviewignore'd files before measuring/bundling, so the byte count, the prompt, and

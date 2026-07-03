@@ -20,6 +20,7 @@ from .schema import ScopeSpec
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's well-known empty tree object
 UNTRACKED_FILE_CAP = 24 * 1024  # bytes of diff emitted per untracked file
+_GH_VIEW_TIMEOUT = 30  # bound `gh pr view` so a stalled network call can't hang the run
 
 # Scopes that require an explicit :value (no sensible default).
 _VALUE_REQUIRED = {"range", "patch"}
@@ -57,6 +58,9 @@ class ResolvedScope:
     inspect: list[str] = field(default_factory=list)
     commits: str = ""
     inline_only: bool = False
+    # For pr scope: the head commit the diff was taken against, captured with the diff so a review
+    # posted later anchors its comments to the *reviewed* commit — not a commit pushed afterwards.
+    head_sha: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -92,8 +96,15 @@ def parse_scope(raw: str) -> tuple[str, str | None]:
 # readable; noprefix/mnemonicprefix=false -> always the standard a//b/ prefixes the diff parser
 # (summarize_diff, .aeviewignore) depends on.
 _GIT_BASE = (
-    "git", "-c", "core.pager=cat", "-c", "core.quotePath=false",
-    "-c", "diff.noprefix=false", "-c", "diff.mnemonicprefix=false",
+    "git",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicprefix=false",
 )
 
 
@@ -195,14 +206,29 @@ def _in_progress_conflict(cwd: Path) -> str | None:
 # --- base resolution ------------------------------------------------------------------
 
 
-def _pr_base(cwd: Path) -> str | None:
-    res = run_sync(["gh", "pr", "view", "--json", "baseRefName"], cwd=cwd)
+def _pr_view_field(cwd: Path, value: str | None, field_name: str) -> str | None:
+    """One scalar field from `gh pr view` (bare = current branch's PR, else the given number).
+    Bounded by a timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
+    args = ["gh", "pr", "view"]
+    if value:
+        args.append(value)
+    args += ["--json", field_name]
+    res = run_sync(args, cwd=cwd, timeout=_GH_VIEW_TIMEOUT)
     if res.returncode != 0:
         return None
     try:
-        return json.loads(res.stdout).get("baseRefName") or None
+        return json.loads(res.stdout).get(field_name) or None
     except json.JSONDecodeError:
         return None
+
+
+def _pr_base(cwd: Path) -> str | None:
+    return _pr_view_field(cwd, None, "baseRefName")
+
+
+def _pr_head(cwd: Path, value: str | None) -> str | None:
+    """The PR's current head commit SHA (headRefOid)."""
+    return _pr_view_field(cwd, value, "headRefOid")
 
 
 def _origin_head(cwd: Path) -> str | None:
@@ -284,6 +310,7 @@ def resolve(
     include_dirty: bool = False,
     allow_conflicts: bool = False,
     patch_text: str | None = None,
+    capture_head: bool = False,
 ) -> ResolvedScope:
     if raw_type == "patch":
         return _resolve_patch(value, patch_text)
@@ -315,7 +342,7 @@ def resolve(
     if raw_type == "effective-pr":
         return _resolve_effective_pr(cwd, value)
     if raw_type == "pr":
-        return _resolve_pr(cwd, value)
+        return _resolve_pr(cwd, value, capture_head)
     if raw_type == "commits":
         return _resolve_commits(cwd, value)
     if raw_type == "range":
@@ -334,7 +361,12 @@ def _validate_include_dirty(raw_type: str, include_dirty: bool) -> None:
 
 
 def _result(
-    stype: str, base: str | None, diff: str, inspect: list[str], commits: str = ""
+    stype: str,
+    base: str | None,
+    diff: str,
+    inspect: list[str],
+    commits: str = "",
+    head_sha: str | None = None,
 ) -> ResolvedScope:
     return ResolvedScope(
         spec=ScopeSpec(type=stype, base=base),
@@ -342,6 +374,7 @@ def _result(
         summary=summarize_diff(diff),
         inspect=inspect,
         commits=commits,
+        head_sha=head_sha,
     )
 
 
@@ -381,13 +414,25 @@ def _resolve_effective_pr(cwd: Path, value: str | None) -> ResolvedScope:
     return _result("effective-pr", base_ref, diff, [f"git diff {mb}"], commits)
 
 
-def _resolve_pr(cwd: Path, value: str | None) -> ResolvedScope:
+def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedScope:
+    # capture_head is set only when the caller will post comments. Then we bracket the diff fetch
+    # with head reads: if the head is identical before and after, it's the exact commit `gh pr diff`
+    # was computed against, so comments can anchor to the reviewed commit (later pushes are marked
+    # outdated, never re-anchored). If a push lands mid-fetch (head moved), leave head_sha None so
+    # posting drops to a summary-only comment. This closes the diff/SHA race. When not posting we
+    # skip both head reads — a plain `--scope pr` review shouldn't pay for a SHA it won't use.
+    head_before = _pr_head(cwd, value) if capture_head else None
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
+    # Pin the head only if the pre-diff read succeeded and the post-diff read still matches it. The
+    # `head_before and` guard short-circuits the second read when capture is off / the first failed.
+    head_sha = None
+    if head_before and head_before == _pr_head(cwd, value):
+        head_sha = head_before
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
-    return _result("pr", base, diff, [])
+    return _result("pr", base, diff, [], head_sha=head_sha)
 
 
 def _parse_commit_refs(value: str | None) -> list[str]:

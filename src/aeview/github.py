@@ -69,10 +69,12 @@ class GitHubError(Exception):
 
 @dataclass(slots=True)
 class PrTarget:
-    """The open PR a review posts to (resolved before the fan-out, so a missing PR fails fast)."""
+    """The open PR a review posts to (resolved before the fan-out, so a missing PR fails fast).
+
+    The commit to anchor comments to is NOT here — it's the diff's head SHA (captured with the diff
+    in scope.py, carried on the bundle), so posts land on the reviewed commit, not a later one."""
 
     number: int
-    head_sha: str  # anchors comments to the PR head; stale if a commit lands mid-run
     url: str
     # The PR's own repo; used to address the API explicitly instead of gh's cwd-derived
     # {owner}/{repo} (which would target a local fork, not the upstream the PR lives on).
@@ -102,7 +104,7 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
     args = ["gh", "pr", "view"]
     if value:
         args.append(value)
-    args += ["--json", "number,state,headRefOid,url"]
+    args += ["--json", "number,state,url"]
     res = run_sync(args, cwd=cwd, timeout=_GH_TIMEOUT_S)
     if res.returncode != 0:
         where = f"PR #{value}" if value else "an open PR for the current branch"
@@ -121,14 +123,14 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
         raise GitHubError(
             f"--post-comments only posts to an open PR, but PR #{data.get('number')} is {state}."
         )
-    number, head_sha, url = data.get("number"), data.get("headRefOid"), data.get("url")
-    if not (isinstance(number, int) and isinstance(head_sha, str) and isinstance(url, str)):
-        raise GitHubError("`gh pr view` returned an incomplete PR record (number/headRefOid/url).")
+    number, url = data.get("number"), data.get("url")
+    if not (isinstance(number, int) and isinstance(url, str)):
+        raise GitHubError("`gh pr view` returned an incomplete PR record (number/url).")
     # Address the PR's own repo (parsed from its url), not gh's cwd-derived {owner}/{repo}.
     owner, repo = "{owner}", "{repo}"
     if m := _PR_URL.search(url):
         owner, repo = m.group(1), m.group(2)
-    return PrTarget(number=number, head_sha=head_sha, url=url, owner=owner, repo=repo)
+    return PrTarget(number=number, url=url, owner=owner, repo=repo)
 
 
 # --- diff line index (which lines can carry an inline comment) ------------------------
@@ -284,19 +286,33 @@ def _review_body(
     return "\n\n".join(parts)
 
 
-def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> BuiltReview:
+def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
-    Findings whose line isn't in the diff are listed in the body instead (never dropped)."""
-    index = _diff_anchorable_lines(diff)
+    Findings whose line isn't in the diff are listed in the body instead (never dropped).
+
+    `head_sha` is the commit the diff was taken against; sent as `commit_id` so comments anchor to
+    the reviewed commit (not a commit pushed later). If it's unknown (None) — the head couldn't be
+    captured or moved mid-fetch — we can't anchor safely: inline comments would bind to GitHub's
+    *latest* commit, whose diff may differ. So we then post NO inline comments and route every
+    finding into the summary body instead."""
     groups: dict[tuple[str, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
-    for f in report.findings:
-        line = _anchor_line(f.location, index)
-        if line is None:
-            unanchored.append(f)
-        else:
-            # Findings on the same line share one comment/thread (the API can't thread siblings).
-            groups.setdefault((f.location.file, line), []).append(f)
+    note: str | None = None
+    if head_sha is None:
+        unanchored = list(report.findings)  # no known commit to anchor against -> summarize all
+        note = (
+            "_aeview couldn't pin the exact reviewed commit (the PR head moved or couldn't be read "
+            "during the review), so findings are summarized here rather than anchored to the diff._"
+        )
+    else:
+        index = _diff_anchorable_lines(diff)
+        for f in report.findings:
+            line = _anchor_line(f.location, index)
+            if line is None:
+                unanchored.append(f)
+            else:
+                # Same-line findings share one comment/thread (the API can't thread siblings).
+                groups.setdefault((f.location.file, line), []).append(f)
     comments = [
         {
             "path": path,
@@ -308,9 +324,12 @@ def build_review(report: Report, run_id: str, head_sha: str, diff: str) -> Built
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
-        "commit_id": head_sha,
-        "body": _review_body(report, run_id, unanchored),
+        "body": _review_body(report, run_id, unanchored, note=note),
     }
+    # Same `is None` test as the anchoring branch above, so the two decisions can't drift: a known
+    # head means we both anchored inline and pin commit_id; None means neither.
+    if head_sha is not None:
+        payload["commit_id"] = head_sha
     if comments:
         payload["comments"] = comments
     return BuiltReview(
@@ -342,10 +361,13 @@ def _html_url(stdout: str, fallback: str) -> str:
         return fallback
 
 
-def post_review(target: PrTarget, report: Report, run_id: str, diff: str, cwd: Path) -> PostResult:
-    """Post the merged report as one PR review. On API rejection, fall back to a single top-level
-    comment with every finding so nothing is lost. Raises GitHubError only if both posts fail."""
-    built = build_review(report, run_id, target.head_sha, diff)
+def post_review(
+    target: PrTarget, report: Report, run_id: str, diff: str, head_sha: str | None, cwd: Path
+) -> PostResult:
+    """Post the merged report as one PR review. `head_sha` is the commit the reviewed diff was taken
+    against — comments anchor to it. On API rejection, fall back to a single top-level comment with
+    every finding so nothing is lost. Raises GitHubError only if both posts fail."""
+    built = build_review(report, run_id, diff, head_sha)
     res = _gh_api_post(
         f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
         built.payload,
