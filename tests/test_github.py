@@ -173,6 +173,29 @@ def test_diff_anchorable_lines_handles_crlf_terminated_diff():
     assert idx == {"c.py": {1, 2}}
 
 
+def test_diff_anchorable_lines_counts_blank_context_line():
+    # The `if not line: continue` guard skips ONLY split()'s trailing "" — a blank line in the
+    # file is " " (a lone space prefix), which is non-empty and must still count as a new-file
+    # line. Pins that boundary so a later `if not line.strip():`/`isspace()` refactor (which looks
+    # equivalent but would also swallow blank context lines, mis-anchoring everything after them)
+    # fails instead of silently passing.
+    diff = (
+        "diff --git a/blank.py b/blank.py\n"
+        "--- a/blank.py\n"
+        "+++ b/blank.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " x = 1\n"
+        " \n"  # a blank context line: a lone space, NOT an empty string
+        "+y = 2\n"
+        " z = 3\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    assert idx == {"blank.py": {1, 2, 3, 4}}  # the blank context line (2) is counted, not skipped
+    # The addition after the blank anchors at 3 and the context after it at 4 — not shifted down.
+    assert _anchor_line(Location(file="blank.py", line_start=3, line_end=3), idx) == 3
+    assert _anchor_line(Location(file="blank.py", line_start=4, line_end=4), idx) == 4
+
+
 def test_anchor_line_is_right_side_only_and_single_line():
     idx = _diff_anchorable_lines(_DIFF)
     assert _anchor_line(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
