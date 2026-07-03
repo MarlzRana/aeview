@@ -137,6 +137,65 @@ def test_diff_anchorable_lines_unquotes_paths_with_spaces():
     assert idx == {"weird name.py": {1, 2}}
 
 
+def test_diff_anchorable_lines_splits_on_newline_only():
+    # str.splitlines() breaks on \v \f \x1c-\x1e \x85 U+2028 U+2029, so a diff *content* line
+    # carrying one would be split in two — a phantom iteration that throws new_no off by one for the
+    # rest of the hunk. Splitting on "\n" alone (with a \r rstrip) keeps the numbering correct.
+    exotic = "a\u2028b\u2029c\fd\x85e\vf\x1c\x1d\x1eg"  # every separator splitlines() splits on
+    diff = (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1,1 +1,3 @@\n"
+        " keep = 1\n"
+        f'+weird = "{exotic}"\n'
+        "+after = 2\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    # context line 1 + the two additions — NOT the phantom lines the split content line would add.
+    assert idx == {"x.py": {1, 2, 3}}
+    # The line after the exotic one still anchors at 3, not shifted past it.
+    assert _anchor_line(Location(file="x.py", line_start=3, line_end=3), idx) == 3
+
+
+def test_diff_anchorable_lines_handles_crlf_terminated_diff():
+    # A CRLF diff leaves a trailing \r on every line after split("\n"); rstrip("\r") drops it so the
+    # +++ header path parses and content prefixes still match (matching old splitlines() behaviour).
+    diff = (
+        "diff --git a/c.py b/c.py\r\n"
+        "--- a/c.py\r\n"
+        "+++ b/c.py\r\n"
+        "@@ -1,1 +1,2 @@\r\n"
+        " x = 1\r\n"
+        "+y = 2\r\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    assert idx == {"c.py": {1, 2}}
+
+
+def test_diff_anchorable_lines_counts_blank_context_line():
+    # The `if not line: continue` guard skips ONLY split()'s trailing "" — a blank line in the
+    # file is " " (a lone space prefix), which is non-empty and must still count as a new-file
+    # line. Pins that boundary so a later `if not line.strip():`/`isspace()` refactor (which looks
+    # equivalent but would also swallow blank context lines, mis-anchoring everything after them)
+    # fails instead of silently passing.
+    diff = (
+        "diff --git a/blank.py b/blank.py\n"
+        "--- a/blank.py\n"
+        "+++ b/blank.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " x = 1\n"
+        " \n"  # a blank context line: a lone space, NOT an empty string
+        "+y = 2\n"
+        " z = 3\n"
+    )
+    idx = _diff_anchorable_lines(diff)
+    assert idx == {"blank.py": {1, 2, 3, 4}}  # the blank context line (2) is counted, not skipped
+    # The addition after the blank anchors at 3 and the context after it at 4 — not shifted down.
+    assert _anchor_line(Location(file="blank.py", line_start=3, line_end=3), idx) == 3
+    assert _anchor_line(Location(file="blank.py", line_start=4, line_end=4), idx) == 4
+
+
 def test_anchor_line_is_right_side_only_and_single_line():
     idx = _diff_anchorable_lines(_DIFF)
     assert _anchor_line(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
