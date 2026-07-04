@@ -10,17 +10,6 @@ loop starts; here you run the gates, run the panel, and apply the resolutions th
 The loop has **converged** when a fresh cycle surfaces **no new findings the user elects to fix** —
 only findings already decided in an earlier cycle. Convergence is **not** "zero findings."
 
-## The loop
-
-1. **Start from the implemented change.** Cycle 1: the change is already implemented — go to the
-   gates. Later cycles: the user's chosen fixes were applied in step 5, so re-gate and re-review.
-2. **Run the project's hard gates** (tests, lint, type-check — see *Gates* below). These must pass
-   before you go on; fix any failures first.
-3. **Commit** the cycle's work with a conventional message (skip if the user asked for `--no-commit`).
-4. **Run the aeview panel** over the change and read the findings.
-5. **Confirm every finding with the user** (see *Confirming findings*); apply each choice.
-6. **Re-run from step 1** with the chosen fixes in place.
-
 ## Confirming findings (the decision is the user's)
 
 Each cycle, present **every** finding to the user — do not silently drop or auto-fix any. Use
@@ -71,12 +60,12 @@ than assuming a stack:
 
 ## Cycle bounds
 
-- **Minimum** — run at least this many cycles even if cycle 1 looks clean; fixes can regress, so
-  every fix round gets re-reviewed at least once. **Default 2.**
+- **Stop as soon as it converges** — the moment a review cycle surfaces no new findings the user
+  elects to fix, stop, even if that's the first one. There's no forced minimum.
 - **Maximum** — a cap so the loop can't run away; if it hasn't converged by then, stop and report
-  the open findings. **Default 5.**
-- **The user sets these.** If the user specifies a minimum and/or maximum — via `--min-cycles <n>` /
-  `--max-cycles <n>` or in their request — use those values instead of the defaults.
+  the open findings. **Default 5** review cycles (cycle 0 doesn't count).
+- **The user sets the maximum.** If the user gives one (`--max-cycles <n>`, or in their request),
+  use it instead of the default.
 
 ## Required summary after the last cycle
 

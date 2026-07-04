@@ -9,17 +9,6 @@ triage, and fix what it finds.
 The loop has **converged** when a fresh cycle surfaces **no new *actionable* findings** — only
 things already triaged away — and the trend has flattened. Convergence is **not** "zero findings."
 
-## The loop
-
-1. **Start from the implemented change.** Cycle 1: the change is already implemented — go to the
-   gates. Later cycles: the previous panel's fixes were applied in step 5, so re-gate and re-review.
-2. **Run the project's hard gates** (tests, lint, type-check — see *Gates* below). These must pass
-   before you go on; fix any failures first.
-3. **Commit** the cycle's work with a conventional message (skip if the user asked for `--no-commit`).
-4. **Run the aeview panel** over the change and read the findings.
-5. **Triage** every finding (see *Implementer judgment*); fix what's worth fixing.
-6. **Re-run from step 1** against the updated change.
-
 ## A cycle is converged when everything it surfaces is one of:
 
 - a finding the user has **deferred** to later (and you logged as such), or
@@ -73,12 +62,12 @@ than assuming a stack:
 
 ## Cycle bounds
 
-- **Minimum** — run at least this many cycles even if cycle 1 looks clean; fixes can regress, so
-  every fix round gets re-reviewed at least once. **Default 2.**
+- **Stop as soon as it converges** — the moment a review cycle surfaces no new actionable findings,
+  stop, even if that's the first one. There's no forced minimum.
 - **Maximum** — a cap so the loop can't run away; if it hasn't converged by then, stop and report
-  the open findings. **Default 5.**
-- **The user sets these.** If the user specifies a minimum and/or maximum — via `--min-cycles <n>` /
-  `--max-cycles <n>` or in their request — use those values instead of the defaults.
+  the open findings. **Default 5** review cycles (cycle 0 doesn't count).
+- **The user sets the maximum.** If the user gives one (`--max-cycles <n>`, or in their request),
+  use it instead of the default.
 
 ## Required summary after the last cycle
 
