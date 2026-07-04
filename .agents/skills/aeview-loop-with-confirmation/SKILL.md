@@ -1,7 +1,7 @@
 ---
 name: aeview-loop-with-confirmation
 description: Like aeview-loop — run after you and the user have planned and implemented a change — but it pauses every cycle to confirm each reviewer finding with the user before acting. For each finding it presents the issue, tailored resolution options (always including Ignore) and its recommendation via AskUserQuestion, then applies the chosen option. Use when you want to approve every fix the loop makes; for the autonomous version use aeview-loop.
-argument-hint: '[--reviewers a,b] [--no-commit] [--min-cycles n] [--max-cycles n] [what to build or fix]'
+argument-hint: '[--reviewers a,b] [--no-commit] [--max-cycles n] [what to build or fix]'
 disable-model-invocation: true
 ---
 
@@ -20,80 +20,65 @@ Raw arguments: `$ARGUMENTS`
 - Freeform text is context for the review — the scope/files to focus on, or a note on what the
   change does.
 - `--reviewers a,b` and other `aeview run` flags pass straight through to the panel.
-- `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope, see
-  step 4).
-- `--min-cycles <n>` / `--max-cycles <n>` — override the default loop bounds (min 2, max 5). The user
-  can also name these in plain language ("at least 1 cycle", "at most 3").
+- `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope).
+- `--max-cycles <n>` — override the default cap of 5 review cycles (the loop stops as soon as it
+  converges regardless). The user can also name this in plain language ("at most 3 cycles").
 
-## The loop (default: min 2 / max 5 cycles — see "Bounds")
+## The loop (runs until it converges — at most 5 review cycles)
 
 Read [the convergence reference](references/convergence.md) once — it defines convergence under
 confirmation, how to surface context the reviewers can't see, the gate-discovery guidance, and the
-bounds. Then run the loop:
+bounds. Then run the loop.
 
-### 1. Start from the implemented change
+### Setup: establish the review scope
 
-Cycle 1: the change is already implemented — you built it with the user before invoking this skill,
-so go straight to the gates. Later cycles: the user's chosen fixes from the previous cycle were
-applied at the end of step 5, so this cycle just re-gates and re-reviews them.
+Decide what the panel reviews: `branch` (the committed change against its base) normally, or
+`effective-pr` when the user passed `--no-commit` (the uncommitted work in the tree). Unless
+`--no-commit`, commit the change first if it isn't committed yet — the `branch` scope needs it on
+the branch to see it.
 
-### 2. Run the project's hard gates
+### Cycle 0: green the gates
 
-Discover the project's own tests, linter, and type-checker (from `pyproject.toml` / `package.json`
-scripts / `Makefile` / `justfile` / CI workflows — see the reference) and run them. **They must
-pass before you continue**; if none are discoverable or they're ambiguous, ask the user which
-commands count. These gates are required every cycle, independent of the panel.
+Discover the project's hard gates — its tests, linter, and type-checker (from `pyproject.toml` /
+`package.json` scripts / `Makefile` / `justfile` / CI workflows — see the reference) — and run them.
+Fix any failures, and commit the fix **only if there was something to fix** (never under
+`--no-commit`). Don't run the panel yet: cycle 0 just gets you to a clean, gate-passing baseline.
 
-### 3. Commit the cycle's work
+### Cycles 1–5: review and confirm
 
-Commit with a conventional message (`feat:` / `fix:` / `refactor:` / `nit:`, imperative mood).
-**Skip this step if the user passed `--no-commit`.**
+Each review cycle, in order:
 
-### 4. Run the aeview panel (prefer the background)
+1. **Run the aeview panel**, always with `--json` (the JSON gate is the reliable contract). A full
+   panel takes a few minutes, so **run it as a background task** rather than blocking:
 
-Always pass `--json` (the JSON gate is the reliable contract). A full panel takes a few minutes, so
-**run it as a background task** rather than blocking:
+   ```bash
+   aeview run --scope branch --json [--reviewers …]      # --scope effective-pr under --no-commit
+   ```
 
-```bash
-aeview run --scope branch --json [--reviewers …]
-```
+   It prints its run id on stderr; let it finish (`aeview status <run-id> --wait`), then read the
+   JSON gate. Exit code is the verdict: `0` approve · `1` needs-attention · `2` error; full report
+   via `aeview result <run-id>`.
+2. **Confirm every finding with the user** — the heart of this skill; do **not** decide on your own.
+   For each finding the panel reports this cycle (**skip any the user already decided on in an
+   earlier cycle** — see the reference), build an AskUserQuestion question:
+   - **header** — a short tag for the finding (e.g. `sql-injection`, `missing-test`).
+   - **question** — state the finding plainly: severity, `file:line`, title, and the reviewer's
+     recommendation. Then ask how to resolve it.
+   - **options** — 1–3 concrete resolutions tailored to *that* finding (the reviewer's suggested fix
+     and any sensible alternative), **plus an always-present "Ignore"**. Put your recommended option
+     first and mark it "(recommended)". When the finding is premised on context the reviewers can't
+     see (single user, unreleased, migration declined, …), recommend **Ignore** and say why in its
+     description — surface it, don't pre-filter it (see the reference).
 
-Review the change against its base. With `--no-commit` there's uncommitted work, so review that
-instead:
-
-```bash
-aeview run --scope effective-pr --json [--reviewers …]
-```
-
-It prints its run id on stderr; let it finish (`aeview status <run-id> --wait`), then read the JSON
-gate. Exit code is the verdict: `0` approve · `1` needs-attention · `2` error; full report via
-`aeview result <run-id>`.
-
-### 5. Confirm every finding with the user
-
-This is the heart of this skill. Do **not** decide on your own. For each finding the panel reports
-this cycle — **skipping any the user already decided on in an earlier cycle** (see the reference) —
-build an AskUserQuestion question:
-
-- **header** — a short tag for the finding (e.g. `sql-injection`, `missing-test`).
-- **question** — state the finding plainly: severity, `file:line`, title, and the reviewer's
-  recommendation. Then ask how to resolve it.
-- **options** — 1–3 concrete resolutions tailored to *that* finding (the reviewer's suggested fix
-  and any sensible alternative), **plus an always-present "Ignore"**. Put your recommended option
-  first and mark it "(recommended)". When the finding is premised on context the reviewers can't see
-  (single user, unreleased, migration declined, …), recommend **Ignore** and say why in its
-  description — surface it, don't pre-filter it (see the reference).
-
-Batch up to **4 findings per AskUserQuestion call**; if there are more, ask in successive calls.
-Apply each choice: a fix option → make that change; **Ignore** → record it (with the user's reason)
-for the summary and don't ask about it again. Then go back to step 1.
-
-### Bounds — when to stop
-
-Run **at least the minimum and at most the maximum** number of cycles — **default min 2, max 5** —
-stopping as soon as a cycle surfaces **no new findings the user elects to fix**. If the user gave
-`--min-cycles` / `--max-cycles` (or named the values in their request), use those instead of the
-defaults.
+   Batch up to **4 findings per AskUserQuestion call**; ask in successive calls if there are more.
+   Apply each choice: a fix option → make that change; **Ignore** → record it (with the user's
+   reason) for the summary and don't ask about it again.
+3. **Re-run the hard gates** — a resolution can break them, so gate the fixes before you commit;
+   they must pass (fix any breakage first).
+4. **Commit** the cycle's fixes (**skip under `--no-commit`**).
+5. **Converged?** If the cycle surfaced **no new findings the user elects to fix**, stop. Otherwise
+   run the next cycle — at most 5 review cycles, then stop and report what's open. The user can
+   raise the cap with `--max-cycles`.
 
 ## Required summary
 

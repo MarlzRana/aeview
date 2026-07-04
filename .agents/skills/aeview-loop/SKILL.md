@@ -1,7 +1,7 @@
 ---
 name: aeview-loop
 description: After you and the user have planned and implemented a change, loop with the aeview reviewer panel until it converges — running the project's gates, reviewing with the panel, and fixing the findings each cycle. Use when a change is already written and the user wants it reviewed and fixed until it passes the gates and the panel finds no new issues — "review until clean" or "loop until the panel is happy". It fixes what the panel finds; it does not build the change from scratch. For a one-shot review with no fixes, use the aeview skill instead.
-argument-hint: '[--reviewers a,b] [--no-commit] [--min-cycles n] [--max-cycles n] [what to build or fix]'
+argument-hint: '[--reviewers a,b] [--no-commit] [--max-cycles n] [what to build or fix]'
 ---
 
 # aeview-loop
@@ -17,66 +17,52 @@ Raw arguments: `$ARGUMENTS`
 - Freeform text is context for the review — the scope/files to focus on, or a note on what the
   change does.
 - `--reviewers a,b` and other `aeview run` flags pass straight through to the panel.
-- `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope, see
-  step 4).
-- `--min-cycles <n>` / `--max-cycles <n>` — override the default loop bounds (min 2, max 5). The user
-  can also name these in plain language ("at least 1 cycle", "at most 3").
+- `--no-commit` — don't commit between cycles; work stays in the tree (changes the review scope).
+- `--max-cycles <n>` — override the default cap of 5 review cycles (the loop stops as soon as it
+  converges regardless). The user can also name this in plain language ("at most 3 cycles").
 
-## The loop (default: min 2 / max 5 cycles)
+## The loop (runs until it converges — at most 5 review cycles)
 
 Read [the convergence reference](references/convergence.md) once — it defines convergence, the
-triage rules, the gate-discovery guidance, and the bounds. Then run the loop:
+triage rules, the gate-discovery guidance, and the bounds. Then run the loop.
 
-### 1. Start from the implemented change
+### Setup: establish the review scope
 
-Cycle 1: the change is already implemented — you built it with the user before invoking this skill,
-so go straight to the gates. Later cycles: the previous panel's fixes were applied in step 5, so
-this cycle just re-gates and re-reviews them.
+Decide what the panel reviews: `branch` (the committed change against its base) normally, or
+`effective-pr` when the user passed `--no-commit` (the uncommitted work in the tree). Unless
+`--no-commit`, commit the change first if it isn't committed yet — the `branch` scope needs it on
+the branch to see it.
 
-### 2. Run the project's hard gates
+### Cycle 0: green the gates
 
-Discover the project's own tests, linter, and type-checker (from `pyproject.toml` / `package.json`
-scripts / `Makefile` / `justfile` / CI workflows — see the reference) and run them. **They must
-pass before you continue**; if none are discoverable or they're ambiguous, ask the user which
-commands count. These gates are required every cycle, independent of the panel.
+Discover the project's hard gates — its tests, linter, and type-checker (from `pyproject.toml` /
+`package.json` scripts / `Makefile` / `justfile` / CI workflows — see the reference) — and run them.
+Fix any failures, and commit the fix **only if there was something to fix** (never under
+`--no-commit`). Don't run the panel yet: cycle 0 just gets you to a clean, gate-passing baseline.
 
-### 3. Commit the cycle's work
+### Cycles 1–5: review and fix
 
-Commit with a conventional message (`feat:` / `fix:` / `refactor:` / `nit:`, imperative mood).
-**Skip this step if the user passed `--no-commit`.**
+Each review cycle, in order:
 
-### 4. Run the aeview panel (prefer the background)
+1. **Run the aeview panel**, always with `--json` (the JSON gate is the reliable contract). A full
+   panel takes a few minutes, so **run it as a background task** rather than blocking:
 
-Always pass `--json` (the JSON gate is the reliable contract). A full panel takes a few minutes, so
-**run it as a background task** rather than blocking:
+   ```bash
+   aeview run --scope branch --json [--reviewers …]      # --scope effective-pr under --no-commit
+   ```
 
-```bash
-aeview run --scope branch --json [--reviewers …]
-```
-
-Review the change against its base. With `--no-commit` there's uncommitted work, so review that
-instead:
-
-```bash
-aeview run --scope effective-pr --json [--reviewers …]
-```
-
-It prints its run id on stderr; let it finish (`aeview status <run-id> --wait`), then read the JSON
-gate. Exit code is the verdict: `0` approve · `1` needs-attention · `2` error; full report via
-`aeview result <run-id>`.
-
-### 5. Triage and fix
-
-Triage every finding per the reference — **you** decide address vs ignore, filtering out findings
-premised on context the reviewers can't see, and **flagging genuine design or security decisions to
-the user instead of deciding alone**. Fix the actionable ones, then go back to step 1.
-
-### Stop when converged (or at the cap)
-
-Run **at least the minimum and at most the maximum** number of cycles — **default min 2, max 5** —
-stopping as soon as a cycle surfaces **no new actionable findings** (not necessarily zero). If the
-user gave `--min-cycles` / `--max-cycles` (or named the values in their request), use those instead
-of the defaults.
+   It prints its run id on stderr; let it finish (`aeview status <run-id> --wait`), then read the
+   JSON gate. Exit code is the verdict: `0` approve · `1` needs-attention · `2` error; full report
+   via `aeview result <run-id>`.
+2. **Triage and fix.** **You** decide address vs ignore, filtering out findings premised on context
+   the reviewers can't see, and **flagging genuine design or security decisions to the user instead
+   of deciding alone**. Fix the actionable ones.
+3. **Re-run the hard gates** — a resolution can break them, so gate the fixes before you commit;
+   they must pass (fix any breakage first).
+4. **Commit** the cycle's fixes (**skip under `--no-commit`**).
+5. **Converged?** If the cycle surfaced **no new actionable findings** (not necessarily zero — see
+   the reference), stop. Otherwise run the next cycle — at most 5 review cycles, then stop and
+   report what's open. The user can raise the cap with `--max-cycles`.
 
 ## Required summary
 
