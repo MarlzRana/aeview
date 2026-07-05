@@ -27,10 +27,8 @@ Raw arguments: `$ARGUMENTS`
 
 ## Run the loop
 
-First read [the convergence reference](references/convergence.md) — it defines convergence under
-confirmation, how to surface context the reviewers can't see, the gate-discovery guidance, and the
-bounds. Then follow **one** loop, matching the flags — the two are complete and self-contained, so
-follow only the one that applies:
+Follow **one** loop, matching the flags — the two are complete and self-contained, so follow only
+the one that applies:
 
 - **Default** → [references/loop.md](references/loop.md) (confirm each finding via AskUserQuestion).
 - **With `--post-comments`** → [references/loop-post-comments.md](references/loop-post-comments.md)
