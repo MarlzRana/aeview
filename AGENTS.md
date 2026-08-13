@@ -220,7 +220,8 @@ stable. Build history + per-increment decisions live in `implementation_log.loca
 ## Skills shipped in this repo (`.agents/skills/`)
 
 `aeview` (run a review), `aeview-install` (bootstrap CLI + skills), `aeview-pr`, `aeview-loop`,
-`aeview-commits`, `aeview-effective-pr` — installed by users via `npx skills add MarlzRana/aeview`.
+`aeview-loop-with-confirmation`, `aeview-commits`, `aeview-effective-pr` — installed by users via
+`npx skills add MarlzRana/aeview`.
 Plus `release` — a **maintainer-only** runbook (not for end-user install). Each has a
 `.claude/skills/<name>` symlink → `../../.agents/skills/<name>`.
 
