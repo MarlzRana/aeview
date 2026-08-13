@@ -29,12 +29,13 @@ pipx install aeview
 
 ## 2. Install the skills globally
 
-Pull the aeview skills — this one, plus `aeview`, `aeview-pr`, `aeview-loop`, `aeview-commits`, and
-`aeview-effective-pr` — from the public repo and install them globally, with no prompts:
+Pull the aeview skills — this one, plus `aeview`, `aeview-pr`, `aeview-loop`,
+`aeview-loop-with-confirmation`, `aeview-commits`, and `aeview-effective-pr` — from the public repo
+and install them globally, with no prompts:
 
 ```bash
 npx skills add MarlzRana/aeview -g -y \
-  --skill aeview aeview-install aeview-pr aeview-loop aeview-commits aeview-effective-pr
+  --skill aeview aeview-install aeview-pr aeview-loop aeview-loop-with-confirmation aeview-commits aeview-effective-pr
 ```
 
 `-g` installs for every project (the global agent dir) and `-y` skips the prompts. The skills are
