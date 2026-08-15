@@ -381,13 +381,17 @@ class PiAdapter:
     ) -> None:
         pi_settings = load_settings().harness_settings.pi
         # Session file + isolated agent dir (auth/settings locks) + per-review temp.
-        # SRT writes are allow-only, so anything not listed is denied — do NOT also set
-        # denyWrite:["/"]; that takes precedence over allowWrite and EPERMs the holes.
-        # Trailing slash = the whole directory tree.
+        # `/tmp` is also allowed: SRT's mux listens on a Unix socket under TMPDIR, and
+        # sandbox-exec on macOS rejects sockets in a deep $TMPDIR (EINVAL). `/tmp` is the
+        # conventional short path SRT already uses when TMPDIR is unset. The reviewer's
+        # own TMPDIR still points at pi-tmp, so bash scratch stays per-review.
+        # SRT writes are allow-only — do NOT also set denyWrite:["/"]; that takes
+        # precedence over allowWrite and EPERMs the holes. Trailing slash = the tree.
         allow_write = [
             str(session_dir.resolve()) + "/",
             str(agent_dir.resolve()) + "/",
             str(tmp_dir.resolve()) + "/",
+            "/tmp/",
         ]
         payload = {
             "network": {

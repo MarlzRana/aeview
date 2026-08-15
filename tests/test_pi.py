@@ -223,7 +223,7 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     session = str((log.parent / "pi-session").resolve()) + "/"
     agent = str((log.parent / "pi-agent").resolve()) + "/"
     tmp = str((log.parent / "pi-tmp").resolve()) + "/"
-    assert allow == [session, agent, tmp]
+    assert allow == [session, agent, tmp, "/tmp/"]
     assert "api.x.ai" in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
     assert (log.parent / "pi-agent").is_dir()
