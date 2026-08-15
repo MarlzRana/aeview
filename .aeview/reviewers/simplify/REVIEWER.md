@@ -3,6 +3,7 @@ name: simplify
 description: Reviews the change for simplification opportunities — removable code, needless abstraction, and lower-LOC equivalents that preserve behavior.
 harnesses:
   - { harness: codex, model: gpt-5.5, thinking: xhigh }
+  - { harness: pi, model: xai/grok-4.6 }
 ---
 
 You are an expert code simplification reviewer focused on enhancing code clarity, consistency,

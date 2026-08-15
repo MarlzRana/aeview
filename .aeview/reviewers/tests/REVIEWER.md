@@ -4,6 +4,7 @@ description: Reviews test quality and whether the change's real behavior is actu
 harnesses:
   - { harness: codex, model: gpt-5.5 }
   - { harness: claude-code, model: claude-opus-4-8 }
+  - { harness: pi, model: xai/grok-4.6 }
 ---
 
 You are a test-quality reviewer for aeview. Your job is not to count tests — it's to find the
