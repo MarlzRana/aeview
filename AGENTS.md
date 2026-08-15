@@ -196,10 +196,6 @@ defaults for everything else and say what you chose. Verify external/dependency 
 
 ## Constraints & deliberate non-goals
 
-- **Prerelease floor:** aeview's dep closure pulls a *prerelease* Codex runtime (`openai-codex` is
-  beta and pins an alpha `openai-codex-cli-bin` binary wheel). Consequence: `uv tool install` / `uv
-  pip install` need `--prerelease=allow`; `pip`/`pipx` don't. Goes away when `openai-codex` ships
-  stable. Don't try to "fix" the prerelease deps.
 - **Don't reverse these intentional decisions** (from the dossier): no scope filter (reviewers are
   trusted to stay on-target — prompt-trust, not autoreview's mechanical post-filter); no
   `--prompt`/`--prompt-file` (a reviewer *is* its `REVIEWER.md`); verdict/summary/next_steps are
@@ -207,15 +203,14 @@ defaults for everything else and say what you chose. Verify external/dependency 
   severity/range stitching); `next_steps` stay **per-review** (not flattened); no broker/daemon;
   dedup is **precision-over-recall** (a wrong merge hides a real finding; a wrong split is cheap).
 - **v1 non-goals:** no path filtering (`--paths`/`--exclude`), no Windows. **Deferred:** I6b-2
-  (`--detach`/`cancel` + concurrent-run lock), a Homebrew tap (until `openai-codex` is stable — the
-  prerelease floor makes a formula high-maintenance now), PR CI, and Tier-2 smoke in CI.
+  (`--detach`/`cancel` + concurrent-run lock), a Homebrew tap, PR CI, and Tier-2 smoke in CI.
 
 ## Status & roadmap
 
 Increments **I1–I12 shipped**; the SDK migration **N5 (claude/codex/copilot) is complete**; aeview is
-**published on PyPI** (`0.0.x`) via the release workflow. Remaining backlog is post-release: Homebrew
-tap (deferred), PR CI, Tier-2 smoke, and dropping the prerelease floor once `openai-codex` ships
-stable. Build history + per-increment decisions live in `implementation_log.local.md`.
+**published on PyPI** (`0.0.x`) via the release workflow. Remaining backlog is post-release:
+Homebrew tap (deferred), PR CI, and Tier-2 smoke. Build history + per-increment decisions live in
+`implementation_log.local.md`.
 
 ## Skills shipped in this repo (`.agents/skills/`)
 

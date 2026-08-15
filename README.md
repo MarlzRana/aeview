@@ -87,16 +87,10 @@ Then run `/aeview-install` in your agent (Claude Code, …).
 <summary>Prefer to install by hand?</summary>
 
 ```sh
-uv tool install --prerelease=allow aeview   # recommended (see the note); also fetches Python 3.14
+uv tool install aeview   # recommended; also fetches Python 3.14
 # or
 pipx install aeview
 ```
-
-> **Why `--prerelease=allow` for uv?** aeview pulls a *prerelease* Codex runtime (the Codex Python
-> SDK is still in beta), so you'll see `openai-codex` / `openai-codex-cli-bin` alpha/beta versions.
-> **pip / pipx** allow that automatically (the dependency specifier names the prerelease), but
-> **uv** requires `--prerelease=allow` (or `UV_PRERELEASE=allow`) for a *transitive* prerelease.
-> The flag goes away once `openai-codex` ships a stable release. (Homebrew support is planned.)
 
 After install, sanity-check your setup:
 

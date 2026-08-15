@@ -329,15 +329,17 @@ class CodexAdapter:
         return str(bundled) if Path(bundled).exists() else None
 
     def _resolve_effort(self, thinking: str | None) -> ReasoningEffort | None:
-        # thinking maps to codex's reasoning effort; "default"/None leaves it unset. Validate
-        # against the SDK enum so the accepted set tracks the SDK rather than a hardcoded copy.
+        # thinking maps to codex's reasoning effort; "default"/None leaves it unset. Lookup
+        # the defined SDK members (not ReasoningEffort(value)) so a typo still fails fast:
+        # 0.144.4+'s _missing_ accepts any non-empty string for forward-compat with new CLI
+        # levels, which would otherwise silently pass "ultra" through to the runtime.
         if not thinking or thinking == "default":
             return None
-        try:
-            return ReasoningEffort(thinking)
-        except ValueError as exc:
-            valid = [e.value for e in ReasoningEffort]
-            raise AdapterError(f"codex thinking '{thinking}' invalid; use one of {valid}") from exc
+        known = {e.value: e for e in ReasoningEffort}
+        effort = known.get(thinking)
+        if effort is None:
+            raise AdapterError(f"codex thinking '{thinking}' invalid; use one of {list(known)}")
+        return effort
 
     @staticmethod
     def _usage(result: TurnResult) -> Usage:

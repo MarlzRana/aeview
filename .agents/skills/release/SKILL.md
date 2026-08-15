@@ -59,17 +59,12 @@ steps in order and let the **human** approve the actual publish.
 8. **Verify after it publishes.** Watch the run (`gh run watch <run-id>`); on success, confirm:
    - `https://pypi.org/pypi/aeview/<version>/json` returns 200 (the plain `…/aeview/json` "latest" can
      lag a minute behind the CDN);
-   - a clean install works: `uv tool install --prerelease=allow aeview && aeview --version` (mind the
-     prerelease flag — see Gotchas).
+   - a clean install works: `uv tool install aeview && aeview --version`.
 
 ## Gotchas
 
 - **Immutable index.** A published version's files *and* its long-description (the README rendered on
   https://pypi.org/project/aeview/) are frozen. To change the PyPI page text, publish a new version.
-- **uv needs `--prerelease=allow`.** aeview pulls a prerelease Codex runtime (`openai-codex` is in beta
-  and pins an alpha `openai-codex-cli-bin`), so `uv tool install` / `uv pip install` need
-  `--prerelease=allow`; `pip` / `pipx` allow it automatically. Verify the install with the flag. This
-  goes away once `openai-codex` ships stable.
 - **A failed run is safe.** If build, `twine check`, or the OIDC publish fails, nothing is uploaded —
   fix and re-release (delete + re-push the tag, or bump to the next version).
 - **Tag ↔ version lockstep.** The workflow guards `tag == pyproject version`; keep them aligned.
