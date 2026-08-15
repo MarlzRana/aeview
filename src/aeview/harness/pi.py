@@ -385,18 +385,13 @@ class PiAdapter:
         self, path: Path, session_dir: Path, agent_dir: Path, tmp_dir: Path
     ) -> None:
         pi_settings = load_settings().harness_settings.pi
-        # Session file + isolated agent dir (auth/settings locks) + per-review temp.
-        # `/tmp` is also allowed: SRT's mux listens on a Unix socket under TMPDIR, and
-        # sandbox-exec on macOS rejects sockets in a deep $TMPDIR (EINVAL). `/tmp` is the
-        # conventional short path SRT already uses when TMPDIR is unset. The reviewer's
-        # own TMPDIR still points at pi-tmp, so bash scratch stays per-review.
-        # SRT writes are allow-only — do NOT also set denyWrite:["/"]; that takes
-        # precedence over allowWrite and EPERMs the holes. Trailing slash = the tree.
+        # Session + isolated agent dir + per-review temp. SRT itself allow-writes
+        # `/tmp/claude` (and sets the child's TMPDIR there) for its mux socket — we do
+        # not grant all of `/tmp`. Writes are allow-only; do NOT also set denyWrite:["/"].
         allow_write = [
             str(session_dir.resolve()) + "/",
             str(agent_dir.resolve()) + "/",
             str(tmp_dir.resolve()) + "/",
-            "/tmp/",
         ]
         payload = {
             "network": {
@@ -463,9 +458,20 @@ async def _feed_stdin(stdin: asyncio.StreamWriter, prompt: str) -> None:
 
 
 async def _kill(proc: asyncio.subprocess.Process) -> None:
-    # Shield so a cancelled timeout cannot skip wait() and leak the srt/pi tree.
-    proc.kill()
-    await asyncio.shield(proc.wait())
+    # srt only forwards SIGINT/SIGTERM to the sandboxed child (and runs mux cleanup on
+    # those handlers). SIGKILL the parent first and the tree is orphaned. TERM, then a
+    # short grace, then KILL. Shield wait() so a cancelled timeout cannot skip reap.
+    if proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2.0)
+        return
+    except TimeoutError:
+        pass
+    if proc.returncode is None:
+        proc.kill()
+        await asyncio.shield(proc.wait())
 
 
 async def _read_jsonl(stream: asyncio.StreamReader, writer: EventLogWriter) -> list[dict]:

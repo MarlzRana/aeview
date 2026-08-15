@@ -47,12 +47,23 @@ class _FakeProc:
         self.stderr = _ByteStream(stderr)
         self.returncode = returncode
         self.killed = False
+        self.terminated = False
+        self.signals: list[str] = []
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.signals.append("term")
+        if self.returncode is None:
+            self.returncode = -15
 
     def kill(self) -> None:
         self.killed = True
+        self.signals.append("kill")
+        if self.returncode is None:
+            self.returncode = -9
 
     async def wait(self) -> int:
-        return self.returncode
+        return self.returncode if self.returncode is not None else 0
 
 
 class _Sink:
@@ -231,7 +242,8 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     session = str((log.parent / "pi-session").resolve()) + "/"
     agent = str((log.parent / "pi-agent").resolve()) + "/"
     tmp = str((log.parent / "pi-tmp").resolve()) + "/"
-    assert allow == [session, agent, tmp, "/tmp/"]
+    assert allow == [session, agent, tmp]
+    assert "/tmp/" not in allow
     assert "api.x.ai" in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
     assert (log.parent / "pi-agent").is_dir()
@@ -425,6 +437,16 @@ async def test_stdin_is_fed_concurrently_with_stdout(spawn, aeview_home, tmp_pat
     assert b"REVIEW PROMPT" in bytes(proc.stdin.written)
     assert proc.stdin.closed
     assert calls  # spawned
+
+
+async def test_kill_sends_term_before_kill():
+    from aeview.harness.pi import _kill
+
+    proc = _FakeProc(b"", returncode=None)
+    # terminate() sets returncode, so kill() must not run.
+    await _kill(proc)
+    assert proc.signals == ["term"]
+    assert proc.killed is False
 
 
 async def test_timeout_is_fail_fast(monkeypatch, aeview_home, tmp_path):
