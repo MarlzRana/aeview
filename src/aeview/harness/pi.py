@@ -55,7 +55,6 @@ BUILTIN_ALLOWED_DOMAINS: tuple[str, ...] = (
     "*.x.ai",
     "api.githubcopilot.com",
     "api.github.com",
-    "localhost",
 )
 
 _TOOLS = "read,grep,find,ls,bash"
@@ -111,7 +110,12 @@ def _seed_agent_dir(agent_dir: Path) -> None:
     for name in _SEEDED_AGENT_FILES:
         src = src_root / name
         if src.is_file():
-            shutil.copy2(src, agent_dir / name)
+            dest = agent_dir / name
+            shutil.copy2(src, dest)
+            if name in {"auth.json", "models.json"}:
+                # Read-only so bash cannot rewrite credentials in the sandbox. We do not
+                # write this file back to ~/.pi/agent — a sandbox-owned refresh is untrusted.
+                dest.chmod(0o400)
     # Drop package sources so the isolated agent does not try to `npm install`
     # into the sandbox (registry is not on the allowlist; we also pass
     # --no-extensions). Auth/models stay; packages do not.
@@ -132,24 +136,6 @@ def _scrub_seeded_secrets(agent_dir: Path) -> None:
     for name in ("auth.json", "models.json"):
         path = agent_dir / name
         path.unlink(missing_ok=True)
-
-
-def _writeback_auth(agent_dir: Path) -> None:
-    # Pi may have refreshed OAuth tokens in the isolated copy. Write that back over the
-    # user's real auth.json (atomic replace) so the next interactive session is not logged
-    # out, then the caller scrubs the copy.
-    isolated = agent_dir / "auth.json"
-    if not isolated.is_file():
-        return
-    dest = Path.home() / ".pi" / "agent" / "auth.json"
-    if not dest.parent.is_dir():
-        return
-    tmp = dest.with_name("auth.json.aeview-tmp")
-    try:
-        shutil.copy2(isolated, tmp)
-        os.replace(tmp, dest)
-    except OSError:
-        tmp.unlink(missing_ok=True)
 
 
 class PiAdapter:
@@ -184,12 +170,12 @@ class PiAdapter:
         for d in (session_dir, agent_dir, tmp_dir):
             shutil.rmtree(d, ignore_errors=True)
             d.mkdir(parents=True, exist_ok=True)
-        _seed_agent_dir(agent_dir)
-        self._write_srt_settings(settings_path, session_dir, agent_dir, tmp_dir)
-
         base_prompt = embed_schema(prompt, schema)
         writer = EventLogWriter(log_path, harness=self.name, model=model)
         try:
+            # Seed secrets only after the try so a later setup failure still scrubs them.
+            _seed_agent_dir(agent_dir)
+            self._write_srt_settings(settings_path, session_dir, agent_dir, tmp_dir)
             # One budget for both attempts (schema re-prompt included), matching Copilot.
             async with asyncio.timeout(timeout):
                 out = await self._run_attempts(
@@ -218,7 +204,6 @@ class PiAdapter:
             writer.result()
             return out
         finally:
-            _writeback_auth(agent_dir)
             _scrub_seeded_secrets(agent_dir)
             writer.close()
 

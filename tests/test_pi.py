@@ -471,31 +471,21 @@ async def test_cancel_reaps_the_child(monkeypatch, aeview_home, tmp_path):
     assert hang.terminated is True
 
 
-async def test_auth_writeback_then_scrub(spawn, aeview_home, tmp_path, monkeypatch):
+async def test_seeded_auth_is_readonly_and_not_written_back(
+    spawn, aeview_home, tmp_path, monkeypatch
+):
     home = tmp_path / "userhome"
     agent = home / ".pi" / "agent"
     agent.mkdir(parents=True)
     (agent / "auth.json").write_text('{"old": true}')
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    calls, _ = spawn
-
-    async def exec_and_refresh(*argv, **kwargs):
-        proc = _ok_proc()
-
-        async def wait() -> int:
-            agent_dir = Path(kwargs["env"]["PI_CODING_AGENT_DIR"])
-            (agent_dir / "auth.json").write_text('{"refreshed": true}')
-            return 0
-
-        proc.wait = wait  # type: ignore[method-assign]
-        calls.append({"argv": list(argv), "kwargs": kwargs})
-        return proc
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", exec_and_refresh)
+    _, queue = spawn
+    queue.append(_ok_proc())
     log = tmp_path / "inst" / "review.log"
     log.parent.mkdir()
     await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
-    assert json.loads((agent / "auth.json").read_text()) == {"refreshed": True}
+    # User's real auth is untouched (we never write a sandbox file back).
+    assert json.loads((agent / "auth.json").read_text()) == {"old": True}
     assert not (log.parent / "pi-agent" / "auth.json").exists()
 
 
