@@ -17,11 +17,10 @@ Raw arguments: `$ARGUMENTS` — `--pipx` uses pipx instead of uv for the CLI.
 Default (uv — also fetches Python 3.14 if needed):
 
 ```bash
-uv tool install --prerelease=allow aeview
+uv tool install aeview
 ```
 
-The `--prerelease=allow` flag is required for **uv** only: aeview pulls a prerelease Codex runtime,
-so uv needs it for the transitive prerelease. With `--pipx`, no flag is needed:
+Or with `--pipx`:
 
 ```bash
 pipx install aeview
