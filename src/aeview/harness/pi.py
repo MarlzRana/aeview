@@ -14,6 +14,7 @@ via `harnessSettings.pi` (`onlySandboxAllowedDomains` replaces; otherwise
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -177,21 +178,12 @@ class PiAdapter:
             _seed_agent_dir(agent_dir)
             self._write_srt_settings(settings_path, session_dir, agent_dir, tmp_dir)
             # One budget for both attempts (schema re-prompt included), matching Copilot.
+            argv = self._argv(
+                srt_bin, settings_path, pi_bin, session_dir, tmp_dir, model, thinking_flag
+            )
             async with asyncio.timeout(timeout):
                 out = await self._run_attempts(
-                    pi_bin,
-                    srt_bin,
-                    settings_path,
-                    session_dir,
-                    agent_dir,
-                    tmp_dir,
-                    base_prompt,
-                    schema,
-                    model,
-                    cwd,
-                    thinking_flag,
-                    validate,
-                    writer,
+                    argv, agent_dir, base_prompt, schema, cwd, validate, writer
                 )
         except TimeoutError as exc:
             msg = f"pi timed out after {timeout}s"
@@ -231,28 +223,18 @@ class PiAdapter:
 
     async def _run_attempts(
         self,
-        pi_bin: str,
-        srt_bin: str,
-        settings_path: Path,
-        session_dir: Path,
+        argv: list[str],
         agent_dir: Path,
-        tmp_dir: Path,
         base_prompt: str,
         schema: dict,
-        model: str,
         cwd: Path,
-        thinking: str | None,
         validate: Callable[[dict], object] | None,
         writer: EventLogWriter,
     ) -> StructuredOutput:
         last_error = "pi produced no valid output"
         for attempt in range(1, MAX_ATTEMPTS + 1):
             text = base_prompt if attempt == 1 else RETRY_SUFFIX
-            argv = self._argv(
-                srt_bin, settings_path, pi_bin, session_dir, tmp_dir, model, thinking
-            )
-            answer, usage = await self._invoke(argv, text, cwd, agent_dir, tmp_dir, writer)
-            raw = answer
+            answer, usage = await self._invoke(argv, text, cwd, agent_dir, writer)
             parsed = extract_json(answer, schema)
             if parsed is None:
                 last_error = "pi did not return a JSON object matching the schema"
@@ -263,7 +245,7 @@ class PiAdapter:
                 except Exception as exc:  # noqa: BLE001 - any validation failure should re-prompt
                     last_error = f"pi output failed schema validation: {exc}"
                     continue
-            return StructuredOutput(payload=parsed, usage=usage, raw=raw)
+            return StructuredOutput(payload=parsed, usage=usage, raw=answer)
         raise AdapterError(last_error)
 
     async def _invoke(
@@ -272,7 +254,6 @@ class PiAdapter:
         prompt: str,
         cwd: Path,
         agent_dir: Path,
-        tmp_dir: Path,
         writer: EventLogWriter,
     ) -> tuple[str, Usage]:
         """Spawn srt→pi, stream JSONL stdout into the event log, return (answer-text, usage)."""
@@ -450,30 +431,36 @@ class PiAdapter:
 
 
 async def _feed_stdin(stdin: asyncio.StreamWriter, prompt: str) -> None:
-    stdin.write(prompt.encode("utf-8"))
-    await stdin.drain()
-    stdin.close()
-    # wait_closed is not on every transport; ignore if missing.
-    wait_closed = getattr(stdin, "wait_closed", None)
-    if callable(wait_closed):
-        await wait_closed()
+    # BrokenPipe / ConnectionReset: the child already exited (auth fail, unknown model).
+    # Swallow them the way Process.communicate does so gather still returns stdout/stderr
+    # and we classify the real exit, not a pipe error.
+    try:
+        stdin.write(prompt.encode("utf-8"))
+        await stdin.drain()
+        stdin.close()
+        await stdin.wait_closed()
+    except BrokenPipeError, ConnectionResetError:
+        return
 
 
 async def _kill(proc: asyncio.subprocess.Process) -> None:
     # srt only forwards SIGINT/SIGTERM to the sandboxed child (and runs mux cleanup on
     # those handlers). SIGKILL the parent first and the tree is orphaned. TERM, then a
-    # short grace, then KILL. Shield wait() so a cancelled timeout cannot skip reap.
+    # short grace, then KILL. CancelledError must not skip the KILL — a cancelled
+    # wait_for would otherwise leak a SIGTERM-deaf child.
     if proc.returncode is not None:
         return
     proc.terminate()
     try:
         await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2.0)
         return
-    except TimeoutError:
+    except TimeoutError, asyncio.CancelledError:
         pass
     if proc.returncode is None:
         proc.kill()
-        await asyncio.shield(proc.wait())
+        # Already SIGKILL'd; a second cancel during wait is fine — process is dead.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(proc.wait())
 
 
 async def _read_jsonl(stream: asyncio.StreamReader, writer: EventLogWriter) -> list[dict]:
@@ -516,17 +503,19 @@ def _consume_line(line: bytes, events: list[dict], writer: EventLogWriter) -> No
         events.append(obj)
 
 
-def _last_assistant_text(events: list[dict]) -> str:
-    """Last `message_end` whose message.role is assistant → concatenated text blocks."""
-    text = ""
-    for event in events:
+def _last_assistant_message(events: list[dict]) -> dict | None:
+    for event in reversed(events):
         if event.get("type") != "message_end":
             continue
         message = event.get("message")
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        text = _assistant_text(message)
-    return text
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return message
+    return None
+
+
+def _last_assistant_text(events: list[dict]) -> str:
+    message = _last_assistant_message(events)
+    return _assistant_text(message) if message is not None else ""
 
 
 def _assistant_text(message: dict) -> str:
@@ -546,45 +535,52 @@ def _assistant_text(message: dict) -> str:
 
 def _stream_error(events: list[dict]) -> str | None:
     """A completed stream can still be an error: last assistant stopReason=error."""
-    for event in reversed(events):
-        if event.get("type") != "message_end":
-            continue
-        message = event.get("message")
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        reason = message.get("stopReason")
-        if reason in {"error", "aborted"}:
-            return str(message.get("errorMessage") or reason)
+    message = _last_assistant_message(events)
+    if message is None:
         return None
+    reason = message.get("stopReason")
+    if reason in {"error", "aborted"}:
+        return str(message.get("errorMessage") or reason)
     return None
 
 
 def _usage_from_events(events: list[dict]) -> Usage:
     """Sum input/output tokens and USD cost across assistant messages in the stream.
 
-    Prefer `message_end.message.usage` (authoritative); fall back to `message_update.usage`
-    when a stream has no message_end (truncated). Cost is optional — missing → 0.0.
+    Prefer each `message_end.message.usage` (authoritative). Streaming `message_update.usage`
+    is treated as a snapshot of the in-flight turn and is only used if that turn never got a
+    `message_end` — otherwise we'd double-count. Cost is optional — missing → 0.0.
     """
     input_tokens = 0
     output_tokens = 0
     cost = 0.0
-    seen_end = False
+    pending: dict | None = None
     for event in events:
-        usage = None
         if event.get("type") == "message_end":
             message = event.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
-                usage = message.get("usage")
-                seen_end = True
-        elif not seen_end and event.get("type") == "message_update":
-            usage = event.get("usage")
-        if not isinstance(usage, dict):
+                input_tokens, output_tokens, cost = _add_usage(
+                    message.get("usage"), input_tokens, output_tokens, cost
+                )
+                pending = None
             continue
-        input_tokens += int(usage.get("input") or 0)
-        output_tokens += int(usage.get("output") or 0)
-        cost_block = usage.get("cost")
-        if isinstance(cost_block, dict):
-            cost += float(cost_block.get("total") or 0.0)
-        elif isinstance(usage.get("cost"), (int, float)):
-            cost += float(usage["cost"])
+        if event.get("type") == "message_update" and isinstance(event.get("usage"), dict):
+            pending = event["usage"]
+    if pending is not None:
+        input_tokens, output_tokens, cost = _add_usage(pending, input_tokens, output_tokens, cost)
     return Usage(input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
+
+
+def _add_usage(
+    usage: object, input_tokens: int, output_tokens: int, cost: float
+) -> tuple[int, int, float]:
+    if not isinstance(usage, dict):
+        return input_tokens, output_tokens, cost
+    input_tokens += int(usage.get("input") or 0)
+    output_tokens += int(usage.get("output") or 0)
+    cost_block = usage.get("cost")
+    if isinstance(cost_block, dict):
+        cost += float(cost_block.get("total") or 0.0)
+    elif isinstance(cost_block, (int, float)):
+        cost += float(cost_block)
+    return input_tokens, output_tokens, cost

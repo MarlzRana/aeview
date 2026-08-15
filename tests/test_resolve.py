@@ -306,3 +306,18 @@ def test_build_roster_sanitizes_slash_in_model(tmp_path):
     reviewer = resolve_reviewer("python", tmp_path, _settings())
     roster = build_roster([reviewer])
     assert [e.id for e in roster] == ["python__pi-xai-grok-4.6"]
+
+
+def test_slash_and_dash_models_do_not_collide(tmp_path):
+    make_reviewer(
+        tmp_path,
+        "python",
+        harnesses=[
+            {"harness": "pi", "model": "xai/grok"},
+            {"harness": "pi", "model": "xai-grok"},
+        ],
+    )
+    reviewer = resolve_reviewer("python", tmp_path, _settings())
+    roster = build_roster([reviewer])
+    ids = [e.id for e in roster]
+    assert len(ids) == len(set(ids))

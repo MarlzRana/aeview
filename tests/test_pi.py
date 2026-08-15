@@ -13,11 +13,13 @@ from aeview.harness.pi import (
     BUILTIN_ALLOWED_DOMAINS,
     PiAdapter,
     _last_assistant_text,
+    _seed_agent_dir,
     _stream_error,
     _usage_from_events,
     resolve_allowed_domains,
     review_dirs,
 )
+from aeview.harness.prompt_schema import RETRY_SUFFIX
 from aeview.process import ProcResult
 
 _REVIEW = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
@@ -81,6 +83,9 @@ class _Sink:
 
     def close(self) -> None:
         self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
 
 
 class _ByteStream:
@@ -245,6 +250,7 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     assert allow == [session, agent, tmp]
     assert "/tmp/" not in allow
     assert "api.x.ai" in settings["network"]["allowedDomains"]
+    assert "localhost" not in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
     assert (log.parent / "pi-agent").is_dir()
     assert (log.parent / "pi-tmp").is_dir()
@@ -286,6 +292,40 @@ async def test_seeded_settings_drop_packages(spawn, aeview_home, tmp_path, monke
     assert seeded["theme"] == "dark"
     # Secrets are scrubbed after the invocation so they don't persist in the run tree.
     assert not (log.parent / "pi-agent" / "auth.json").exists()
+
+
+async def test_srt_settings_honor_extra_and_only(spawn, aeview_home, tmp_path):
+    aeview_home.mkdir(parents=True, exist_ok=True)
+    (aeview_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "harnessSettings": {
+                    "pi": {"extraSandboxAllowedDomains": ["proxy.internal"]}
+                }
+            }
+        )
+    )
+    _, queue = spawn
+    queue.append(_ok_proc())
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    domains = json.loads((log.parent / "srt-settings.json").read_text())["network"][
+        "allowedDomains"
+    ]
+    assert "proxy.internal" in domains
+    assert "api.x.ai" in domains
+
+    (aeview_home / "settings.json").write_text(
+        json.dumps({"harnessSettings": {"pi": {"onlySandboxAllowedDomains": []}}})
+    )
+    queue.append(_ok_proc())
+    log2 = tmp_path / "inst2" / "review.log"
+    log2.parent.mkdir()
+    await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log2)
+    assert json.loads((log2.parent / "srt-settings.json").read_text())["network"][
+        "allowedDomains"
+    ] == []
 
 
 async def test_wipe_only_this_review_session(spawn, aeview_home, tmp_path):
@@ -345,8 +385,9 @@ def test_get_adapter_forwards_override():
 
 async def test_invalid_json_reprompts_once_same_session(spawn, aeview_home, tmp_path):
     calls, queue = spawn
-    queue.append(_FakeProc(_jsonl(_message_end("not json"))))
-    queue.append(_ok_proc())
+    first = _FakeProc(_jsonl(_message_end("not json")))
+    second = _ok_proc()
+    queue.extend([first, second])
     log = tmp_path / "inst" / "review.log"
     log.parent.mkdir()
     out = await PiAdapter().run("REVIEW", "xai/grok-4.6", tmp_path, log)
@@ -355,7 +396,8 @@ async def test_invalid_json_reprompts_once_same_session(spawn, aeview_home, tmp_
     session = str(log.parent / "pi-session")
     assert calls[0]["argv"][calls[0]["argv"].index("--session-dir") + 1] == session
     assert calls[1]["argv"][calls[1]["argv"].index("--session-dir") + 1] == session
-    assert (log.parent / "pi-session").is_dir()
+    assert b"Required output format" in bytes(first.stdin.written)
+    assert bytes(second.stdin.written).decode() == RETRY_SUFFIX
 
 
 async def test_two_invalid_answers_fail(spawn, aeview_home, tmp_path):
@@ -499,6 +541,30 @@ async def test_kill_sends_term_before_kill():
     assert proc.killed is False
 
 
+async def test_kill_escalates_to_sigkill_when_term_is_ignored(monkeypatch):
+    from aeview.harness.pi import _kill
+
+    class _Deaf(_FakeProc):
+        def terminate(self) -> None:
+            self.terminated = True
+            self.signals.append("term")
+            # Does NOT set returncode — child ignored SIGTERM.
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                await asyncio.sleep(30)
+            return self.returncode if self.returncode is not None else 0
+
+    async def expire(_awaitable, timeout=None):
+        raise TimeoutError
+
+    monkeypatch.setattr("aeview.harness.pi.asyncio.wait_for", expire)
+    proc = _Deaf(b"", returncode=None)
+    await _kill(proc)
+    assert proc.signals == ["term", "kill"]
+    assert proc.killed is True
+
+
 async def test_timeout_is_fail_fast(monkeypatch, aeview_home, tmp_path):
     async def hang_exec(*_a, **_k):
         class P(_FakeProc):
@@ -559,6 +625,88 @@ def test_usage_sums_assistant_message_ends():
     assert u.input_tokens == 12
     assert u.output_tokens == 3
     assert u.cost_usd == pytest.approx(0.3)
+
+
+def test_usage_does_not_double_count_update_then_end():
+    update = {
+        "type": "message_update",
+        "usage": {"input": 100, "output": 40, "cost": {"total": 0.25}},
+    }
+    end = _message_end("ok", usage={"input": 100, "output": 40, "cost": {"total": 0.25}})
+    u = _usage_from_events([update, end])
+    assert u.input_tokens == 100
+    assert u.output_tokens == 40
+    assert u.cost_usd == pytest.approx(0.25)
+
+
+def test_usage_falls_back_to_last_update_when_no_end():
+    events = [
+        {"type": "message_update", "usage": {"input": 10, "output": 1, "cost": 0.01}},
+        {"type": "message_update", "usage": {"input": 50, "output": 8, "cost": 0.05}},
+    ]
+    u = _usage_from_events(events)
+    assert u.input_tokens == 50
+    assert u.output_tokens == 8
+    assert u.cost_usd == pytest.approx(0.05)
+
+
+def test_seed_agent_dir_chmods_secrets(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    src = home / ".pi" / "agent"
+    src.mkdir(parents=True)
+    (src / "auth.json").write_text("{}")
+    (src / "models.json").write_text("{}")
+    (src / "settings.json").write_text("{}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    dest = tmp_path / "pi-agent"
+    _seed_agent_dir(dest)
+    assert oct((dest / "auth.json").stat().st_mode)[-3:] == "400"
+    assert oct((dest / "models.json").stat().st_mode)[-3:] == "400"
+
+
+async def test_secrets_are_scrubbed_on_failure(spawn, aeview_home, tmp_path, monkeypatch):
+    home = tmp_path / "userhome"
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "auth.json").write_text('{"k": 1}')
+    (agent / "models.json").write_text("{}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _, queue = spawn
+    queue.append(_FakeProc(b"", stderr=b"auth failed", returncode=1))
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    with pytest.raises(AdapterError):
+        await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    assert not (log.parent / "pi-agent" / "auth.json").exists()
+    assert not (log.parent / "pi-agent" / "models.json").exists()
+    assert json.loads((agent / "auth.json").read_text()) == {"k": 1}
+
+
+async def test_broken_pipe_on_stdin_surfaces_child_exit(spawn, aeview_home, tmp_path):
+    class _Broken(_Sink):
+        def write(self, _data: bytes) -> None:
+            raise BrokenPipeError("broken")
+
+    _, queue = spawn
+    proc = _FakeProc(b"", stderr=b"rate limit hit, try again", returncode=1)
+    proc.stdin = _Broken()
+    queue.append(proc)
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    with pytest.raises(AdapterError, match="rate limit") as ei:
+        await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    assert ei.value.transient is True
+
+
+async def test_non_json_stdout_is_teed_and_review_still_succeeds(spawn, aeview_home, tmp_path):
+    _, queue = spawn
+    banner = b"starting up\n"
+    queue.append(_FakeProc(banner + _jsonl(_message_end(json.dumps(_REVIEW)))))
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    out = await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    assert out.review.verdict == "approve"
+    assert "aeview.non_json" in log.read_text()
 
 
 def test_stream_error_reads_last_assistant_stop_reason():
