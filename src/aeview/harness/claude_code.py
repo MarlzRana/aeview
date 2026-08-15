@@ -179,7 +179,6 @@ class ClaudeCodeAdapter:
         terminal ResultMessage. `asyncio.timeout(None)` is a no-op, so this bounds the run only
         when a timeout is set. A timeout is fail-fast (non-transient), matching the CLI path."""
         transcript: list[str] = []
-        result: ResultMessage | None = None
         # query() is an async generator at runtime (it has aclose); its return annotation widens
         # to AsyncIterator, which lacks aclose, so cast to the real type for the teardown below.
         agen = cast("AsyncGenerator[Message]", query(prompt=prompt, options=options))
@@ -192,36 +191,28 @@ class ClaudeCodeAdapter:
                             b.text for b in message.content if isinstance(b, TextBlock)
                         )
                     elif isinstance(message, ResultMessage):
-                        result = message
+                        # Terminal. The CLI then exits non-zero for shell-script consumers and
+                        # the SDK rewrites that as "error result: <subtype>" (it falls back to
+                        # subtype when errors is empty — "success" on the live credentials flake).
+                        # Stop here so _interpret sees the result, not the rewrite.
+                        return message, transcript
         except TimeoutError as exc:
-            # A ResultMessage is terminal — if it already arrived, the run finished and the
-            # timeout is teardown. Prefer the result over "timed out".
-            if result is not None:
-                return result, transcript
             raise AdapterError(f"claude timed out after {timeout}s", transient=False) from exc
         except CLINotFoundError as exc:
             raise AdapterError(f"claude binary not found: {exc}", transient=False) from exc
         except ProcessError as exc:
-            # The CLI often emits a ResultMessage (is_error=True) then exits non-zero for
-            # shell-script consumers. The ProcessError is then just "exit code 1"; the result
-            # already has the real reason. Fall through to _interpret.
-            if result is not None:
-                return result, transcript
             detail = (exc.stderr or str(exc)).strip()
             raise AdapterError(
                 f"claude process failed: {detail}",
                 transient=classify_transient(exc.exit_code or 1, detail),
             ) from exc
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
-            # Same as ProcessError: the SDK rewrites that exit as e.g. "error result: success"
-            # (it falls back to ResultMessage.subtype when errors is empty). If we already have
-            # the result, interpret it — that's how an auth flake reports the credentials text
-            # instead of "success". No result → keep normalizing, so the adapter's only failure
-            # type is AdapterError (run_dedup only catches that). Classify transient by text so
-            # an overload that surfaces as a non-ProcessError still retries. CancelledError is a
-            # BaseException, not Exception, so cancellation is not swallowed.
-            if result is not None:
-                return result, transcript
+            # Malformed JSON, SDK/anyio internals, any unexpected error → AdapterError, so the
+            # adapter's only failure type is AdapterError. The dedup path (run_dedup) catches only
+            # AdapterError/ValidationError, so an unnormalized exception would abort the merge and
+            # leave the run stuck non-terminal. Classify transient by text so an overload that
+            # surfaces as some non-ProcessError exception still retries rather than failing fast.
+            # (CancelledError is a BaseException, not Exception, so cancellation is not swallowed.)
             detail = str(exc)
             raise AdapterError(
                 f"claude SDK call failed: {detail}", transient=looks_transient(detail)
@@ -233,7 +224,7 @@ class ClaudeCodeAdapter:
             # meaningful error is already chosen above, so a teardown error must not mask it.
             with contextlib.suppress(Exception):
                 await agen.aclose()
-        return result, transcript
+        return None, transcript
 
     def _interpret(self, result: ResultMessage | None, transcript: list[str]) -> StructuredOutput:
         if result is None:

@@ -199,12 +199,11 @@ async def test_unexpected_sdk_error_is_normalized_to_adapter_error(monkeypatch, 
     assert ei.value.transient is False
 
 
-async def test_trailing_sdk_error_after_result_uses_the_result(monkeypatch, tmp_path):
+async def test_stops_at_result_message_and_ignores_trailing_sdk_rewrite(monkeypatch, tmp_path):
     # Live flake: the CLI yields ResultMessage(is_error=True, result="API Error: Could not
     # load credentials…", errors=None, subtype="success") then exits non-zero. The SDK
-    # rewrites that exit as "error result: success" (it falls back to subtype when errors
-    # is empty). Prefer the ResultMessage so the stored error is the credentials text, not
-    # "success". Auth is fail-fast (non-transient).
+    # rewrites that exit as "error result: success". ResultMessage is terminal — stop there
+    # so the rewrite is never pulled. Auth is fail-fast (non-transient).
     rm = _result(
         is_error=True,
         subtype="success",
@@ -213,36 +212,22 @@ async def test_trailing_sdk_error_after_result_uses_the_result(monkeypatch, tmp_
         api_error_status=None,
         structured_output=None,
     )
+    pulled_past_result = False
 
     async def fake_query(*, prompt, options, transport=None):
         yield AssistantMessage(content=[TextBlock(text="working")], model="claude-opus-4-8")
         yield rm
+        nonlocal pulled_past_result
+        pulled_past_result = True
         raise RuntimeError("Claude Code returned an error result: success")
 
     monkeypatch.setattr(claude_code, "query", fake_query)
     with pytest.raises(AdapterError) as ei:
         await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert pulled_past_result is False  # we returned on the ResultMessage
     assert "Could not load credentials" in str(ei.value)
     assert "success" not in str(ei.value)
     assert ei.value.transient is False
-
-
-async def test_trailing_process_error_after_result_uses_the_result(monkeypatch, tmp_path):
-    # Same shape via ProcessError (the CLI's raw non-zero exit, before the SDK rewrites it).
-    rm = _result(
-        is_error=True,
-        result="API Error: Could not load credentials from any providers",
-        errors=None,
-        structured_output=None,
-    )
-
-    async def fake_query(*, prompt, options, transport=None):
-        yield rm
-        raise ProcessError("exit code 1", exit_code=1, stderr="exit code 1")
-
-    monkeypatch.setattr(claude_code, "query", fake_query)
-    with pytest.raises(AdapterError, match="Could not load credentials"):
-        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
 
 
 async def test_run_writes_event_stream_to_log(capture_query, tmp_path):
