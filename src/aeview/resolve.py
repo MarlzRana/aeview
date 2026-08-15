@@ -224,7 +224,9 @@ def _assign_ids(instances: list[HarnessInstance]) -> list[HarnessRef]:
     (e.g. a model literally named `opus-high`) can never collide with another instance's
     escalated id (`opus` + thinking `high`) — duplicate ids would clobber review files.
     """
-    base = [f"{i.harness}-{i.model}" for i in instances]
+    # Use instance_id (not a raw f-string) so provider/model slashes are sanitized the same
+    # way as HarnessInstance.instance_id — the id is an on-disk directory name.
+    base = [i.instance_id for i in instances]
     base_counts = Counter(base)
     used: set[str] = set()
     refs: list[HarnessRef] = []

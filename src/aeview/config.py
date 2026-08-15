@@ -24,6 +24,21 @@ SEED_FILES = {
 }
 
 
+def _safe_id_part(value: str) -> str:
+    """Make one instance-id segment safe as a single path component.
+
+    Review ids become on-disk dir names (`reviewers/<reviewer>/<instance>/`). A model like
+    pi's `xai/grok-4.6` would otherwise nest a directory and break write_review / log_path.
+    Slash and other path separators become `-`; the rest of the string is kept so the id
+    stays human-readable.
+    """
+    return value.replace("/", "-").replace("\\", "-")
+
+
+def _instance_token(*parts: str) -> str:
+    return "-".join(_safe_id_part(p) for p in parts)
+
+
 def aeview_home() -> Path:
     return Path.home() / ".aeview"
 
@@ -41,14 +56,14 @@ class HarnessInstance(BaseModel):
 
     @property
     def instance_id(self) -> str:
-        return f"{self.harness}-{self.model}"
+        return _instance_token(self.harness, self.model)
 
     @property
     def descriptor_id(self) -> str:
         """Like instance_id but always includes thinking when set — used for the single dedup
         instance's on-disk dir and run.json record (no collision-escalation needed there)."""
         if self.thinking and self.thinking != "default":
-            return f"{self.harness}-{self.model}-{self.thinking}"
+            return _instance_token(self.harness, self.model, self.thinking)
         return self.instance_id
 
 

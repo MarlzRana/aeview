@@ -77,3 +77,13 @@ def test_descriptor_id_includes_thinking_only_when_set():
     assert descriptor() == "claude-code-opus"
     assert descriptor(thinking="default") == "claude-code-opus"  # "default" means unset
     assert descriptor(thinking="high") == "claude-code-opus-high"
+
+
+def test_instance_id_sanitizes_provider_slash():
+    # pi models are `provider/id`; the instance id is an on-disk directory name, so the slash
+    # must not survive (it would nest reviewers/<r>/pi-xai/grok-4.6/).
+    inst = HarnessInstance(harness="pi", model="xai/grok-4.6", thinking="high")
+    assert inst.instance_id == "pi-xai-grok-4.6"
+    assert inst.descriptor_id == "pi-xai-grok-4.6-high"
+    assert "/" not in inst.instance_id
+    assert "/" not in inst.descriptor_id

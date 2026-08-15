@@ -295,3 +295,14 @@ def test_build_roster_is_cross_product(tmp_path):
     roster = build_roster([reviewer])
     ids = {e.id for e in roster}
     assert ids == {"python__claude-code-opus", "python__codex-gpt-5.5"}
+
+
+def test_build_roster_sanitizes_slash_in_model(tmp_path):
+    make_reviewer(
+        tmp_path,
+        "python",
+        harnesses=[{"harness": "pi", "model": "xai/grok-4.6"}],
+    )
+    reviewer = resolve_reviewer("python", tmp_path, _settings())
+    roster = build_roster([reviewer])
+    assert [e.id for e in roster] == ["python__pi-xai-grok-4.6"]
