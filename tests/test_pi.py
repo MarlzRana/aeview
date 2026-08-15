@@ -439,6 +439,66 @@ async def test_stdin_is_fed_concurrently_with_stdout(spawn, aeview_home, tmp_pat
     assert calls  # spawned
 
 
+async def test_cancel_reaps_the_child(monkeypatch, aeview_home, tmp_path):
+    started = asyncio.Event()
+
+    class _Hang(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__(b"", returncode=None)
+
+        async def wait(self) -> int:
+            started.set()
+            await asyncio.sleep(30)
+            return self.returncode if self.returncode is not None else 0
+
+    hang: _Hang | None = None
+
+    async def hang_exec(*_a, **_k):
+        nonlocal hang
+        hang = _Hang()
+        return hang
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", hang_exec)
+    monkeypatch.setattr("aeview.harness.pi.which", lambda name: f"/bin/{name}")
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    task = asyncio.create_task(PiAdapter().run("p", "xai/grok-4.6", tmp_path, log))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert hang is not None
+    assert hang.terminated is True
+
+
+async def test_auth_writeback_then_scrub(spawn, aeview_home, tmp_path, monkeypatch):
+    home = tmp_path / "userhome"
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "auth.json").write_text('{"old": true}')
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls, _ = spawn
+
+    async def exec_and_refresh(*argv, **kwargs):
+        proc = _ok_proc()
+
+        async def wait() -> int:
+            agent_dir = Path(kwargs["env"]["PI_CODING_AGENT_DIR"])
+            (agent_dir / "auth.json").write_text('{"refreshed": true}')
+            return 0
+
+        proc.wait = wait  # type: ignore[method-assign]
+        calls.append({"argv": list(argv), "kwargs": kwargs})
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", exec_and_refresh)
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    assert json.loads((agent / "auth.json").read_text()) == {"refreshed": True}
+    assert not (log.parent / "pi-agent" / "auth.json").exists()
+
+
 async def test_kill_sends_term_before_kill():
     from aeview.harness.pi import _kill
 

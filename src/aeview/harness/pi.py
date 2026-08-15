@@ -134,6 +134,24 @@ def _scrub_seeded_secrets(agent_dir: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _writeback_auth(agent_dir: Path) -> None:
+    # Pi may have refreshed OAuth tokens in the isolated copy. Write that back over the
+    # user's real auth.json (atomic replace) so the next interactive session is not logged
+    # out, then the caller scrubs the copy.
+    isolated = agent_dir / "auth.json"
+    if not isolated.is_file():
+        return
+    dest = Path.home() / ".pi" / "agent" / "auth.json"
+    if not dest.parent.is_dir():
+        return
+    tmp = dest.with_name("auth.json.aeview-tmp")
+    try:
+        shutil.copy2(isolated, tmp)
+        os.replace(tmp, dest)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+
+
 class PiAdapter:
     name: str = "pi"
     schema_support: SchemaSupport = "prompt"
@@ -200,6 +218,7 @@ class PiAdapter:
             writer.result()
             return out
         finally:
+            _writeback_auth(agent_dir)
             _scrub_seeded_secrets(agent_dir)
             writer.close()
 
@@ -305,18 +324,16 @@ class PiAdapter:
                 _feed_stdin(proc.stdin, prompt),
             )
             returncode = await proc.wait()
-        except TimeoutError:
-            await _kill(proc)
-            raise
-        except AdapterError:
-            await _kill(proc)
-            raise
-        except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
-            await _kill(proc)
+        except Exception as exc:  # noqa: BLE001 - normalize unexpected failures to AdapterError
+            # CancelledError is a BaseException and is handled in the finally via _kill.
             detail = str(exc)
             raise AdapterError(
                 f"pi run failed: {detail}", transient=looks_transient(detail)
             ) from exc
+        finally:
+            # Reap on timeout, cancel (Ctrl-C), AdapterError, or any other unwind. _kill is a
+            # no-op if the process already exited.
+            await _kill(proc)
 
         stderr_text = stderr.decode("utf-8", errors="replace")
         if returncode != 0:
