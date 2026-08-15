@@ -216,10 +216,10 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
 
     settings = json.loads((log.parent / "srt-settings.json").read_text())
     assert settings["filesystem"]["denyRead"] == []
-    assert settings["filesystem"]["denyWrite"] == ["/"]
+    assert settings["filesystem"]["denyWrite"] == []
     allow = settings["filesystem"]["allowWrite"]
-    assert str((log.parent / "pi-session").resolve()) in allow
-    assert str((log.parent / "pi-agent").resolve()) in allow
+    assert str((log.parent / "pi-session").resolve()) + "/" in allow
+    assert str((log.parent / "pi-agent").resolve()) + "/" in allow
     assert "api.x.ai" in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
     assert (log.parent / "pi-agent").is_dir()

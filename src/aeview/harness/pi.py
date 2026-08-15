@@ -350,11 +350,13 @@ class PiAdapter:
     def _write_srt_settings(self, path: Path, session_dir: Path, agent_dir: Path) -> None:
         pi_settings = load_settings().harness_settings.pi
         # Session file + isolated agent dir (auth/settings locks) + the process temp dir
-        # (srt / node / pi scratch). Repo and home stay write-denied.
+        # (srt / node / pi scratch). SRT writes are allow-only, so anything not listed is
+        # denied — do NOT also set denyWrite:["/"]; that takes precedence over allowWrite
+        # and EPERMs the holes. Trailing slash = the whole directory tree.
         allow_write = [
-            str(session_dir.resolve()),
-            str(agent_dir.resolve()),
-            tempfile.gettempdir(),
+            str(session_dir.resolve()) + "/",
+            str(agent_dir.resolve()) + "/",
+            tempfile.gettempdir().rstrip("/") + "/",
         ]
         payload = {
             "network": {
@@ -365,7 +367,7 @@ class PiAdapter:
                 "denyRead": [],
                 "allowRead": [],
                 "allowWrite": allow_write,
-                "denyWrite": ["/"],
+                "denyWrite": [],
             },
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
