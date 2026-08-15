@@ -179,7 +179,6 @@ class ClaudeCodeAdapter:
         terminal ResultMessage. `asyncio.timeout(None)` is a no-op, so this bounds the run only
         when a timeout is set. A timeout is fail-fast (non-transient), matching the CLI path."""
         transcript: list[str] = []
-        result: ResultMessage | None = None
         # query() is an async generator at runtime (it has aclose); its return annotation widens
         # to AsyncIterator, which lacks aclose, so cast to the real type for the teardown below.
         agen = cast("AsyncGenerator[Message]", query(prompt=prompt, options=options))
@@ -192,7 +191,11 @@ class ClaudeCodeAdapter:
                             b.text for b in message.content if isinstance(b, TextBlock)
                         )
                     elif isinstance(message, ResultMessage):
-                        result = message
+                        # Terminal. The CLI then exits non-zero for shell-script consumers and
+                        # the SDK rewrites that as "error result: <subtype>" (it falls back to
+                        # subtype when errors is empty — "success" on the live credentials flake).
+                        # Stop here so _interpret sees the result, not the rewrite.
+                        return message, transcript
         except TimeoutError as exc:
             raise AdapterError(f"claude timed out after {timeout}s", transient=False) from exc
         except CLINotFoundError as exc:
@@ -221,7 +224,7 @@ class ClaudeCodeAdapter:
             # meaningful error is already chosen above, so a teardown error must not mask it.
             with contextlib.suppress(Exception):
                 await agen.aclose()
-        return result, transcript
+        return None, transcript
 
     def _interpret(self, result: ResultMessage | None, transcript: list[str]) -> StructuredOutput:
         if result is None:

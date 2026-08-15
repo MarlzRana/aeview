@@ -199,6 +199,37 @@ async def test_unexpected_sdk_error_is_normalized_to_adapter_error(monkeypatch, 
     assert ei.value.transient is False
 
 
+async def test_stops_at_result_message_and_ignores_trailing_sdk_rewrite(monkeypatch, tmp_path):
+    # Live flake: the CLI yields ResultMessage(is_error=True, result="API Error: Could not
+    # load credentials…", errors=None, subtype="success") then exits non-zero. The SDK
+    # rewrites that exit as "error result: success". ResultMessage is terminal — stop there
+    # so the rewrite is never pulled. Auth is fail-fast (non-transient).
+    rm = _result(
+        is_error=True,
+        subtype="success",
+        result="API Error: Could not load credentials from any providers",
+        errors=None,
+        api_error_status=None,
+        structured_output=None,
+    )
+    pulled_past_result = False
+
+    async def fake_query(*, prompt, options, transport=None):
+        yield AssistantMessage(content=[TextBlock(text="working")], model="claude-opus-4-8")
+        yield rm
+        nonlocal pulled_past_result
+        pulled_past_result = True
+        raise RuntimeError("Claude Code returned an error result: success")
+
+    monkeypatch.setattr(claude_code, "query", fake_query)
+    with pytest.raises(AdapterError) as ei:
+        await claude_code.ClaudeCodeAdapter().run("p", "opus", tmp_path, tmp_path / "log")
+    assert pulled_past_result is False  # we returned on the ResultMessage
+    assert "Could not load credentials" in str(ei.value)
+    assert "success" not in str(ei.value)
+    assert ei.value.transient is False
+
+
 async def test_run_writes_event_stream_to_log(capture_query, tmp_path):
     # review.log is a JSONL event stream: a meta opener, one line per SDK message (tee'd verbatim,
     # so the assistant text is present), then a terminal result line. Every line carries seq + ts.
