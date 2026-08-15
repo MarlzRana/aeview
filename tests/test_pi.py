@@ -162,19 +162,20 @@ def test_pi_harness_settings_rejects_unknown_key():
 
 def test_review_dirs_are_siblings_of_the_log(tmp_path):
     log = tmp_path / "reviewers" / "default" / "pi-xai-grok" / "review.log"
-    review_dir, session_dir, agent_dir, settings_path = review_dirs(log)
+    review_dir, session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log)
     assert review_dir == log.parent
     assert session_dir == log.parent / "pi-session"
     assert agent_dir == log.parent / "pi-agent"
+    assert tmp_dir == log.parent / "pi-tmp"
     assert settings_path == log.parent / "srt-settings.json"
 
 
 def test_two_reviews_get_distinct_session_dirs(tmp_path):
     a = tmp_path / "run" / "reviewers" / "default" / "pi-a" / "review.log"
     b = tmp_path / "run" / "reviewers" / "default" / "pi-b" / "review.log"
-    _, sa, aa, _ = review_dirs(a)
-    _, sb, ab, _ = review_dirs(b)
-    assert sa != sb and aa != ab
+    _, sa, aa, ta, _ = review_dirs(a)
+    _, sb, ab, tb, _ = review_dirs(b)
+    assert sa != sb and aa != ab and ta != tb
     assert sa.parent != sb.parent
 
 
@@ -219,12 +220,17 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     assert settings["filesystem"]["denyRead"] == []
     assert settings["filesystem"]["denyWrite"] == []
     allow = settings["filesystem"]["allowWrite"]
-    assert str((log.parent / "pi-session").resolve()) + "/" in allow
-    assert str((log.parent / "pi-agent").resolve()) + "/" in allow
+    session = str((log.parent / "pi-session").resolve()) + "/"
+    agent = str((log.parent / "pi-agent").resolve()) + "/"
+    tmp = str((log.parent / "pi-tmp").resolve()) + "/"
+    assert allow == [session, agent, tmp]
     assert "api.x.ai" in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
     assert (log.parent / "pi-agent").is_dir()
-    assert calls[0]["kwargs"]["env"]["PI_CODING_AGENT_DIR"] == str(log.parent / "pi-agent")
+    assert (log.parent / "pi-tmp").is_dir()
+    env = calls[0]["kwargs"]["env"]
+    assert env["PI_CODING_AGENT_DIR"] == str(log.parent / "pi-agent")
+    assert env["TMPDIR"] == str(log.parent / "pi-tmp")
 
 
 async def test_default_thinking_omits_flag(spawn, aeview_home, tmp_path):
@@ -258,7 +264,8 @@ async def test_seeded_settings_drop_packages(spawn, aeview_home, tmp_path, monke
     seeded = json.loads((log.parent / "pi-agent" / "settings.json").read_text())
     assert "packages" not in seeded
     assert seeded["theme"] == "dark"
-    assert (log.parent / "pi-agent" / "auth.json").is_file()
+    # Secrets are scrubbed after the invocation so they don't persist in the run tree.
+    assert not (log.parent / "pi-agent" / "auth.json").exists()
 
 
 async def test_wipe_only_this_review_session(spawn, aeview_home, tmp_path):

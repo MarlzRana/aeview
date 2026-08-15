@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import shutil
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from shutil import which
@@ -84,7 +83,7 @@ def resolve_allowed_domains(settings: PiHarnessSettings) -> list[str]:
     return out
 
 
-def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path]:
+def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     """Derive this review's artifact paths from the log path.
 
     Fan-out / dedup pass `review.log` or `dedup.log` under the instance dir; everything pi
@@ -96,6 +95,7 @@ def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path]:
         review_dir,
         review_dir / "pi-session",
         review_dir / "pi-agent",
+        review_dir / "pi-tmp",
         review_dir / "srt-settings.json",
     )
 
@@ -125,6 +125,15 @@ def _seed_agent_dir(agent_dir: Path) -> None:
             settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def _scrub_seeded_secrets(agent_dir: Path) -> None:
+    # auth.json / models.json were copied so pi could authenticate inside the sandbox.
+    # They must not persist in the run tree (retention keeps runs for days; a tarball of
+    # ~/.aeview/runs would leak keys). Settings stay — no secrets there after packages drop.
+    for name in ("auth.json", "models.json"):
+        path = agent_dir / name
+        path.unlink(missing_ok=True)
+
+
 class PiAdapter:
     name: str = "pi"
     schema_support: SchemaSupport = "prompt"
@@ -150,34 +159,40 @@ class PiAdapter:
         thinking_flag = self._resolve_thinking(thinking)
         pi_bin = self._resolve_pi()
         srt_bin = self._resolve_srt()
-        _, session_dir, agent_dir, settings_path = review_dirs(log_path)
+        _, session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log_path)
         # Cold start: wipe only THIS review's pi dirs so a previous failed attempt (or an
         # aeview resume) doesn't leak conversation. The in-method schema re-prompt reuses the
         # just-created session. Sibling reviews / other run-ids are different parents.
-        shutil.rmtree(session_dir, ignore_errors=True)
-        shutil.rmtree(agent_dir, ignore_errors=True)
-        session_dir.mkdir(parents=True, exist_ok=True)
+        for d in (session_dir, agent_dir, tmp_dir):
+            shutil.rmtree(d, ignore_errors=True)
+            d.mkdir(parents=True, exist_ok=True)
         _seed_agent_dir(agent_dir)
-        self._write_srt_settings(settings_path, session_dir, agent_dir)
+        self._write_srt_settings(settings_path, session_dir, agent_dir, tmp_dir)
 
         base_prompt = embed_schema(prompt, schema)
         writer = EventLogWriter(log_path, harness=self.name, model=model)
         try:
-            out = await self._run_attempts(
-                pi_bin,
-                srt_bin,
-                settings_path,
-                session_dir,
-                agent_dir,
-                base_prompt,
-                schema,
-                model,
-                cwd,
-                thinking_flag,
-                timeout,
-                validate,
-                writer,
-            )
+            # One budget for both attempts (schema re-prompt included), matching Copilot.
+            async with asyncio.timeout(timeout):
+                out = await self._run_attempts(
+                    pi_bin,
+                    srt_bin,
+                    settings_path,
+                    session_dir,
+                    agent_dir,
+                    tmp_dir,
+                    base_prompt,
+                    schema,
+                    model,
+                    cwd,
+                    thinking_flag,
+                    validate,
+                    writer,
+                )
+        except TimeoutError as exc:
+            msg = f"pi timed out after {timeout}s"
+            writer.error(msg)
+            raise AdapterError(msg, transient=False) from exc
         except AdapterError as exc:
             writer.error(str(exc))
             raise
@@ -185,6 +200,7 @@ class PiAdapter:
             writer.result()
             return out
         finally:
+            _scrub_seeded_secrets(agent_dir)
             writer.close()
 
     async def run(
@@ -216,12 +232,12 @@ class PiAdapter:
         settings_path: Path,
         session_dir: Path,
         agent_dir: Path,
+        tmp_dir: Path,
         base_prompt: str,
         schema: dict,
         model: str,
         cwd: Path,
         thinking: str | None,
-        timeout: float | None,
         validate: Callable[[dict], object] | None,
         writer: EventLogWriter,
     ) -> StructuredOutput:
@@ -229,7 +245,7 @@ class PiAdapter:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             text = base_prompt if attempt == 1 else RETRY_SUFFIX
             argv = self._argv(srt_bin, settings_path, pi_bin, session_dir, model, thinking)
-            answer, usage = await self._invoke(argv, text, cwd, agent_dir, timeout, writer)
+            answer, usage = await self._invoke(argv, text, cwd, agent_dir, tmp_dir, writer)
             raw = answer
             parsed = extract_json(answer, schema)
             if parsed is None:
@@ -250,14 +266,17 @@ class PiAdapter:
         prompt: str,
         cwd: Path,
         agent_dir: Path,
-        timeout: float | None,
+        tmp_dir: Path,
         writer: EventLogWriter,
     ) -> tuple[str, Usage]:
         """Spawn srt→pi, stream JSONL stdout into the event log, return (answer-text, usage)."""
         env = os.environ.copy()
-        # Isolate pi's config/auth/locks inside this review so SRT never has to allow writes
-        # to the real ~/.pi/agent (and so concurrent reviews don't share lock files).
+        # Isolate pi's config/auth/locks and process temp inside this review so SRT never
+        # has to allow writes to the real ~/.pi/agent or the shared system temp dir.
         env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+        env["TMPDIR"] = str(tmp_dir)
+        env["TMP"] = str(tmp_dir)
+        env["TEMP"] = str(tmp_dir)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -276,19 +295,18 @@ class PiAdapter:
         assert proc.stdout is not None
         assert proc.stderr is not None
         try:
-            async with asyncio.timeout(timeout):
-                proc.stdin.write(prompt.encode("utf-8"))
-                await proc.stdin.drain()
-                proc.stdin.close()
-                events, stderr = await asyncio.gather(
-                    _read_jsonl(proc.stdout, writer),
-                    proc.stderr.read(),
-                )
-                returncode = await proc.wait()
-        except TimeoutError as exc:
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            events, stderr = await asyncio.gather(
+                _read_jsonl(proc.stdout, writer),
+                proc.stderr.read(),
+            )
+            returncode = await proc.wait()
+        except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise AdapterError(f"pi timed out after {timeout}s", transient=False) from exc
+            raise
         except AdapterError:
             proc.kill()
             await proc.wait()
@@ -358,16 +376,18 @@ class PiAdapter:
             argv.extend(["--thinking", thinking])
         return argv
 
-    def _write_srt_settings(self, path: Path, session_dir: Path, agent_dir: Path) -> None:
+    def _write_srt_settings(
+        self, path: Path, session_dir: Path, agent_dir: Path, tmp_dir: Path
+    ) -> None:
         pi_settings = load_settings().harness_settings.pi
-        # Session file + isolated agent dir (auth/settings locks) + the process temp dir
-        # (srt / node / pi scratch). SRT writes are allow-only, so anything not listed is
-        # denied — do NOT also set denyWrite:["/"]; that takes precedence over allowWrite
-        # and EPERMs the holes. Trailing slash = the whole directory tree.
+        # Session file + isolated agent dir (auth/settings locks) + per-review temp.
+        # SRT writes are allow-only, so anything not listed is denied — do NOT also set
+        # denyWrite:["/"]; that takes precedence over allowWrite and EPERMs the holes.
+        # Trailing slash = the whole directory tree.
         allow_write = [
             str(session_dir.resolve()) + "/",
             str(agent_dir.resolve()) + "/",
-            tempfile.gettempdir().rstrip("/") + "/",
+            str(tmp_dir.resolve()) + "/",
         ]
         payload = {
             "network": {
