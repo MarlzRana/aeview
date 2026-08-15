@@ -230,6 +230,9 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     assert "write" not in tools
     assert argv[argv.index("--model") + 1] == "xai/grok-4.6"
     assert argv[argv.index("--thinking") + 1] == "high"
+    from aeview.harness.pi import _SYSTEM_PROMPT
+
+    assert argv[argv.index("--system-prompt") + 1] == _SYSTEM_PROMPT
     for flag in (
         "--no-extensions",
         "--no-skills",
@@ -660,6 +663,25 @@ def test_last_assistant_text_takes_the_last_message_end():
     assert _last_assistant_text(events) == "second"
 
 
+def test_last_assistant_text_string_content_and_joined_blocks():
+    string_msg = {
+        "type": "message_end",
+        "message": {"role": "assistant", "content": '{"verdict": "approve"}'},
+    }
+    assert _last_assistant_text([string_msg]) == '{"verdict": "approve"}'
+    multi = {
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "{"},
+                {"type": "text", "text": "}"},
+            ],
+        },
+    }
+    assert _last_assistant_text([multi]) == "{}"
+
+
 def test_usage_sums_assistant_message_ends():
     events = [
         _message_end("a", usage={"input": 5, "output": 1, "cost": {"total": 0.1}}),
@@ -742,6 +764,31 @@ async def test_broken_pipe_on_stdin_surfaces_child_exit(spawn, aeview_home, tmp_
     assert ei.value.transient is True
 
 
+async def test_jsonl_reassembles_across_reads_and_eof_without_newline(
+    spawn, aeview_home, tmp_path
+):
+    payload = _jsonl(_message_end(json.dumps(_REVIEW))).rstrip(b"\n")  # no trailing newline
+    chunks = [payload[i : i + 7] for i in range(0, len(payload), 7)]
+
+    class _Chunked:
+        def __init__(self) -> None:
+            self._chunks = list(chunks)
+
+        async def read(self, _n: int = -1) -> bytes:
+            if not self._chunks:
+                return b""
+            return self._chunks.pop(0)
+
+    _, queue = spawn
+    proc = _FakeProc(b"")
+    proc.stdout = _Chunked()
+    queue.append(proc)
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    out = await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    assert out.review.verdict == "approve"
+
+
 async def test_non_json_stdout_is_teed_and_review_still_succeeds(spawn, aeview_home, tmp_path):
     _, queue = spawn
     banner = b"starting up\n"
@@ -793,11 +840,30 @@ def test_preflight_fails_when_srt_missing(monkeypatch):
 
 
 def test_preflight_warns_when_both_present(monkeypatch):
+    from aeview.harness.base import AUTH_PROBE_TIMEOUT
+
+    calls: list = []
+
+    def fake_run(args, timeout=None):
+        calls.append((list(args), timeout))
+        return ProcResult(0, "0.84.1", "")
+
     monkeypatch.setattr("aeview.harness.pi.which", lambda name: f"/bin/{name}")
-    monkeypatch.setattr("aeview.harness.pi.run_sync", lambda *a, **k: ProcResult(0, "0.84.1", ""))
+    monkeypatch.setattr("aeview.harness.pi.run_sync", fake_run)
     pf = PiAdapter().preflight()
     assert pf.status == "warn"
     assert "auth not verifiable" in pf.detail
+    assert calls == [(["/bin/pi", "--version"], AUTH_PROBE_TIMEOUT)]
+
+
+def test_preflight_warns_when_version_fails(monkeypatch):
+    monkeypatch.setattr("aeview.harness.pi.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        "aeview.harness.pi.run_sync", lambda *a, **k: ProcResult(1, "", "boom")
+    )
+    pf = PiAdapter().preflight()
+    assert pf.status == "warn"
+    assert "could not run --version" in pf.detail
 
 
 async def test_writes_event_log(spawn, aeview_home, tmp_path):
