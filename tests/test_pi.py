@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,7 @@ class _FakeProc:
         self.stdout = _ByteStream(stdout)
         self.stderr = _ByteStream(stderr)
         self.returncode = returncode
+        self.pid = 4242
         self.killed = False
         self.terminated = False
         self.signals: list[str] = []
@@ -184,8 +186,7 @@ def test_pi_harness_settings_rejects_unknown_key():
 
 def test_review_dirs_are_siblings_of_the_log(tmp_path):
     log = tmp_path / "reviewers" / "default" / "pi-xai-grok" / "review.log"
-    review_dir, session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log)
-    assert review_dir == log.parent
+    session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log)
     assert session_dir == log.parent / "pi-session"
     assert agent_dir == log.parent / "pi-agent"
     assert tmp_dir == log.parent / "pi-tmp"
@@ -195,8 +196,8 @@ def test_review_dirs_are_siblings_of_the_log(tmp_path):
 def test_two_reviews_get_distinct_session_dirs(tmp_path):
     a = tmp_path / "run" / "reviewers" / "default" / "pi-a" / "review.log"
     b = tmp_path / "run" / "reviewers" / "default" / "pi-b" / "review.log"
-    _, sa, aa, ta, _ = review_dirs(a)
-    _, sb, ab, tb, _ = review_dirs(b)
+    sa, aa, ta, _ = review_dirs(a)
+    sb, ab, tb, _ = review_dirs(b)
     assert sa != sb and aa != ab and ta != tb
     assert sa.parent != sb.parent
 
@@ -257,6 +258,7 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     env = calls[0]["kwargs"]["env"]
     assert env["PI_CODING_AGENT_DIR"] == str(log.parent / "pi-agent")
     assert env.get("TMPDIR") != str(log.parent / "pi-tmp")
+    assert calls[0]["kwargs"]["start_new_session"] is True
 
 
 async def test_default_thinking_omits_flag(spawn, aeview_home, tmp_path):
@@ -385,7 +387,15 @@ def test_get_adapter_forwards_override():
 
 async def test_invalid_json_reprompts_once_same_session(spawn, aeview_home, tmp_path):
     calls, queue = spawn
+    session_dir = tmp_path / "inst" / "pi-session"
     first = _FakeProc(_jsonl(_message_end("not json")))
+    orig_wait = first.wait
+
+    async def plant_and_wait() -> int:
+        (session_dir / "kept").write_text("session survived")
+        return await orig_wait()
+
+    first.wait = plant_and_wait  # type: ignore[method-assign]
     second = _ok_proc()
     queue.extend([first, second])
     log = tmp_path / "inst" / "review.log"
@@ -393,11 +403,12 @@ async def test_invalid_json_reprompts_once_same_session(spawn, aeview_home, tmp_
     out = await PiAdapter().run("REVIEW", "xai/grok-4.6", tmp_path, log)
     assert out.review.verdict == "approve"
     assert len(calls) == 2
-    session = str(log.parent / "pi-session")
+    session = str(session_dir)
     assert calls[0]["argv"][calls[0]["argv"].index("--session-dir") + 1] == session
     assert calls[1]["argv"][calls[1]["argv"].index("--session-dir") + 1] == session
     assert b"Required output format" in bytes(first.stdin.written)
     assert bytes(second.stdin.written).decode() == RETRY_SUFFIX
+    assert (session_dir / "kept").read_text() == "session survived"
 
 
 async def test_two_invalid_answers_fail(spawn, aeview_home, tmp_path):
@@ -482,7 +493,10 @@ async def test_stdin_is_fed_concurrently_with_stdout(spawn, aeview_home, tmp_pat
 
 
 async def test_cancel_reaps_the_child(monkeypatch, aeview_home, tmp_path):
+    from aeview.harness import pi as pi_mod
+
     started = asyncio.Event()
+    seen: list = []
 
     class _Hang(_FakeProc):
         def __init__(self) -> None:
@@ -500,8 +514,14 @@ async def test_cancel_reaps_the_child(monkeypatch, aeview_home, tmp_path):
         hang = _Hang()
         return hang
 
+    def fake_signal(pid, sig):
+        seen.append(sig)
+        if hang is not None:
+            hang.returncode = -sig
+
     monkeypatch.setattr("asyncio.create_subprocess_exec", hang_exec)
     monkeypatch.setattr("aeview.harness.pi.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(pi_mod, "_signal_group", fake_signal)
     log = tmp_path / "inst" / "review.log"
     log.parent.mkdir()
     task = asyncio.create_task(PiAdapter().run("p", "xai/grok-4.6", tmp_path, log))
@@ -510,7 +530,7 @@ async def test_cancel_reaps_the_child(monkeypatch, aeview_home, tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert hang is not None
-    assert hang.terminated is True
+    assert signal.SIGTERM in seen
 
 
 async def test_seeded_auth_is_readonly_and_not_written_back(
@@ -531,38 +551,62 @@ async def test_seeded_auth_is_readonly_and_not_written_back(
     assert not (log.parent / "pi-agent" / "auth.json").exists()
 
 
-async def test_kill_sends_term_before_kill():
+async def test_kill_sends_term_before_kill(monkeypatch):
+    from aeview.harness import pi as pi_mod
     from aeview.harness.pi import _kill
 
+    seen: list = []
+
+    def fake_signal(pid, sig):
+        seen.append(sig)
+        if sig == signal.SIGTERM:
+            proc.returncode = -15
+
     proc = _FakeProc(b"", returncode=None)
-    # terminate() sets returncode, so kill() must not run.
+    proc.pid = 4242
+    monkeypatch.setattr(pi_mod, "_signal_group", fake_signal)
     await _kill(proc)
-    assert proc.signals == ["term"]
-    assert proc.killed is False
+    assert seen == [signal.SIGTERM]
 
 
 async def test_kill_escalates_to_sigkill_when_term_is_ignored(monkeypatch):
+    from aeview.harness import pi as pi_mod
     from aeview.harness.pi import _kill
 
-    class _Deaf(_FakeProc):
-        def terminate(self) -> None:
-            self.terminated = True
-            self.signals.append("term")
-            # Does NOT set returncode — child ignored SIGTERM.
+    seen: list = []
 
-        async def wait(self) -> int:
-            if self.returncode is None:
-                await asyncio.sleep(30)
-            return self.returncode if self.returncode is not None else 0
+    def fake_signal(pid, sig):
+        seen.append(sig)
 
     async def expire(_awaitable, timeout=None):
         raise TimeoutError
 
-    monkeypatch.setattr("aeview.harness.pi.asyncio.wait_for", expire)
-    proc = _Deaf(b"", returncode=None)
+    proc = _FakeProc(b"", returncode=None)
+    proc.pid = 4242
+    monkeypatch.setattr(pi_mod, "_signal_group", fake_signal)
+    monkeypatch.setattr(pi_mod.asyncio, "wait_for", expire)
     await _kill(proc)
-    assert proc.signals == ["term", "kill"]
-    assert proc.killed is True
+    assert seen == [signal.SIGTERM, signal.SIGKILL]
+
+
+async def test_kill_escalates_on_cancelled_wait(monkeypatch):
+    from aeview.harness import pi as pi_mod
+    from aeview.harness.pi import _kill
+
+    seen: list = []
+
+    def fake_signal(pid, sig):
+        seen.append(sig)
+
+    async def cancelled(_awaitable, timeout=None):
+        raise asyncio.CancelledError
+
+    proc = _FakeProc(b"", returncode=None)
+    proc.pid = 4242
+    monkeypatch.setattr(pi_mod, "_signal_group", fake_signal)
+    monkeypatch.setattr(pi_mod.asyncio, "wait_for", cancelled)
+    await _kill(proc)
+    assert seen == [signal.SIGTERM, signal.SIGKILL]
 
 
 async def test_timeout_is_fail_fast(monkeypatch, aeview_home, tmp_path):
@@ -660,8 +704,8 @@ def test_seed_agent_dir_chmods_secrets(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     dest = tmp_path / "pi-agent"
     _seed_agent_dir(dest)
-    assert oct((dest / "auth.json").stat().st_mode)[-3:] == "400"
-    assert oct((dest / "models.json").stat().st_mode)[-3:] == "400"
+    assert oct((dest / "auth.json").stat().st_mode)[-3:] == "600"
+    assert oct((dest / "models.json").stat().st_mode)[-3:] == "600"
 
 
 async def test_secrets_are_scrubbed_on_failure(spawn, aeview_home, tmp_path, monkeypatch):
@@ -711,7 +755,22 @@ async def test_non_json_stdout_is_teed_and_review_still_succeeds(spawn, aeview_h
 
 def test_stream_error_reads_last_assistant_stop_reason():
     assert _stream_error([_message_end("x", stop="error", error="boom")]) == "boom"
+    assert _stream_error([_message_end("x", stop="aborted")]) == "aborted"
     assert _stream_error([_message_end("x")]) is None
+
+
+async def test_run_structured_accepts_dedup_schema(spawn, aeview_home, tmp_path):
+    from aeview.schema import duplicate_groups_json_schema
+
+    groups = {"duplicate_groups": [{"survivor": "f1", "duplicates": ["f2"]}]}
+    _, queue = spawn
+    queue.append(_ok_proc(groups))
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    out = await PiAdapter().run_structured(
+        "P", duplicate_groups_json_schema(), "xai/grok-4.6", tmp_path, log
+    )
+    assert out.payload == groups
 
 
 # --- preflight ------------------------------------------------------------------------

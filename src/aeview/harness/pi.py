@@ -18,6 +18,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 from collections.abc import Callable
 from pathlib import Path
 from shutil import which
@@ -83,7 +84,7 @@ def resolve_allowed_domains(settings: PiHarnessSettings) -> list[str]:
     return out
 
 
-def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path]:
     """Derive this review's artifact paths from the log path.
 
     Fan-out / dedup pass `review.log` or `dedup.log` under the instance dir; everything pi
@@ -92,7 +93,6 @@ def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     """
     review_dir = log_path.parent
     return (
-        review_dir,
         review_dir / "pi-session",
         review_dir / "pi-agent",
         review_dir / "pi-tmp",
@@ -116,7 +116,7 @@ def _seed_agent_dir(agent_dir: Path) -> None:
             if name in {"auth.json", "models.json"}:
                 # Read-only so bash cannot rewrite credentials in the sandbox. We do not
                 # write this file back to ~/.pi/agent — a sandbox-owned refresh is untrusted.
-                dest.chmod(0o400)
+                dest.chmod(0o600)
     # Drop package sources so the isolated agent does not try to `npm install`
     # into the sandbox (registry is not on the allowlist; we also pass
     # --no-extensions). Auth/models stay; packages do not.
@@ -164,7 +164,7 @@ class PiAdapter:
         thinking_flag = self._resolve_thinking(thinking)
         pi_bin = self._resolve_pi()
         srt_bin = self._resolve_srt()
-        _, session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log_path)
+        session_dir, agent_dir, tmp_dir, settings_path = review_dirs(log_path)
         # Cold start: wipe only THIS review's pi dirs so a previous failed attempt (or an
         # aeview resume) doesn't leak conversation. The in-method schema re-prompt reuses the
         # just-created session. Sibling reviews / other run-ids are different parents.
@@ -271,6 +271,7 @@ class PiAdapter:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise AdapterError(f"pi binary not found: {exc}", transient=False) from exc
@@ -444,23 +445,27 @@ async def _feed_stdin(stdin: asyncio.StreamWriter, prompt: str) -> None:
 
 
 async def _kill(proc: asyncio.subprocess.Process) -> None:
-    # srt only forwards SIGINT/SIGTERM to the sandboxed child (and runs mux cleanup on
-    # those handlers). SIGKILL the parent first and the tree is orphaned. TERM, then a
-    # short grace, then KILL. CancelledError must not skip the KILL — a cancelled
-    # wait_for would otherwise leak a SIGTERM-deaf child.
+    # Spawned with start_new_session=True so the srt/env/pi tree is one process group.
+    # srt only forwards SIGINT/SIGTERM (and runs mux cleanup on those). SIGKILL the
+    # parent alone orphans descendants — signal the group. After TERM, always wait the
+    # grace (shielded) so a cancelled timeout/Ctrl-C cannot skip it; then KILL the group.
     if proc.returncode is not None:
         return
-    proc.terminate()
-    try:
-        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2.0)
+    pid = proc.pid
+    if pid is None:
         return
-    except TimeoutError, asyncio.CancelledError:
-        pass
+    _signal_group(pid, signal.SIGTERM)
+    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2.0)
     if proc.returncode is None:
-        proc.kill()
-        # Already SIGKILL'd; a second cancel during wait is fine — process is dead.
+        _signal_group(pid, signal.SIGKILL)
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.shield(proc.wait())
+
+
+def _signal_group(pid: int, sig: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, sig)
 
 
 async def _read_jsonl(stream: asyncio.StreamReader, writer: EventLogWriter) -> list[dict]:
@@ -551,36 +556,29 @@ def _usage_from_events(events: list[dict]) -> Usage:
     is treated as a snapshot of the in-flight turn and is only used if that turn never got a
     `message_end` — otherwise we'd double-count. Cost is optional — missing → 0.0.
     """
-    input_tokens = 0
-    output_tokens = 0
-    cost = 0.0
+    total = Usage()
     pending: dict | None = None
     for event in events:
         if event.get("type") == "message_end":
             message = event.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
-                input_tokens, output_tokens, cost = _add_usage(
-                    message.get("usage"), input_tokens, output_tokens, cost
-                )
+                _add_usage(total, message.get("usage"))
                 pending = None
             continue
         if event.get("type") == "message_update" and isinstance(event.get("usage"), dict):
             pending = event["usage"]
     if pending is not None:
-        input_tokens, output_tokens, cost = _add_usage(pending, input_tokens, output_tokens, cost)
-    return Usage(input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
+        _add_usage(total, pending)
+    return total
 
 
-def _add_usage(
-    usage: object, input_tokens: int, output_tokens: int, cost: float
-) -> tuple[int, int, float]:
+def _add_usage(total: Usage, usage: object) -> None:
     if not isinstance(usage, dict):
-        return input_tokens, output_tokens, cost
-    input_tokens += int(usage.get("input") or 0)
-    output_tokens += int(usage.get("output") or 0)
+        return
+    total.input_tokens += int(usage.get("input") or 0)
+    total.output_tokens += int(usage.get("output") or 0)
     cost_block = usage.get("cost")
     if isinstance(cost_block, dict):
-        cost += float(cost_block.get("total") or 0.0)
+        total.cost_usd += float(cost_block.get("total") or 0.0)
     elif isinstance(cost_block, (int, float)):
-        cost += float(cost_block)
-    return input_tokens, output_tokens, cost
+        total.cost_usd += float(cost_block)
