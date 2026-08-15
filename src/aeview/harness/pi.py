@@ -296,25 +296,23 @@ class PiAdapter:
         assert proc.stdout is not None
         assert proc.stderr is not None
         try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            await proc.stdin.drain()
-            proc.stdin.close()
-            events, stderr = await asyncio.gather(
+            # Feed stdin concurrently with the readers. An inline review prompt can exceed the
+            # pipe buffer (~64KB); if we drain first, a child that already wrote session-start
+            # JSONL deadlocks until the outer timeout. communicate() does the same gather.
+            events, stderr, _ = await asyncio.gather(
                 _read_jsonl(proc.stdout, writer),
                 proc.stderr.read(),
+                _feed_stdin(proc.stdin, prompt),
             )
             returncode = await proc.wait()
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _kill(proc)
             raise
         except AdapterError:
-            proc.kill()
-            await proc.wait()
+            await _kill(proc)
             raise
         except Exception as exc:  # noqa: BLE001 - normalize EVERY other failure to AdapterError
-            proc.kill()
-            await proc.wait()
+            await _kill(proc)
             detail = str(exc)
             raise AdapterError(
                 f"pi run failed: {detail}", transient=looks_transient(detail)
@@ -452,6 +450,22 @@ class PiAdapter:
                 f"pi thinking '{thinking}' invalid; use one of {sorted(_THINKING_LEVELS)}"
             )
         return thinking
+
+
+async def _feed_stdin(stdin: asyncio.StreamWriter, prompt: str) -> None:
+    stdin.write(prompt.encode("utf-8"))
+    await stdin.drain()
+    stdin.close()
+    # wait_closed is not on every transport; ignore if missing.
+    wait_closed = getattr(stdin, "wait_closed", None)
+    if callable(wait_closed):
+        await wait_closed()
+
+
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    # Shield so a cancelled timeout cannot skip wait() and leak the srt/pi tree.
+    proc.kill()
+    await asyncio.shield(proc.wait())
 
 
 async def _read_jsonl(stream: asyncio.StreamReader, writer: EventLogWriter) -> list[dict]:

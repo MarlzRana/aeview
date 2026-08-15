@@ -56,14 +56,20 @@ class _FakeProc:
 
 
 class _Sink:
-    def write(self, _data: bytes) -> None:
-        return None
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+        self._wrote = asyncio.Event()
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+        self._wrote.set()
 
     async def drain(self) -> None:
         return None
 
     def close(self) -> None:
-        return None
+        self.closed = True
 
 
 class _ByteStream:
@@ -392,6 +398,33 @@ async def test_stream_error_stop_reason(spawn, aeview_home, tmp_path):
     with pytest.raises(AdapterError, match="overloaded") as ei:
         await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
     assert ei.value.transient is True
+
+
+async def test_stdin_is_fed_concurrently_with_stdout(spawn, aeview_home, tmp_path):
+    # A child that only emits stdout after it has read stdin would deadlock if we drained
+    # first. The fake stdout waits on the sink's write event before yielding.
+    calls, queue = spawn
+    body = json.dumps(_REVIEW)
+    payload = _jsonl(_message_end(body, usage={"input": 1, "output": 1}))
+    proc = _FakeProc(b"")
+
+    class _WaitForStdin(_ByteStream):
+        def __init__(self) -> None:
+            super().__init__(payload)
+
+        async def read(self, _n: int = -1) -> bytes:
+            await proc.stdin._wrote.wait()
+            return await super().read(_n)
+
+    proc.stdout = _WaitForStdin()
+    queue.append(proc)
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    out = await PiAdapter().run("REVIEW PROMPT", "xai/grok-4.6", tmp_path, log)
+    assert out.review.verdict == "approve"
+    assert b"REVIEW PROMPT" in bytes(proc.stdin.written)
+    assert proc.stdin.closed
+    assert calls  # spawned
 
 
 async def test_timeout_is_fail_fast(monkeypatch, aeview_home, tmp_path):
