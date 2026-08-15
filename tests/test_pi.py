@@ -193,8 +193,10 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     argv = calls[0]["argv"]
     assert argv[0] == "/bin/srt"
     assert argv[1:4] == ["--settings", str(log.parent / "srt-settings.json"), "--"]
-    assert argv[4] == "/bin/pi"
-    assert argv[5:8] == ["-p", "--mode", "json"]
+    assert argv[4] == "env"
+    assert argv[5] == f"TMPDIR={log.parent / 'pi-tmp'}"
+    assert argv[8] == "/bin/pi"
+    assert argv[9:12] == ["-p", "--mode", "json"]
     assert "--session-dir" in argv and argv[argv.index("--session-dir") + 1] == str(
         log.parent / "pi-session"
     )
@@ -230,7 +232,7 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     assert (log.parent / "pi-tmp").is_dir()
     env = calls[0]["kwargs"]["env"]
     assert env["PI_CODING_AGENT_DIR"] == str(log.parent / "pi-agent")
-    assert env["TMPDIR"] == str(log.parent / "pi-tmp")
+    assert env.get("TMPDIR") != str(log.parent / "pi-tmp")
 
 
 async def test_default_thinking_omits_flag(spawn, aeview_home, tmp_path):
@@ -311,7 +313,7 @@ async def test_binary_override_is_resolved_via_which(spawn, aeview_home, tmp_pat
     assert "/opt/custom-pi" in asked
     assert "srt" in asked
     assert calls[0]["argv"][0] == "/resolved/srt"
-    assert calls[0]["argv"][4] == "/resolved//opt/custom-pi"
+    assert calls[0]["argv"][8] == "/resolved//opt/custom-pi"
 
 
 def test_get_adapter_forwards_override():

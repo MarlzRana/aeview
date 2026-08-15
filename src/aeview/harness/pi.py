@@ -244,7 +244,9 @@ class PiAdapter:
         last_error = "pi produced no valid output"
         for attempt in range(1, MAX_ATTEMPTS + 1):
             text = base_prompt if attempt == 1 else RETRY_SUFFIX
-            argv = self._argv(srt_bin, settings_path, pi_bin, session_dir, model, thinking)
+            argv = self._argv(
+                srt_bin, settings_path, pi_bin, session_dir, tmp_dir, model, thinking
+            )
             answer, usage = await self._invoke(argv, text, cwd, agent_dir, tmp_dir, writer)
             raw = answer
             parsed = extract_json(answer, schema)
@@ -271,12 +273,11 @@ class PiAdapter:
     ) -> tuple[str, Usage]:
         """Spawn srt→pi, stream JSONL stdout into the event log, return (answer-text, usage)."""
         env = os.environ.copy()
-        # Isolate pi's config/auth/locks and process temp inside this review so SRT never
-        # has to allow writes to the real ~/.pi/agent or the shared system temp dir.
+        # Isolate pi's config/auth/locks inside this review so SRT never has to allow writes
+        # to the real ~/.pi/agent. Do NOT set TMPDIR here: srt inherits this env and its mux
+        # Unix socket EINVAL's under a deep path (sandbox-exec). Reviewer scratch is set on
+        # the inner `env TMPDIR=pi-tmp pi …` argv instead.
         env["PI_CODING_AGENT_DIR"] = str(agent_dir)
-        env["TMPDIR"] = str(tmp_dir)
-        env["TMP"] = str(tmp_dir)
-        env["TEMP"] = str(tmp_dir)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -341,16 +342,22 @@ class PiAdapter:
         settings_path: Path,
         pi_bin: str,
         session_dir: Path,
+        tmp_dir: Path,
         model: str,
         thinking: str | None,
     ) -> list[str]:
         # `--` so srt treats the rest as the command (not its own flags). `--session-dir` +
         # `--session-id` create-or-resume a file under THIS review's dir — never ~/.pi/agent.
+        # `env TMPDIR=…` applies only to pi (and its tools), not to srt's mux socket.
         argv = [
             srt_bin,
             "--settings",
             str(settings_path),
             "--",
+            "env",
+            f"TMPDIR={tmp_dir}",
+            f"TMP={tmp_dir}",
+            f"TEMP={tmp_dir}",
             pi_bin,
             "-p",
             "--mode",
