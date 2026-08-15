@@ -112,6 +112,17 @@ def _seed_agent_dir(agent_dir: Path) -> None:
         src = src_root / name
         if src.is_file():
             shutil.copy2(src, agent_dir / name)
+    # Drop package sources so the isolated agent does not try to `npm install`
+    # into the sandbox (registry is not on the allowlist; we also pass
+    # --no-extensions). Auth/models stay; packages do not.
+    settings_path = agent_dir / "settings.json"
+    if settings_path.is_file():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
+        if isinstance(data, dict) and data.pop("packages", None) is not None:
+            settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 class PiAdapter:

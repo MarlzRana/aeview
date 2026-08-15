@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -238,6 +239,26 @@ async def test_default_thinking_omits_flag(spawn, aeview_home, tmp_path):
 async def test_invalid_thinking_fails_fast(tmp_path):
     with pytest.raises(AdapterError, match="thinking"):
         await PiAdapter().run("p", "xai/grok-4.6", tmp_path, tmp_path / "log", thinking="nope")
+
+
+async def test_seeded_settings_drop_packages(spawn, aeview_home, tmp_path, monkeypatch):
+    home = tmp_path / "userhome"
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "settings.json").write_text(
+        json.dumps({"packages": ["npm:pi-rewind"], "theme": "dark"}) + "\n"
+    )
+    (agent / "auth.json").write_text("{}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _, queue = spawn
+    queue.append(_ok_proc())
+    log = tmp_path / "inst" / "review.log"
+    log.parent.mkdir()
+    await PiAdapter().run("p", "xai/grok-4.6", tmp_path, log)
+    seeded = json.loads((log.parent / "pi-agent" / "settings.json").read_text())
+    assert "packages" not in seeded
+    assert seeded["theme"] == "dark"
+    assert (log.parent / "pi-agent" / "auth.json").is_file()
 
 
 async def test_wipe_only_this_review_session(spawn, aeview_home, tmp_path):
