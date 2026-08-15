@@ -161,18 +161,19 @@ def test_pi_harness_settings_rejects_unknown_key():
 
 def test_review_dirs_are_siblings_of_the_log(tmp_path):
     log = tmp_path / "reviewers" / "default" / "pi-xai-grok" / "review.log"
-    review_dir, session_dir, settings_path = review_dirs(log)
+    review_dir, session_dir, agent_dir, settings_path = review_dirs(log)
     assert review_dir == log.parent
     assert session_dir == log.parent / "pi-session"
+    assert agent_dir == log.parent / "pi-agent"
     assert settings_path == log.parent / "srt-settings.json"
 
 
 def test_two_reviews_get_distinct_session_dirs(tmp_path):
     a = tmp_path / "run" / "reviewers" / "default" / "pi-a" / "review.log"
     b = tmp_path / "run" / "reviewers" / "default" / "pi-b" / "review.log"
-    _, sa, _ = review_dirs(a)
-    _, sb, _ = review_dirs(b)
-    assert sa != sb
+    _, sa, aa, _ = review_dirs(a)
+    _, sb, ab, _ = review_dirs(b)
+    assert sa != sb and aa != ab
     assert sa.parent != sb.parent
 
 
@@ -216,9 +217,13 @@ async def test_argv_and_srt_settings(spawn, aeview_home, tmp_path):
     settings = json.loads((log.parent / "srt-settings.json").read_text())
     assert settings["filesystem"]["denyRead"] == []
     assert settings["filesystem"]["denyWrite"] == ["/"]
-    assert settings["filesystem"]["allowWrite"] == [str((log.parent / "pi-session").resolve())]
+    allow = settings["filesystem"]["allowWrite"]
+    assert str((log.parent / "pi-session").resolve()) in allow
+    assert str((log.parent / "pi-agent").resolve()) in allow
     assert "api.x.ai" in settings["network"]["allowedDomains"]
     assert (log.parent / "pi-session").is_dir()
+    assert (log.parent / "pi-agent").is_dir()
+    assert calls[0]["kwargs"]["env"]["PI_CODING_AGENT_DIR"] == str(log.parent / "pi-agent")
 
 
 async def test_default_thinking_omits_flag(spawn, aeview_home, tmp_path):

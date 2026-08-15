@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from shutil import which
@@ -82,15 +84,34 @@ def resolve_allowed_domains(settings: PiHarnessSettings) -> list[str]:
     return out
 
 
-def review_dirs(log_path: Path) -> tuple[Path, Path, Path]:
-    """Derive this review's artifact dir, session dir, and SRT settings path from the log path.
+def review_dirs(log_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Derive this review's artifact paths from the log path.
 
     Fan-out / dedup pass `review.log` or `dedup.log` under the instance dir; everything pi
     writes is a sibling so concurrent reviews (distinct instance dirs, distinct run-ids) cannot
-    collide. The wipe at run_structured start only touches *this* session dir.
+    collide. The wipe at run_structured start only touches *this* review's pi dirs.
     """
     review_dir = log_path.parent
-    return review_dir, review_dir / "pi-session", review_dir / "srt-settings.json"
+    return (
+        review_dir,
+        review_dir / "pi-session",
+        review_dir / "pi-agent",
+        review_dir / "srt-settings.json",
+    )
+
+
+# Files copied from the user's ~/.pi/agent into the per-review agent dir so pi can authenticate
+# and resolve models without writing lock files back into the real home (SRT would EPERM those).
+_SEEDED_AGENT_FILES = ("auth.json", "models.json", "settings.json")
+
+
+def _seed_agent_dir(agent_dir: Path) -> None:
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    src_root = Path.home() / ".pi" / "agent"
+    for name in _SEEDED_AGENT_FILES:
+        src = src_root / name
+        if src.is_file():
+            shutil.copy2(src, agent_dir / name)
 
 
 class PiAdapter:
@@ -118,13 +139,15 @@ class PiAdapter:
         thinking_flag = self._resolve_thinking(thinking)
         pi_bin = self._resolve_pi()
         srt_bin = self._resolve_srt()
-        _, session_dir, settings_path = review_dirs(log_path)
-        # Cold start: wipe only THIS review's session dir so a previous failed attempt (or an
+        _, session_dir, agent_dir, settings_path = review_dirs(log_path)
+        # Cold start: wipe only THIS review's pi dirs so a previous failed attempt (or an
         # aeview resume) doesn't leak conversation. The in-method schema re-prompt reuses the
         # just-created session. Sibling reviews / other run-ids are different parents.
         shutil.rmtree(session_dir, ignore_errors=True)
+        shutil.rmtree(agent_dir, ignore_errors=True)
         session_dir.mkdir(parents=True, exist_ok=True)
-        self._write_srt_settings(settings_path, session_dir)
+        _seed_agent_dir(agent_dir)
+        self._write_srt_settings(settings_path, session_dir, agent_dir)
 
         base_prompt = embed_schema(prompt, schema)
         writer = EventLogWriter(log_path, harness=self.name, model=model)
@@ -134,6 +157,7 @@ class PiAdapter:
                 srt_bin,
                 settings_path,
                 session_dir,
+                agent_dir,
                 base_prompt,
                 schema,
                 model,
@@ -180,6 +204,7 @@ class PiAdapter:
         srt_bin: str,
         settings_path: Path,
         session_dir: Path,
+        agent_dir: Path,
         base_prompt: str,
         schema: dict,
         model: str,
@@ -193,7 +218,7 @@ class PiAdapter:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             text = base_prompt if attempt == 1 else RETRY_SUFFIX
             argv = self._argv(srt_bin, settings_path, pi_bin, session_dir, model, thinking)
-            answer, usage = await self._invoke(argv, text, cwd, timeout, writer)
+            answer, usage = await self._invoke(argv, text, cwd, agent_dir, timeout, writer)
             raw = answer
             parsed = extract_json(answer, schema)
             if parsed is None:
@@ -213,14 +238,20 @@ class PiAdapter:
         argv: list[str],
         prompt: str,
         cwd: Path,
+        agent_dir: Path,
         timeout: float | None,
         writer: EventLogWriter,
     ) -> tuple[str, Usage]:
         """Spawn srt→pi, stream JSONL stdout into the event log, return (answer-text, usage)."""
+        env = os.environ.copy()
+        # Isolate pi's config/auth/locks inside this review so SRT never has to allow writes
+        # to the real ~/.pi/agent (and so concurrent reviews don't share lock files).
+        env["PI_CODING_AGENT_DIR"] = str(agent_dir)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(cwd),
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -316,8 +347,15 @@ class PiAdapter:
             argv.extend(["--thinking", thinking])
         return argv
 
-    def _write_srt_settings(self, path: Path, session_dir: Path) -> None:
+    def _write_srt_settings(self, path: Path, session_dir: Path, agent_dir: Path) -> None:
         pi_settings = load_settings().harness_settings.pi
+        # Session file + isolated agent dir (auth/settings locks) + the process temp dir
+        # (srt / node / pi scratch). Repo and home stay write-denied.
+        allow_write = [
+            str(session_dir.resolve()),
+            str(agent_dir.resolve()),
+            tempfile.gettempdir(),
+        ]
         payload = {
             "network": {
                 "allowedDomains": resolve_allowed_domains(pi_settings),
@@ -326,7 +364,7 @@ class PiAdapter:
             "filesystem": {
                 "denyRead": [],
                 "allowRead": [],
-                "allowWrite": [str(session_dir.resolve())],
+                "allowWrite": allow_write,
                 "denyWrite": ["/"],
             },
         }
