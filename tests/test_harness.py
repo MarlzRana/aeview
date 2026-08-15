@@ -321,12 +321,13 @@ def test_empty_override_normalizes_to_sdk_default():
 
 def test_get_adapter_forwards_binary_override():
     # get_adapter threads the per-harness override into the constructed adapter: claude via
-    # cli_path, codex/copilot as their binary (argv[0]).
+    # cli_path, codex/copilot/pi as their binary (argv[0]).
     from aeview.harness import get_adapter
 
     assert get_adapter("claude-code", "/x/claude")._cli_path == "/x/claude"
     assert get_adapter("codex", "/x/codex").binary == "/x/codex"
     assert get_adapter("copilot", "/x/copilot").binary == "/x/copilot"
+    assert get_adapter("pi", "/x/pi").binary == "/x/pi"
 
 
 async def test_unexpected_transient_text_error_is_retried(monkeypatch, tmp_path):

@@ -531,8 +531,8 @@ async def test_invalid_output_reprompts_then_fails(copilot_sdk, tmp_path):
     calls = copilot_sdk.captured["send_calls"]
     assert len(calls) == 2  # one re-prompt, then fail
     # attempt 2 is a follow-up turn on the SAME session: just the corrective suffix, not the prompt
-    assert calls[1]["prompt"] == copilot._RETRY_SUFFIX
-    assert calls[0]["prompt"] != copilot._RETRY_SUFFIX  # attempt 1 is the full embedded prompt
+    assert calls[1]["prompt"] == copilot.RETRY_SUFFIX
+    assert calls[0]["prompt"] != copilot.RETRY_SUFFIX  # attempt 1 is the full embedded prompt
 
 
 async def test_reprompt_recovers_on_second_attempt(copilot_sdk, tmp_path):
@@ -666,7 +666,7 @@ async def test_skips_non_matching_object_whose_interior_would_exhaust_the_start_
     # Guards the `i = end` advance via its observable effect: with a tiny start cap, a decoy whose
     # interior braces DON'T collapse under one decode would burn the cap if rescanned (i = start+1),
     # missing the answer. Advancing past it (i = end) reaches the answer.
-    monkeypatch.setattr(copilot, "_MAX_JSON_STARTS", 3)
+    monkeypatch.setattr("aeview.harness.prompt_schema._MAX_JSON_STARTS", 3)
     decoy = {"note": "{" * 10}  # 10 in-string braces, > the cap of 3
     copilot_sdk.queue_turn(f"{json.dumps(decoy)} then: {json.dumps(_VALID)}")
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
@@ -684,7 +684,7 @@ async def test_finds_answer_after_moderate_brace_preamble(copilot_sdk, tmp_path)
 async def test_start_cap_bounds_scan_then_reprompts(copilot_sdk, tmp_path, monkeypatch):
     # The scan is bounded: a brace-heavy preamble exceeding the start cap makes attempt 1 yield no
     # match (rather than scanning unboundedly), and the adapter re-prompts.
-    monkeypatch.setattr(copilot, "_MAX_JSON_STARTS", 8)
+    monkeypatch.setattr("aeview.harness.prompt_schema._MAX_JSON_STARTS", 8)
     copilot_sdk.queue_turn(("{ " * 50) + json.dumps(_VALID))  # >8 junk starts before the answer
     copilot_sdk.queue_turn(json.dumps(_VALID))  # attempt 2: clean
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
@@ -760,7 +760,7 @@ async def test_object_larger_than_window_is_truncated_then_reprompts(
 ):
     # The window bounds EVERY decode (incl. the first): an object larger than the window is sliced
     # mid-object, fails to parse, and re-prompts rather than scanning the whole output.
-    monkeypatch.setattr(copilot, "_MAX_SCAN_CHARS", 200)  # > bare _VALID, < the big object
+    monkeypatch.setattr("aeview.harness.prompt_schema._MAX_SCAN_CHARS", 200)
     copilot_sdk.queue_turn(json.dumps(dict(_VALID, summary="x" * 500)))  # > window
     copilot_sdk.queue_turn(json.dumps(_VALID))  # attempt 2: small enough to parse
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
@@ -794,22 +794,28 @@ async def test_zero_required_schema_ignores_stray_empty_object(copilot_sdk, tmp_
 
 
 def test_json_objects_does_not_raise_on_deep_nesting():
-    assert list(copilot._json_objects('{"a":' * 6000)) == []
+    from aeview.harness.prompt_schema import json_objects
+
+    assert list(json_objects('{"a":' * 6000)) == []
 
 
 def test_find_nested_match_is_iterative_on_deep_input():
+    from aeview.harness.prompt_schema import find_nested_match
+
     deep: dict = {"x": 1}
     for _ in range(3000):
         deep = {"a": deep}
-    assert copilot._find_nested_match(deep, {"verdict", "summary"}, set()) is None
+    assert find_nested_match(deep, {"verdict", "summary"}, set()) is None
 
 
 def test_matches_zero_required_accepts_partial_not_just_full():
+    from aeview.harness.prompt_schema import matches
+
     props = {"a", "b"}
-    assert copilot._matches({"a": 1}, set(), props) is True  # one of two -> accepted
-    assert copilot._matches({"a": 1, "b": 2}, set(), props) is True
-    assert copilot._matches({}, set(), props) is False  # stray empty -> rejected
-    assert copilot._matches({"c": 3}, set(), props) is False  # unrelated keys -> rejected
+    assert matches({"a": 1}, set(), props) is True  # one of two -> accepted
+    assert matches({"a": 1, "b": 2}, set(), props) is True
+    assert matches({}, set(), props) is False  # stray empty -> rejected
+    assert matches({"c": 3}, set(), props) is False  # unrelated keys -> rejected
 
 
 # --- logging ---------------------------------------------------------------------------
@@ -1199,7 +1205,7 @@ def test_preflight_executable_directory_path_fails(monkeypatch, tmp_path):
 
 
 async def test_retry_reuses_the_same_session(copilot_sdk, tmp_path):
-    # The re-prompt sends only _RETRY_SUFFIX, which is correct only if it reuses the ONE session
+    # The re-prompt sends only RETRY_SUFFIX, which is correct only if it reuses the ONE session
     # (created once) still holding the original prompt + schema + first bad answer — NOT a new
     # session per turn. (Behavioral history-retention is the SDK's session contract, proven live.)
     copilot_sdk.queue_turn("no json")  # attempt 1 invalid → re-prompt

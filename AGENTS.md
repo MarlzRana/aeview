@@ -7,7 +7,7 @@ behavior, the code and README win.
 
 A **bring-your-own-harness, multi-agent code-review CLI**. It runs the *same* change past several
 **reviewers** — each a prompt checked into the repo — across several agent **harnesses** (Claude
-Code, Codex, Copilot) in parallel, then merges one deduplicated verdict (`report.json` + an exit
+Code, Codex, Copilot, pi) in parallel, then merges one deduplicated verdict (`report.json` + an exit
 code: `0` approve / `1` needs-attention / `2` error).
 
 The bet: a *reviewer* is a versioned, diffable artifact (a prompt + the harnesses it runs on), the
@@ -22,7 +22,7 @@ Python ≥3.14 CLI, packaged with `uv`, published to PyPI (early/alpha: `0.0.x`)
 
 - **reviewer** — a prompt (`.aeview/reviewers/<name>/REVIEWER.md`, YAML frontmatter + body) plus the
   set of harness instances to run it on. Dir name must equal frontmatter `name`.
-- **harness** — a runtime: `claude-code`, `codex`, `copilot`. **harness instance** = `{harness,
+- **harness** — a runtime: `claude-code`, `codex`, `copilot`, `pi`. **harness instance** = `{harness,
   model, thinking?}`.
 - **review** — one reviewer × one harness instance: the atomic unit of work. Id `<reviewer>__<harness>-<model>`.
 - **roster** — the full cross-product of requested reviewers × their harness instances. Frozen in `run.json`.
@@ -59,7 +59,7 @@ reads the manifest (liveness-adjusted) and renders progress; `--wait` polls to t
 | Module | Owns |
 |---|---|
 | `cli.py` | Typer app; all subcommands; the `_Plan` (dry-run-safe) + `_execute` orchestration; query commands. No harness/diff/storage detail. |
-| `config.py` | `~/.aeview` paths, self-seeding (`SEED_FILES`, write-if-absent), `Settings`/`Retention`/`HarnessInstance` (the **camelCase** boundary), `load_dedup_prompt`, `split_frontmatter`. |
+| `config.py` | `~/.aeview` paths, self-seeding (`SEED_FILES`, write-if-absent), `Settings`/`Retention`/`HarnessInstance`/`HarnessSettings` (the **camelCase** boundary), `load_dedup_prompt`, `split_frontmatter`. |
 | `resolve.py` | Reviewer walk-up discovery, `REVIEWER.md` frontmatter parse/validate, `build_roster`. |
 | `scope.py` | Diff acquisition: scope grammar + all 8 resolvers, base resolution, conflict detection. Forces git diff config (`_GIT_BASE`). |
 | `bundle.py` | Inline-vs-self-collect decision (`build_bundle`). |
@@ -75,7 +75,8 @@ reads the manifest (liveness-adjusted) and renders progress; `--wait` polls to t
 | `doctor.py` | `aeview doctor` preflight (reviewers, harness SDK/binary/auth, `gh`). |
 | `process.py` | Subprocess helpers (`run_sync`/`run_async`, `TIMED_OUT=124`). |
 | `harness/base.py` | The `Adapter` Protocol, `AdapterError(transient)`, `SchemaSupport`, `get_adapter` registry. |
-| `harness/{claude_code,codex,copilot}.py` | The three adapters (see Harnesses). |
+| `harness/{claude_code,codex,copilot,pi}.py` | The four adapters (see Harnesses). |
+| `harness/prompt_schema.py` | Shared prompt-embed + JSON extract for `schema_support="prompt"` adapters. |
 | `harness/eventlog.py` | Best-effort live JSONL event log per invocation (never raises). |
 
 ### Load-bearing invariants (don't break these)
@@ -100,9 +101,11 @@ reads the manifest (liveness-adjusted) and renders progress; `--wait` polls to t
 `dedup/<instance>/{prompt.md,input.json,result.json,dedup.log}`. Persistence is **file-based on
 purpose** — atomic per-review writes are what make a killed run survive + resumable. No SQLite/DB.
 
-**camelCase ↔ snake_case**: only `config.py` models (`Settings`/`Retention`/`HarnessInstance`) use
-`alias_generator=to_camel` + `populate_by_name=True` — that's the *user-facing* `settings.json`
-surface. Every `schema.py` model is snake_case (`extra="forbid"`); all run artifacts are snake_case.
+**camelCase ↔ snake_case**: only `config.py` models (`Settings`/`Retention`/`HarnessInstance`/
+`HarnessSettings`/`PiHarnessSettings`) use `alias_generator=to_camel` + `populate_by_name=True` —
+that's the *user-facing* `settings.json` surface. Every `schema.py` model is snake_case
+(`extra="forbid"`); all run artifacts are snake_case. `HarnessSettings` is the one bag that uses
+`extra="ignore"` so a later `claude`/`codex`/`copilot` key doesn't break this increment.
 
 ## Harnesses
 
@@ -111,12 +114,14 @@ surface. Every `schema.py` model is snake_case (`extra="forbid"`); all run artif
 | `claude-code` | `claude-agent-sdk` | `validated` (validate-and-reprompt) | OS sandbox (`denyWrite:["/"]`) + `permission_mode=dontAsk` + disallow Edit/Write |
 | `codex` | `openai-codex` | `constrained` (decoding, strict schema) | native `Sandbox.read_only` + `ApprovalMode.deny_all` |
 | `copilot` | `github-copilot-sdk` | `prompt` (schema embedded, re-prompt once) | deny-by-default permission handler (approve `read` only) |
+| `pi` | `pi` CLI + `srt` (PATH, not bundled) | `prompt` (schema embedded, re-prompt once on a persisted session) | whole-process SRT wrap (`denyWrite:["/"]`, write hole = this review's `pi-session/`) |
 
-Each SDK ships a **pinned binary** (insulated from the user's own CLI upgrades; override via
-`overrideHarnessBinaries`). Every adapter normalizes *all* exceptions to `AdapterError` and tears
-down cleanly in `finally` (codex/copilot each run on an **isolated daemon thread + own event loop**
-to avoid pool starvation; copilot also `delete_session`s to avoid on-disk session leaks). Adding a
-harness = one new adapter implementing the `base.py` Protocol; nothing else changes.
+Claude/Codex/Copilot ship a **pinned binary** (insulated from the user's own CLI upgrades; override
+via `overrideHarnessBinaries`). `pi` is PATH-gated (`pi` + `srt`); `overrideHarnessBinaries.pi` is
+its argv[0]. Every adapter normalizes *all* exceptions to `AdapterError` and tears down cleanly in
+`finally` (codex/copilot each run on an **isolated daemon thread + own event loop** to avoid pool
+starvation; copilot also `delete_session`s to avoid on-disk session leaks). Adding a harness = one
+new adapter implementing the `base.py` Protocol; nothing else changes.
 
 ## Tech stack, tooling & commands
 

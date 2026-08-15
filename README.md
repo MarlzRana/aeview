@@ -7,7 +7,7 @@
 **Fan code reviewers across multiple AI agent harnesses, then merge one deduplicated verdict.**
 
 aeview runs the *same* change past several reviewers — each a prompt you check into your repo —
-across several agent harnesses (Claude Code, Codex, Copilot), in parallel. It collects every
+across several agent harnesses (Claude Code, Codex, Copilot, pi), in parallel. It collects every
 finding, deduplicates them with an LLM judge, and writes a single `report.json` plus an exit code
 you can loop on: `0` approve · `1` needs-attention · `2` error.
 
@@ -64,10 +64,12 @@ Everything is persisted under `~/.aeview/runs/<id>/`, so a killed run can be `re
 
 - **Python 3.14+** (the `uv` installer can fetch one for you).
 - **macOS or Linux.**
-- **Harness auth.** aeview drives each harness through its Python SDK, which **bundles a pinned CLI
-  binary** — you don't install Claude Code / Codex / Copilot separately. You *do* need to be
-  authenticated with each harness a reviewer uses. Run [`aeview doctor`](#commands) to see exactly
-  what's missing for the reviewers you have.
+- **Harness auth.** Claude Code, Codex, and Copilot are driven through their Python SDKs, which
+  **bundle a pinned CLI binary** — you don't install those CLIs separately. The `pi` harness is
+  PATH-gated: install [`pi`](https://github.com/earendil-works/pi) and
+  [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm i -g @anthropic-ai/sandbox-runtime`)
+  yourself. You need to be authenticated with each harness a reviewer uses. Run
+  [`aeview doctor`](#commands) to see exactly what's missing for the reviewers you have.
 - **`gh`** (GitHub CLI) — for `--scope pr`, for `--post-comments` (posting the review onto the PR),
   and to auto-detect a branch's base from its open PR. Optional otherwise: aeview falls back to
   `origin/HEAD`, then `main`/`master`/`trunk`, when `gh` or a PR isn't available.
@@ -264,13 +266,17 @@ A harness instance is `{ harness, model, thinking? }`. Supported harnesses:
 | `claude-code` | `claude-agent-sdk` | `claude-opus-4-8` |
 | `codex` | `openai-codex` | `gpt-5.5` (e.g. `thinking: xhigh`) |
 | `copilot` | `github-copilot-sdk` | a Copilot-served model |
+| `pi` | `pi` CLI + `srt` (not bundled) | `xai/grok-4.6` (e.g. `thinking: high`) |
 
 Every harness runs **read-anywhere, write-nowhere**: a reviewer can read any file (to gather
 context) but cannot modify your repo. Claude Code and Codex enforce this with their native
-read-only sandboxes; Copilot uses a deny-by-default permission handler that only approves reads.
+read-only sandboxes; Copilot uses a deny-by-default permission handler that only approves reads;
+pi wraps the whole process in [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
+(`srt`), with a write hole only for that review's session file.
 
-Each SDK ships a **pinned binary**, so aeview is insulated from your own CLI upgrades. To point a
-harness at a different binary, set [`overrideHarnessBinaries`](#configuration).
+Claude / Codex / Copilot ship a **pinned binary**, so aeview is insulated from your own CLI
+upgrades. `pi` uses whatever `pi` (and `srt`) are on PATH. To point a harness at a different
+binary, set [`overrideHarnessBinaries`](#configuration).
 
 ## Deduplication
 
@@ -325,7 +331,12 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
   "deduplicationHarness": { "harness": "claude-code", "model": "claude-opus-4-8" },
   "retention": { "keepLast": 20, "ttlDays": 14 },
   "reviewTimeoutSeconds": 1200,
-  "overrideHarnessBinaries": { "codex": "/usr/local/bin/codex" }
+  "overrideHarnessBinaries": { "codex": "/usr/local/bin/codex" },
+  "harnessSettings": {
+    "pi": {
+      "extraSandboxAllowedDomains": ["my-proxy.internal"]
+    }
+  }
 }
 ```
 
@@ -335,7 +346,8 @@ are camelCase; the JSON run artifacts (`report.json`, `review.json`) use snake_c
 | `deduplicationHarness` | The harness used to deduplicate findings across the panel. |
 | `retention` | Auto-prune old runs: keep at least the newest `keepLast`, and drop runs that are *also* older than `ttlDays` days. |
 | `reviewTimeoutSeconds` | Timeout (seconds) per harness attempt; transient errors retry, so a review's total time can exceed it. A timed-out review fails fast (no retry); `resume` re-runs it. |
-| `overrideHarnessBinaries` | Optional per-harness override of the bundled CLI binary, by path. Keys: `claude-code`, `codex`, `copilot`. |
+| `overrideHarnessBinaries` | Optional per-harness override of the CLI binary, by path. Keys: `claude-code`, `codex`, `copilot`, `pi`. |
+| `harnessSettings.pi` | Pi-only sandbox knobs. `extraSandboxAllowedDomains` is unioned onto the built-in model-API allowlist; `onlySandboxAllowedDomains` (when set) *replaces* that list and ignores `extra`. |
 
 ## Commands
 

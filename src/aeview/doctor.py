@@ -71,9 +71,9 @@ def _check_harness(harness: str, binary_override: str | None) -> Check:
         adapter = get_adapter(harness, binary_override)
     except AdapterError as exc:
         return Check(name, "fail", str(exc))
-    # Each adapter owns its check: claude verifies its SDK-resolved (possibly bundled) binary;
-    # codex/copilot use the shared PATH+auth probe. The overrideHarnessBinaries override is already
-    # baked into the constructed adapter.
+    # Each adapter owns its check: claude/codex/copilot verify their SDK-resolved (possibly
+    # bundled) binary; pi is PATH-gated (`pi` + `srt`). The overrideHarnessBinaries override is
+    # already baked into the constructed adapter.
     pf = adapter.preflight()
     return Check(name, pf.status, pf.detail)
 

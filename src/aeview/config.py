@@ -52,6 +52,25 @@ class HarnessInstance(BaseModel):
         return self.instance_id
 
 
+class PiHarnessSettings(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+    # SRT network allowlist overlays for the pi adapter. Resolution lives on the adapter
+    # (`resolve_allowed_domains`): a set `only` list *replaces* the built-in hosts (and extra is
+    # ignored); otherwise extra is unioned onto the built-in list. Empty `only: []` is valid and
+    # means no network — reviews then fail closed.
+    extra_sandbox_allowed_domains: list[str] = Field(default_factory=list)
+    only_sandbox_allowed_domains: list[str] | None = None
+
+
+class HarnessSettings(BaseModel):
+    # extra="ignore" so a forward-looking `claude`/`codex`/`copilot` key (the follow-up migration)
+    # doesn't break this increment. PiHarnessSettings itself stays extra="forbid".
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
+
+    pi: PiHarnessSettings = Field(default_factory=PiHarnessSettings)
+
+
 class Retention(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
@@ -75,10 +94,14 @@ class Settings(BaseModel):
     # keeps hitting transient errors can still span a few invocations, each bounded by this.
     # Generous by default — model reviews of a large diff are slow.
     review_timeout_seconds: int = Field(default=1200, ge=1)
-    # Per-harness binary path override, keyed by harness name (claude-code/codex/copilot). Each
-    # harness SDK resolves its own bundled binary by default; an entry here points it at a specific
-    # executable instead (claude `cli_path`, codex/copilot argv[0]). Absent/empty → SDK default.
+    # Per-harness binary path override, keyed by harness name (claude-code/codex/copilot/pi).
+    # SDK harnesses resolve a bundled binary by default; an entry here points them at a specific
+    # executable instead (claude `cli_path`, codex/copilot argv[0]). `pi` is PATH-gated (no bundle);
+    # an entry here is that argv[0]. Absent/empty → SDK default / `which("pi")`.
     override_harness_binaries: dict[str, str] = Field(default_factory=dict)
+    # Per-harness knobs that don't belong on the shared Settings surface. Only `pi` is populated
+    # this increment; claude/codex/copilot migrate here later.
+    harness_settings: HarnessSettings = Field(default_factory=HarnessSettings)
 
 
 def _package_data(name: str) -> str:

@@ -129,7 +129,8 @@ def default_preflight(adapter: Adapter) -> Preflight:
     override or the default) must be on PATH, then its no-cost auth probe (if any) must succeed.
     Adapters whose SDK resolves a bundled binary not on PATH (claude/codex/copilot) override
     `preflight`. Generic check for a harness invoked by a CLI binary directly (PATH-gated, no
-    bundled binary); no SDK adapter currently calls it, but a unit test pins the contract."""
+    bundled binary). pi overrides preflight too (it also needs `srt` on PATH); a unit test still
+    pins this helper's contract."""
     binary = adapter.binary
     if which(binary) is None:
         return Preflight("fail", f"{binary} not found on PATH")
@@ -146,11 +147,13 @@ def _adapter_classes() -> dict[str, Callable[[str | None], Adapter]]:
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
     from .copilot import CopilotAdapter
+    from .pi import PiAdapter
 
     return {
         "claude-code": ClaudeCodeAdapter,
         "codex": CodexAdapter,
         "copilot": CopilotAdapter,
+        "pi": PiAdapter,
     }
 
 
