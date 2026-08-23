@@ -45,6 +45,19 @@ _NO_HARNESS_WARNING = (
 # id -> (review id, the finding as the reviewer emitted it)
 _ById = dict[str, tuple[str, Finding]]
 
+# aeview's provenance namespace, always set explicitly when building Pooled/Merged findings. A
+# finding carries arbitrary extra slots (custom-schemas / a drifting harness) under extra="allow",
+# so strip any that collide with these before splatting — else `Model(id=fid, **dump)` would raise
+# TypeError on a duplicate `id` and wedge the whole (unguarded) merge.
+_RESERVED_KEYS = ("id", "sources", "agreement")
+
+
+def _carry(finding: Finding) -> dict:
+    data = finding.model_dump()
+    for key in _RESERVED_KEYS:
+        data.pop(key, None)
+    return data
+
 
 async def merge_reviews(
     results: list[ReviewResult], settings: Settings, store: RunStore, cwd: Path
@@ -76,7 +89,7 @@ def _build_pool(done: list[ReviewResult]) -> tuple[list[PooledFinding], _ById]:
         for finding in review.findings:
             n += 1
             fid = f"f{n}"
-            pool.append(PooledFinding(id=fid, **finding.model_dump()))
+            pool.append(PooledFinding(id=fid, **_carry(finding)))
             by_id[fid] = (review.id, finding)
     return pool, by_id
 
@@ -98,20 +111,31 @@ async def _dedup_and_apply(
     instance = settings.deduplication_harness
     if instance is None:
         return (
-            Dedup(status="failed", reason="no deduplicationHarness configured",
-                  warning=_NO_HARNESS_WARNING),
+            Dedup(
+                status="failed",
+                reason="no deduplicationHarness configured",
+                warning=_NO_HARNESS_WARNING,
+            ),
             _raw_union(pool, by_id),
             Usage(),
         )
 
     outcome = await run_dedup(
-        pool, instance, store, cwd, DEDUP_TIMEOUT_S,
+        pool,
+        instance,
+        store,
+        cwd,
+        DEDUP_TIMEOUT_S,
         binary_override=settings.override_harness_binaries.get(instance.harness),
     )
     if outcome.status != "ok":
         return (
-            Dedup(status="failed", harness=outcome.harness_id, reason=outcome.reason,
-                  warning=outcome.warning),
+            Dedup(
+                status="failed",
+                harness=outcome.harness_id,
+                reason=outcome.reason,
+                warning=outcome.warning,
+            ),
             _raw_union(pool, by_id),
             outcome.usage,
         )
@@ -137,7 +161,7 @@ def _apply_groups(
         merged.append(
             MergedFinding(
                 id=survivor_id,
-                **survivor_finding.model_dump(),
+                **_carry(survivor_finding),
                 sources=[_source(by_id[m]) for m in members],
                 agreement=len(members),
             )
@@ -177,9 +201,7 @@ def _raw_union(pool: list[PooledFinding], by_id: _ById) -> list[MergedFinding]:
 
 def _singleton(fid: str, origin: tuple[str, Finding]) -> MergedFinding:
     _, finding = origin
-    return MergedFinding(
-        id=fid, **finding.model_dump(), sources=[_source(origin)], agreement=1
-    )
+    return MergedFinding(id=fid, **_carry(finding), sources=[_source(origin)], agreement=1)
 
 
 def _source(origin: tuple[str, Finding]) -> Source:

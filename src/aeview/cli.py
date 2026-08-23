@@ -470,14 +470,14 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     prompt_by_reviewer = {
         r.name: compose_prompt(r, plan.bundle, full_diff_path) for r in plan.reviewers
     }
-    for reviewer_name, prompt in prompt_by_reviewer.items():
-        store.write_prompt(reviewer_name, prompt)
-
-    # Compose + freeze each reviewer's finding output schema alongside its prompt, so resume
-    # validates against byte-identical structure (never recomposed from live REVIEWER.md).
     schema_by_reviewer = {r.name: compose_review_schema(r.custom_schemas) for r in plan.reviewers}
-    for reviewer_name, schema in schema_by_reviewer.items():
-        store.write_review_schema(reviewer_name, schema)
+    # Freeze each reviewer's schema BEFORE its prompt: resume keys on prompt.md, so writing
+    # schema.json first makes prompt-present ⟹ schema-present. A crash between the two atomic
+    # writes then never leaves a review to be resumed against the wrong (default) schema. Both are
+    # frozen so resume validates against byte-identical structure (not recomposed from REVIEWER.md).
+    for r in plan.reviewers:
+        store.write_review_schema(r.name, schema_by_reviewer[r.name])
+        store.write_prompt(r.name, prompt_by_reviewer[r.name])
 
     report = await _run_reviews_and_merge(
         store,
@@ -757,13 +757,15 @@ def resume(
         typer.echo(f"aeview: cannot resume run '{rid}': {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
     # Reuse each reviewer's frozen finding schema. A run created before custom-schemas has no
-    # schema.json; a missing one falls back to the built-in default (omit it), so an older run still
-    # resumes. A present one is reused verbatim — the byte-identical-resume invariant.
+    # schema.json; a missing (or unreadable/corrupt) one falls back to the built-in default (omit
+    # it), so an older run still resumes. A present, valid one is reused verbatim — the
+    # byte-identical-resume invariant. (OSError = missing/unreadable, ValueError = bad JSON — the
+    # tolerant read pattern runstore uses; atomic writes make an in-house corrupt file unlikely.)
     schemas: dict[str, dict] = {}
     for r in reviewer_names:
         try:
             schemas[r] = store.read_review_schema(r)
-        except OSError:
+        except OSError, ValueError:
             continue
 
     # Take ownership: mark running under this process so liveness tracks it; clear the old finish.

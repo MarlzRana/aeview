@@ -250,20 +250,40 @@ def _provenance(f: MergedFinding) -> str:
     return "<sub>" + " · ".join(bits) + "</sub>"
 
 
+def _slot_text(f: MergedFinding, key: str) -> str | None:
+    """A descriptive slot (title/body/category/recommendation) as display text, or None if the
+    reviewer dropped it via custom-schemas. These live in model_extra on the loose finding carrier;
+    a reshaped (non-string) slot — e.g. a rubric object — is rendered as compact JSON so it still
+    posts cleanly rather than crashing on `.strip()`."""
+    value = (f.model_extra or {}).get(key)
+    if value is None:
+        return None
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
 def _finding_md(f: MergedFinding, run_id: str, *, show_location: bool) -> str:
     """Render one finding. `show_location` is for body-listed (unanchored) findings, where there is
     no inline anchor to convey the file/line; inline comments omit it (the anchor shows it).
 
-    title/body/recommendation are model output derived from an untrusted diff, so they're sanitized
-    (mentions/markers) and length-capped before they're posted under the user's account."""
-    head = f"`{f.severity}` · {f.category} — **{_sanitize(f.title.strip())}**"
+    title/body/recommendation/category are model output derived from an untrusted diff, so they're
+    sanitized (mentions/markers) and length-capped before they're posted under the user's account. A
+    custom-schemas reviewer may reshape or drop any of them, so each is read defensively."""
+    title = _slot_text(f, "title") or "(untitled)"
+    category = _slot_text(f, "category")
+    body = _slot_text(f, "body")
+    recommendation = _slot_text(f, "recommendation")
+    head = (
+        f"`{f.severity}`"
+        + (f" · {category}" if category else "")
+        + f" — **{_sanitize(title.strip())}**"
+    )
     if show_location:
         head = f"{_location_md(f.location)} · {head}"
     blocks = [
         _BADGE,
         head,
-        _clip(_sanitize(f.body.strip()), run_id),
-        f"**Fix:** {_clip(_sanitize(f.recommendation.strip()), run_id)}",
+        _clip(_sanitize(body.strip()), run_id) if body is not None else None,
+        f"**Fix:** {_clip(_sanitize(recommendation.strip()), run_id)}" if recommendation else None,
         _provenance(f),
         _FINDING_MARKER.format(run_id=run_id, finding_id=f.id),
     ]

@@ -12,9 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from aeview import merge as merge_mod
 from aeview.config import HarnessInstance, Settings
+from aeview.dedup import DedupOutcome
 from aeview.fanout import fan_out
-from aeview.harness.base import HarnessOutput
+from aeview.github import _finding_md
+from aeview.harness.base import HarnessOutput, StructuredOutput
+from aeview.harness.claude_code import ClaudeCodeAdapter
 from aeview.merge import merge_reviews
 from aeview.report import render_human
 from aeview.resolve import ResolveError, resolve_reviewer
@@ -22,6 +26,7 @@ from aeview.runstore import RunStore, new_run_id
 from aeview.schema import (
     Coverage,
     Dedup,
+    DuplicateGroup,
     Finding,
     MergedFinding,
     PooledFinding,
@@ -182,7 +187,9 @@ def _default_finding(**over) -> dict:
     return f
 
 
-def test_default_validator_requires_slots():
+def test_default_validator_is_strict():
+    # No custom-schemas => the strict built-in contract (byte-for-byte the pre-feature validation),
+    # so a skeleton-only finding is rejected via pydantic ("Field required", a ValueError subclass).
     v = build_review_validator(review_output_json_schema())
     v(_review([_default_finding()]))  # ok
     skeleton_only = {
@@ -190,8 +197,19 @@ def test_default_validator_requires_slots():
         "confidence": 0.5,
         "location": {"file": "a", "line_start": 1, "line_end": 1},
     }
-    with pytest.raises(ValueError, match="missing required field"):
+    with pytest.raises(ValueError, match="required"):
         v(_review([skeleton_only]))
+
+
+def test_custom_validator_requires_surviving_slots():
+    # A customized schema (only category overridden) still requires the other slots; the loose
+    # validator's presence check fires with its own message when one is missing.
+    schema = compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
+    v = build_review_validator(schema)
+    finding = _default_finding(category="x")
+    del finding["body"]
+    with pytest.raises(ValueError, match="missing required field"):
+        v(_review([finding]))
 
 
 def test_default_validator_rejects_bad_skeleton():
@@ -331,3 +349,146 @@ def test_review_schema_freeze_round_trips(aeview_home):
     schema = compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
     store.write_review_schema("r", schema)
     assert store.read_review_schema("r") == schema
+
+
+# --- adapter delegation, dedup survivor, downstream rendering (cycle-1 fixes) -----------------
+
+
+async def test_adapter_run_delivers_custom_schema_and_builds_carrier(tmp_path, monkeypatch):
+    # run() delegates to run_review: the per-reviewer schema reaches run_structured, a
+    # schema-derived validator is applied, and the loose ReviewOutput carrier is built.
+    adapter = ClaudeCodeAdapter()
+    captured: dict = {}
+
+    async def fake_run_structured(
+        prompt, schema, model, cwd, log_path, thinking=None, timeout=None, validate=None
+    ):
+        captured["schema"] = schema
+        payload = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
+        if validate is not None:
+            validate(payload)
+        return StructuredOutput(payload=payload, usage=Usage(), raw="{}")
+
+    monkeypatch.setattr(adapter, "run_structured", fake_run_structured)
+    custom = compose_review_schema({"recommendation": None})
+    out = await adapter.run("p", "m", tmp_path, tmp_path / "log", schema=custom)
+    assert captured["schema"] == custom
+    assert out.review.verdict == "approve"
+
+
+async def test_dedup_survivor_keeps_reshaped_body(aeview_home, monkeypatch):
+    # When dedup merges two reshaped findings, the survivor is kept verbatim — its rubric-object
+    # body carries through the loose Pooled/Merged carriers (option 1: no cross-source aggregation).
+    def _rubric_review(rid: str) -> ReviewResult:
+        finding = Finding.model_validate(
+            {
+                "severity": "high",
+                "confidence": 0.9,
+                "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+                "title": "same issue",
+                "body": {"readability": 2, "risk": 4},
+            }
+        )
+        return ReviewResult(
+            id=rid,
+            reviewer="r",
+            harness="claude-code",
+            model="m",
+            status="done",
+            verdict="needs-attention",
+            summary="s",
+            findings=[finding],
+            next_steps=[],
+        )
+
+    async def fake_run_dedup(pool, instance, store, cwd, timeout, binary_override=None):
+        return DedupOutcome("ok", [DuplicateGroup(survivor="f1", duplicates=["f2"])], Usage(), "h")
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_run_dedup)
+    settings = Settings(deduplication_harness=HarnessInstance(harness="claude-code", model="m"))
+    store = RunStore.create(new_run_id())
+    report = await merge_reviews(
+        [_rubric_review("r__claude-code-a"), _rubric_review("r__codex-b")],
+        settings,
+        store,
+        aeview_home,
+    )
+    assert len(report.findings) == 1
+    assert report.findings[0].agreement == 2
+    assert _extra(report.findings[0])["body"] == {"readability": 2, "risk": 4}
+
+
+def test_github_finding_md_tolerates_dropped_and_reshaped_slots():
+    # PR posting must not crash when a reviewer reshaped body to an object and dropped the rest.
+    finding = MergedFinding.model_validate(
+        {
+            "id": "f1",
+            "severity": "high",
+            "confidence": 0.8,
+            "location": {"file": "a.py", "line_start": 5, "line_end": 5},
+            "body": {"readability": 3},  # object, not a string
+            # title / recommendation / category dropped
+            "sources": [{"review": "r__x", "severity": "high", "confidence": 0.8}],
+            "agreement": 1,
+        }
+    )
+    md = _finding_md(finding, "run1", show_location=True)  # must not raise on .strip()
+    assert "(untitled)" in md
+    assert '"readability": 3' in md  # object body rendered as JSON
+
+
+def test_render_human_renders_present_slots():
+    finding = MergedFinding.model_validate(
+        {
+            "id": "f1",
+            "severity": "medium",
+            "confidence": 0.5,
+            "location": {"file": "a.py", "line_start": 2, "line_end": 4},
+            "title": "the title",
+            "recommendation": "do the fix",
+            "sources": [{"review": "r__x", "severity": "medium", "confidence": 0.5}],
+            "agreement": 1,
+        }
+    )
+    report = Report(
+        verdict="needs-attention",
+        summary="s",
+        findings=[finding],
+        coverage=Coverage(contributed=1, failed=0),
+        dedup=Dedup(status="skipped"),
+        usage=UsageBreakdown(),
+    )
+    text = render_human(report)
+    assert "the title" in text
+    assert "a.py:2-4 :: do the fix" in text
+
+
+# --- fragment sanitization edges -------------------------------------------------------------
+
+
+def test_node_count_cap_rejected(tmp_path):
+    big = {"type": "object", "properties": {f"p{i}": {"type": "string"} for i in range(600)}}
+    _write_reviewer(
+        tmp_path,
+        "bad",
+        "name: bad\ncustom-schemas:\n  body: ./b.json",
+        files={"b.json": json.dumps(big)},
+    )
+    with pytest.raises(ResolveError, match="more than"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_invalid_json_file_rejected(tmp_path):
+    _write_reviewer(
+        tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: ./b.json", files={"b.json": "{not"}
+    )
+    with pytest.raises(ResolveError, match="not valid JSON"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_non_object_json_file_rejected(tmp_path):
+    _write_reviewer(
+        tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: ./b.json", files={"b.json": "[1,2]"}
+    )
+    with pytest.raises(ResolveError, match="must contain a JSON Schema object"):
+        resolve_reviewer("bad", tmp_path, _settings())

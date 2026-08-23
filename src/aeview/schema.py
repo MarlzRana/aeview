@@ -331,13 +331,23 @@ def compose_review_schema(custom_schemas: Mapping[str, dict | None] | None = Non
     return schema
 
 
-def build_review_validator(schema: dict) -> Callable[[dict], ReviewOutput]:
-    """A post-validator derived from a (frozen) review schema. It checks what the pipeline depends
-    on — the review shape + the finding skeleton (via the loose `ReviewOutput`) — plus that every
-    finding carries the schema's required non-skeleton slots. The slots' *inner* shape is enforced
-    by the harness during generation (constrained/validated/prompt), not re-checked here; deriving
-    the validator purely from the schema is what makes resume trivially correct (rebuild from the
-    frozen schema, never from live `REVIEWER.md`)."""
+def build_review_validator(schema: dict) -> Callable[[dict], object]:
+    """A post-validator derived from a (frozen) review schema.
+
+    For the built-in schema (a reviewer with no `custom-schemas`) this is the strict default
+    contract — byte-for-byte the pre-feature validation — so a default reviewer's category enum,
+    title length, and stray keys are still caught loudly, notably on the prompt-mode harnesses that
+    lean on this post-check.
+
+    For a customized schema it checks what the pipeline depends on — the review shape + the finding
+    skeleton (via the loose `ReviewOutput`) — plus that every finding carries the schema's required
+    non-skeleton slots. The slots' *inner* shape is enforced by the harness during generation
+    (constrained/validated/prompt), not re-checked here (no JSON-Schema engine is bundled).
+
+    Deriving the validator purely from the schema is what makes resume trivially correct: rebuild
+    from the frozen schema, never from live `REVIEWER.md`."""
+    if schema == review_output_json_schema():
+        return _DefaultReviewOutput.model_validate
     required_slots = set(_finding_def(schema).get("required", ())) - set(SKELETON_FIELDS)
 
     def _validate(payload: dict) -> ReviewOutput:

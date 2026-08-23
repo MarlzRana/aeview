@@ -252,7 +252,7 @@ def _resolve_custom_schemas(
             resolved[slot] = None  # drop this slot
             continue
         fragment = _load_fragment(value, reviewer_dir, slot)
-        _sanitize_fragment(fragment, slot, depth=0, counter=[0])
+        _sanitize_fragment(fragment, slot)
         resolved[slot] = fragment
     return resolved
 
@@ -281,29 +281,37 @@ def _load_fragment(value: object, reviewer_dir: Path, slot: str) -> dict:
     return fragment
 
 
-def _sanitize_fragment(node: object, slot: str, depth: int, counter: list[int]) -> None:
-    if depth > _MAX_FRAGMENT_DEPTH:
-        raise ResolveError(
-            f"custom-schemas.{slot}: schema nests deeper than {_MAX_FRAGMENT_DEPTH} levels"
-        )
-    if isinstance(node, dict):
-        if "$ref" in node:
+def _sanitize_fragment(fragment: dict, slot: str) -> None:
+    """Reject $ref and bound depth/node-count on a user fragment before it's composed in. The
+    recursion's walk state (depth + node count) is internal — callers just pass the fragment."""
+    count = 0
+
+    def walk(node: object, depth: int) -> None:
+        nonlocal count
+        if depth > _MAX_FRAGMENT_DEPTH:
             raise ResolveError(
-                f"custom-schemas.{slot}: $ref is not supported in a custom schema "
-                f"(inline the definition instead)"
+                f"custom-schemas.{slot}: schema nests deeper than {_MAX_FRAGMENT_DEPTH} levels"
             )
-        children: list[object] = list(node.values())
-    elif isinstance(node, list):
-        children = list(node)
-    else:
-        return
-    for child in children:
-        counter[0] += 1
-        if counter[0] > _MAX_FRAGMENT_NODES:
-            raise ResolveError(
-                f"custom-schemas.{slot}: schema has more than {_MAX_FRAGMENT_NODES} nodes"
-            )
-        _sanitize_fragment(child, slot, depth + 1, counter)
+        if isinstance(node, dict):
+            if "$ref" in node:
+                raise ResolveError(
+                    f"custom-schemas.{slot}: $ref is not supported in a custom schema "
+                    f"(inline the definition instead)"
+                )
+            children: list[object] = list(node.values())
+        elif isinstance(node, list):
+            children = list(node)
+        else:
+            return
+        for child in children:
+            count += 1
+            if count > _MAX_FRAGMENT_NODES:
+                raise ResolveError(
+                    f"custom-schemas.{slot}: schema has more than {_MAX_FRAGMENT_NODES} nodes"
+                )
+            walk(child, depth + 1)
+
+    walk(fragment, 0)
 
 
 def _resolve_harnesses(
