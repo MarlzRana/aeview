@@ -66,7 +66,7 @@ def _iter_run_dirs() -> Iterator[tuple[Path, RunManifest]]:
             # read + parse in one guard: OSError (missing/unreadable run.json) and ValueError —
             # which covers both bad JSON and invalid UTF-8 (UnicodeDecodeError is a ValueError).
             manifest = RunManifest.model_validate_json((child / "run.json").read_text("utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         manifest.run_id = child.name  # the directory wins over the self-declared field
         yield child, manifest
@@ -120,7 +120,7 @@ def prune_runs(retention: Retention) -> list[str]:
         try:
             if effective_overall(RunStore(child.name).read_manifest()) == _NON_TERMINAL:
                 continue
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         try:
             shutil.rmtree(child)
@@ -174,7 +174,7 @@ def reconcile_interrupted() -> list[str]:
         store = RunStore(child.name)
         try:
             fresh = store.read_manifest()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if not _is_crashed(fresh):
             continue
@@ -271,6 +271,17 @@ class RunStore:
         # sees byte-identical input to the original.
         return (self.reviewers_dir / reviewer / "prompt.md").read_text("utf-8")
 
+    def write_review_schema(self, reviewer: str, schema: dict) -> None:
+        # The per-reviewer finding output schema, frozen beside the prompt at run start. resume
+        # re-reads this (never recomposes from live REVIEWER.md) so a resumed review is validated
+        # against byte-identical structure — the same freeze invariant the prompt has.
+        reviewer_dir = self.reviewers_dir / reviewer
+        reviewer_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(reviewer_dir / "schema.json", json.dumps(schema, indent=2))
+
+    def read_review_schema(self, reviewer: str) -> dict:
+        return json.loads((self.reviewers_dir / reviewer / "schema.json").read_text("utf-8"))
+
     # --- reviewers/<reviewer>/<instance>/ (one review = reviewer x harness instance) ---
     def _review_dir(self, reviewer: str, review_id: str) -> Path:
         # review_id is "<reviewer>__<instance>"; the instance is the on-disk subdir name.
@@ -298,7 +309,7 @@ class RunStore:
             # unreadable file, bad JSON, invalid UTF-8, and (extra="forbid") cross-version drift.
             try:
                 results.append(ReviewResult.model_validate_json(path.read_text("utf-8")))
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 continue
         # Sort by the canonical review id, not the glob path: "<reviewer>/<instance>" orders on
         # "/" while the id orders on "__", so a path sort can reorder prefix-named reviewers.

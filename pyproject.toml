@@ -27,6 +27,9 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6",
     "pathspec>=0.12",
+    # Validate harness output against a reviewer's (possibly custom) finding schema. Already in the
+    # tree transitively (claude-agent-sdk -> mcp), but declared directly so the import is guaranteed.
+    "jsonschema>=4.26",
     "claude-agent-sdk>=0.2.101",
     "openai-codex>=0.144.4",
     "github-copilot-sdk>=1.0.1",

@@ -196,6 +196,7 @@ Frontmatter fields:
 | `description` | no | One line, shown by `aeview reviewers`. |
 | `harnesses` | no | List of `{ harness, model, thinking? }`. **Omit** to use the global `fallbackReviewerHarnesses`. |
 | `auto-activate-paths` | no | Globs that opt this reviewer into [auto mode](#auto-mode-activation--aeviewignore). |
+| `custom-schemas` | no | Reshape or drop a finding's descriptive slots. See [Customizing the finding schema](#customizing-the-finding-schema). |
 
 ### Resolution (walk-up)
 
@@ -220,6 +221,35 @@ With no `--reviewers`, aeview uses [auto mode](#auto-mode-activation--aeviewigno
 The reviewer's own directory (absolute path) is prepended to its prompt, so you can drop supporting
 files beside `REVIEWER.md` (`references/checklist.md`, scripts, …) and reference them with relative
 paths. Reviewers can read anywhere, so the links resolve.
+
+### Customizing the finding schema
+
+Every finding has a fixed **skeleton** — `severity`, `confidence`, and `location` — that the merge,
+sort, verdict, and dedup logic depend on. Those are never customizable. The four **descriptive
+slots** — `title`, `body`, `recommendation`, `category` — are, via `custom-schemas`: point a slot at
+a JSON Schema fragment (inline, or a path to a `.json` file relative to the reviewer dir) to reshape
+it, or set it to `null` to drop it. It's your reviewer's call whether a drop makes sense.
+
+```yaml
+custom-schemas:
+  category: { type: string, enum: [perf, a11y, docs] }   # your own taxonomy (inline)
+  body: ./schemas/rubric.json                            # body becomes a structured rubric object
+  recommendation: null                                   # drop the slot entirely
+```
+
+- Each harness's output is **validated against the composed schema** (a real JSON-Schema check),
+  including your fragment's inner constraints — a finding that doesn't conform fails the review
+  loudly rather than landing malformed in the report. A fragment that isn't a valid JSON Schema is
+  rejected up front, when the reviewer resolves.
+- **Optional sub-fields** in a fragment are expressed the OpenAI-strict way — nullable and still
+  listed in `required` (e.g. `{ "type": ["string", "null"] }`) — so they behave the same across all
+  four harnesses. Omitting a field from `required` makes it truly optional on claude/copilot/pi but
+  the codex harness will still require it.
+- The composed schema is **frozen** with the run, so `aeview resume` validates against the exact
+  shape the reviewer started with (never a since-edited `REVIEWER.md`).
+- Dedup keeps the **survivor verbatim**: when a reviewer's custom finding merges with another, only
+  the survivor's slots are kept — a merged-away finding's custom fields (e.g. its rubric scores) are
+  not aggregated. `$ref` is not supported in a fragment (inline the definition).
 
 ### Scaffolding
 

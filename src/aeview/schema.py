@@ -12,10 +12,12 @@ only camelCase surface; see `config.py`).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
+from jsonschema.validators import validator_for
 from pydantic import BaseModel, ConfigDict, Field
 
 Severity = Literal["critical", "high", "medium", "low"]
@@ -24,6 +26,12 @@ Verdict = Literal["approve", "needs-attention"]
 ReviewStatus = Literal["pending", "running", "done", "failed"]
 RunState = Literal["running", "done", "failed", "interrupted"]
 DedupState = Literal["ok", "skipped", "failed"]
+
+# The descriptive slots a reviewer may override (with a JSON Schema fragment) or drop (null) via
+# `custom-schemas`. A closed set — everything else in a finding is either internal or the skeleton
+# (severity/confidence/location), which is strictly typed and never customizable because every
+# merge/report/dedup mechanic (sort, verdict, survivor choice, corroboration, location) reads it.
+CUSTOMIZABLE_SLOTS = ("title", "body", "recommendation", "category")
 
 
 class Location(BaseModel):
@@ -34,10 +42,17 @@ class Location(BaseModel):
     line_end: int = Field(ge=0)
 
 
-class Finding(BaseModel):
+# Strict, private schema-source models: they generate the default JSON schema
+# (`compose_review_schema` with no overrides) and strictly post-validate a default reviewer. They
+# are NOT carriers — findings are stored in the looser `Finding` below. Their name/docstring becomes
+# the model-facing schema `title`/`description`, so both are pinned to the clean pre-custom-schemas
+# text (via `title=` + a user-facing docstring) — never implementation notes, which would leak into
+# the schema every harness sees. (Only the internal `$defs` key differs from the old schema;
+# harnesses resolve `$ref` regardless.)
+class _DefaultFinding(BaseModel):
     """A single issue as emitted by a reviewer (no provenance yet)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", title="Finding")
 
     title: str = Field(min_length=1, max_length=140)
     body: str
@@ -48,8 +63,45 @@ class Finding(BaseModel):
     recommendation: str
 
 
-class ReviewOutput(BaseModel):
+class _DefaultReviewOutput(BaseModel):
     """The structured output contract for a single harness invocation."""
+
+    model_config = ConfigDict(extra="forbid", title="ReviewOutput")
+
+    verdict: Verdict
+    summary: str
+    findings: list[_DefaultFinding] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+
+
+class Finding(BaseModel):
+    """A single issue as emitted by a reviewer (no provenance yet).
+
+    The skeleton (severity/confidence/location) is strictly typed — every merge/report/dedup
+    mechanic reads only these, so they must always be present and well-formed. The descriptive slots
+    (`CUSTOMIZABLE_SLOTS`) and any reviewer-defined fields ride as extra (`extra="allow"`): a
+    reviewer's `custom-schemas` reshapes or drops them, and the per-reviewer JSON schema — not this
+    model — enforces their real shape at the harness boundary. This is why the pipeline is immune to
+    slot customization: the carrier only ever type-checks the skeleton and faithfully carries the
+    rest (title/body/recommendation/category live in `model_extra`)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    severity: Severity
+    confidence: float = Field(ge=0.0, le=1.0)
+    location: Location
+
+    def slot(self, key: str) -> object | None:
+        """A descriptive slot's value (title/body/recommendation/category + any custom field ride in
+        model_extra on this loose carrier), or None if the reviewer dropped it via custom-schemas.
+        The one place that knows slots live in model_extra — used by report + PR rendering."""
+        return (self.model_extra or {}).get(key)
+
+
+class ReviewOutput(BaseModel):
+    """The carrier for a single harness invocation's output. Top-level shape is fixed
+    (`extra="forbid"`); `findings` are the loose `Finding` above, so a custom-schema reviewer's
+    reshaped findings round-trip through here and `ReviewResult` unchanged."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -246,8 +298,64 @@ class RunManifest(BaseModel):
 
 
 def review_output_json_schema() -> dict:
-    """JSON Schema handed to harnesses that support structured output."""
-    return ReviewOutput.model_json_schema()
+    """The default review JSON Schema handed to harnesses — the shape with the built-in findings
+    slots. Equivalent to `compose_review_schema(None)`; kept as a named entry point because it's the
+    common case and the dedup/test call sites read it directly."""
+    return _DefaultReviewOutput.model_json_schema()
+
+
+def _finding_def(schema: dict) -> dict:
+    """The findings-item object in a review schema, resolved by following
+    `properties.findings.items.$ref` into `$defs` — robust to whatever pydantic names the def."""
+    ref = schema["properties"]["findings"]["items"]["$ref"]
+    return schema["$defs"][ref.rsplit("/", 1)[-1]]
+
+
+def compose_review_schema(custom_schemas: Mapping[str, dict | None] | None = None) -> dict:
+    """The per-reviewer review JSON Schema: the default, with each customized slot overridden (a
+    JSON Schema fragment) or dropped (None). The skeleton is never touched — only the
+    `CUSTOMIZABLE_SLOTS` — so the merge/report/dedup mechanics keep working across a mixed roster.
+
+    A no-op (None/empty) returns the byte-identical default schema, so a reviewer without
+    `custom-schemas` is indistinguishable from the pre-feature behaviour.
+    """
+    schema = deepcopy(review_output_json_schema())
+    if not custom_schemas:
+        return schema
+    finding = _finding_def(schema)
+    props: dict = finding["properties"]
+    required: list[str] = finding.get("required", [])
+    for slot, fragment in custom_schemas.items():
+        if fragment is None:  # drop: the reviewer omits this slot entirely
+            props.pop(slot, None)
+            if slot in required:
+                required.remove(slot)
+        else:  # override: the fragment fully replaces this slot's subschema
+            props[slot] = deepcopy(fragment)
+            if slot not in required:
+                required.append(slot)
+    finding["required"] = required
+    return schema
+
+
+def build_review_validator(schema: dict) -> Callable[[dict], None]:
+    """A post-validator: check a harness's output against the (frozen) review schema with a real
+    JSON-Schema engine. Validates every reviewer uniformly — the built-in shape AND a custom-schemas
+    reviewer's reshaped/dropped slots, inner fragment constraints (enums, ranges, required
+    sub-fields) included — so a drifting harness fails loudly (the base.py post-validation
+    invariant). This matters most for the prompt-mode harnesses, which have no provider-side schema
+    enforcement. Deriving it purely from the frozen schema keeps resume trivially correct: rebuild
+    from the frozen copy, never from live `REVIEWER.md`.
+
+    `validator_for` picks the validator matching the schema's declared JSON Schema draft — the
+    latest the library supports when `$schema` is absent (pydantic omits it), currently 2020-12 — so
+    this tracks the latest stable draft without hardcoding a version."""
+    validator = validator_for(schema)(schema)
+
+    def _validate(payload: dict) -> None:
+        validator.validate(payload)  # raises jsonschema.ValidationError on any mismatch
+
+    return _validate
 
 
 def duplicate_groups_json_schema() -> dict:

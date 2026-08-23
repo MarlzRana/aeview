@@ -85,8 +85,15 @@ def render_human(report: Report, *, gate: bool = False) -> str:
         if f.location.line_end != f.location.line_start:
             loc += f"-{f.location.line_end}"
         agree = f" (x{f.agreement})" if f.agreement > 1 else ""
-        lines.append(f"  - [{f.severity}] {f.title}{agree}")
-        lines.append(f"    {loc} :: {f.recommendation}")
+        # title/recommendation are descriptive slots a reviewer may reshape or drop via
+        # custom-schemas (they live in model_extra; skeleton is the only typed shape). Fall back
+        # gracefully when a reviewer omitted one; a reshaped value is stringified by the f-string.
+        title = f.slot("title")
+        lines.append(f"  - [{f.severity}] {title if title is not None else '(untitled)'}{agree}")
+        recommendation = f.slot("recommendation")
+        lines.append(
+            f"    {loc} :: {recommendation}" if recommendation is not None else f"    {loc}"
+        )
 
     if report.dedup.status == "failed":
         detail = "" if gate else f": {report.dedup.warning or report.dedup.reason}"

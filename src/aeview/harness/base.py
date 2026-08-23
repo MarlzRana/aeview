@@ -18,7 +18,7 @@ from shutil import which
 from typing import Literal, Protocol
 
 from ..process import TIMED_OUT, run_sync
-from ..schema import ReviewOutput, Usage
+from ..schema import ReviewOutput, Usage, build_review_validator, review_output_json_schema
 
 SchemaSupport = Literal["constrained", "validated", "prompt"]
 
@@ -103,8 +103,11 @@ class Adapter(Protocol):
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
-        """Invoke read-only under an arbitrary JSON Schema; the adapter owns schema delivery."""
+        """Invoke read-only under an arbitrary JSON Schema; the adapter owns schema delivery.
+        `validate` (optional) is a deep post-validator the adapter runs on the payload inside its
+        logging scope; None one-shots (the dedup caller)."""
         ...
 
     async def run(
@@ -115,13 +118,49 @@ class Adapter(Protocol):
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
-    ) -> HarnessOutput: ...
+        *,
+        schema: dict | None = None,
+    ) -> HarnessOutput:
+        """Run one review. `schema` is the per-reviewer review JSON Schema (None → the built-in
+        default); keyword-only so the dedup path and tests can omit it. Adapters delegate the whole
+        body to `run_review` — the only per-harness part is `run_structured`."""
+        ...
 
     def preflight(self) -> Preflight:
         """Doctor check: is this harness's binary resolvable and (where probeable) authed? The
         adapter is constructed via get_adapter() with its settings.overrideHarnessBinaries override
         already applied, so this reads the adapter's own resolved binary — no override arg."""
         ...
+
+
+async def run_review(
+    adapter: Adapter,
+    prompt: str,
+    model: str,
+    cwd: Path,
+    log_path: Path,
+    thinking: str | None,
+    timeout: float | None,
+    schema: dict | None,
+) -> HarnessOutput:
+    """The shared review path every adapter's `run` delegates to. Harness-agnostic: it defaults the
+    review schema, derives the matching validator, calls the adapter's own `run_structured` (the one
+    per-harness part — schema delivery + read-only), and builds the loose `ReviewOutput` carrier.
+    One home for the schema/validator/carrier logic so it can't drift across the four adapters."""
+    review_schema = schema or review_output_json_schema()
+    out = await adapter.run_structured(
+        prompt,
+        review_schema,
+        model,
+        cwd,
+        log_path,
+        thinking,
+        timeout,
+        validate=build_review_validator(review_schema),
+    )
+    return HarnessOutput(
+        review=ReviewOutput.model_validate(out.payload), usage=out.usage, raw=out.raw
+    )
 
 
 def default_preflight(adapter: Adapter) -> Preflight:

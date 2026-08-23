@@ -39,7 +39,7 @@ from claude_agent_sdk import (
 )
 
 from ..process import run_sync
-from ..schema import ReviewOutput, Usage, review_output_json_schema
+from ..schema import Usage
 from .base import (
     AUTH_PROBE_TIMEOUT,
     AdapterError,
@@ -49,6 +49,7 @@ from .base import (
     StructuredOutput,
     classify_transient,
     looks_transient,
+    run_review,
 )
 from .eventlog import EventLogWriter
 
@@ -154,19 +155,10 @@ class ClaudeCodeAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        *,
+        schema: dict | None = None,
     ) -> HarnessOutput:
-        out = await self.run_structured(
-            prompt,
-            review_output_json_schema(),
-            model,
-            cwd,
-            log_path,
-            thinking,
-            timeout,
-            validate=ReviewOutput.model_validate,
-        )
-        review = ReviewOutput.model_validate(out.payload)
-        return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+        return await run_review(self, prompt, model, cwd, log_path, thinking, timeout, schema)
 
     async def _consume(
         self,

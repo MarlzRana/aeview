@@ -9,6 +9,7 @@ source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "github-copilot-sdk" },
+    { name = "jsonschema" },
     { name = "openai-codex" },
     { name = "pathspec" },
     { name = "pydantic" },
@@ -28,6 +29,7 @@ dev = [
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.101" },
     { name = "github-copilot-sdk", specifier = ">=1.0.1" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "openai-codex", specifier = ">=0.144.4" },
     { name = "pathspec", specifier = ">=0.12" },
     { name = "pydantic", specifier = ">=2.7" },

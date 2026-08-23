@@ -36,7 +36,7 @@ from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from copilot.session import ReasoningEffort
 from copilot.session_events import AssistantMessageData, AssistantUsageData
 
-from ..schema import ReviewOutput, Usage, review_output_json_schema
+from ..schema import Usage
 from .base import (
     AdapterError,
     HarnessOutput,
@@ -44,6 +44,7 @@ from .base import (
     SchemaSupport,
     StructuredOutput,
     looks_transient,
+    run_review,
 )
 from .eventlog import EventLogWriter
 from .prompt_schema import MAX_ATTEMPTS, RETRY_SUFFIX, embed_schema, extract_json
@@ -88,8 +89,8 @@ class CopilotAdapter:
         timeout: float | None = None,
         validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
-        """`validate` (optional) is a deep schema check (e.g. ReviewOutput.model_validate) used by
-        the review path (`run`): it raises on a structurally-present-but-invalid payload (wrong
+        """`validate` (optional) is a deep schema check (the caller's validator) used by the review
+        path (`run` → `run_review`): it raises on a structurally-present-but-invalid payload (wrong
         enum/type) so that case re-prompts too. The generic dedup caller omits it and one-shots — a
         deep-invalid dedup payload degrades to the raw-union path."""
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
@@ -161,19 +162,10 @@ class CopilotAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        *,
+        schema: dict | None = None,
     ) -> HarnessOutput:
-        out = await self.run_structured(
-            prompt,
-            review_output_json_schema(),
-            model,
-            cwd,
-            log_path,
-            thinking,
-            timeout,
-            validate=ReviewOutput.model_validate,
-        )
-        review = ReviewOutput.model_validate(out.payload)
-        return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+        return await run_review(self, prompt, model, cwd, log_path, thinking, timeout, schema)
 
     async def _consume(
         self,

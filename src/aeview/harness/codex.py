@@ -39,7 +39,7 @@ from openai_codex import (
 from openai_codex.types import ReasoningEffort, TurnStatus
 
 from ..process import run_sync
-from ..schema import ReviewOutput, Usage, make_strict_schema, review_output_json_schema
+from ..schema import Usage, make_strict_schema
 from .base import (
     AUTH_PROBE_TIMEOUT,
     AdapterError,
@@ -48,6 +48,7 @@ from .base import (
     SchemaSupport,
     StructuredOutput,
     looks_transient,
+    run_review,
 )
 from .eventlog import EventLogWriter
 
@@ -104,7 +105,7 @@ class CodexAdapter:
         timeout: float | None = None,
         validate: Callable[[dict], object] | None = None,
     ) -> StructuredOutput:
-        """`validate` (optional) deep-checks the payload (ReviewOutput.model_validate) inside the
+        """`validate` (optional) deep-checks the payload (the caller's validator) inside the
         writer's scope so a schema-invalid result logs a terminal error, not a false success; the
         generic dedup caller omits it."""
         # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
@@ -176,19 +177,10 @@ class CodexAdapter:
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
+        *,
+        schema: dict | None = None,
     ) -> HarnessOutput:
-        out = await self.run_structured(
-            prompt,
-            review_output_json_schema(),
-            model,
-            cwd,
-            log_path,
-            thinking,
-            timeout,
-            validate=ReviewOutput.model_validate,
-        )
-        review = ReviewOutput.model_validate(out.payload)
-        return HarnessOutput(review=review, usage=out.usage, raw=out.raw)
+        return await run_review(self, prompt, model, cwd, log_path, thinking, timeout, schema)
 
     async def _consume(
         self,

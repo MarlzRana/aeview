@@ -59,7 +59,15 @@ from .runstore import (
     prune_runs,
     reconcile_interrupted,
 )
-from .schema import DedupPlan, Invocation, Report, RosterEntry, RunManifest, ScopeSpec
+from .schema import (
+    DedupPlan,
+    Invocation,
+    Report,
+    RosterEntry,
+    RunManifest,
+    ScopeSpec,
+    compose_review_schema,
+)
 from .scope import ResolvedScope, ScopeError, parse_scope, repo_root
 from .scope import resolve as resolve_scope
 
@@ -462,14 +470,21 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     prompt_by_reviewer = {
         r.name: compose_prompt(r, plan.bundle, full_diff_path) for r in plan.reviewers
     }
-    for reviewer_name, prompt in prompt_by_reviewer.items():
-        store.write_prompt(reviewer_name, prompt)
+    schema_by_reviewer = {r.name: compose_review_schema(r.custom_schemas) for r in plan.reviewers}
+    # Freeze each reviewer's schema BEFORE its prompt: resume keys on prompt.md, so writing
+    # schema.json first makes prompt-present ⟹ schema-present. A crash between the two atomic
+    # writes then never leaves a review to be resumed against the wrong (default) schema. Both are
+    # frozen so resume validates against byte-identical structure (not recomposed from REVIEWER.md).
+    for r in plan.reviewers:
+        store.write_review_schema(r.name, schema_by_reviewer[r.name])
+        store.write_prompt(r.name, prompt_by_reviewer[r.name])
 
     report = await _run_reviews_and_merge(
         store,
         manifest,
         plan.roster,
         prompt_by_reviewer,
+        schema_by_reviewer,
         cwd,
         settings.review_timeout_seconds,
         settings.override_harness_binaries,
@@ -496,17 +511,26 @@ async def _run_reviews_and_merge(
     manifest: RunManifest,
     entries: list[RosterEntry],
     prompt_by_reviewer: dict[str, str],
+    schema_by_reviewer: dict[str, dict],
     cwd: Path,
     timeout: float | None,
     override_harness_binaries: dict[str, str],
 ) -> Report:
     """Run the given roster entries (fresh run = all; resume = the non-done subset), then merge
-    *all* on-disk reviews. The shared core of `run` and `resume`: it reads the persisted prompts
-    + frozen bundle and re-merges via the run.json-pinned dedup plan, so completion truth comes
-    from the run dir, not the in-memory plan. The live binary overrides feed both the review
-    fan-out and the dedup harness."""
+    *all* on-disk reviews. The shared core of `run` and `resume`: it reads the persisted prompts +
+    frozen schemas + frozen bundle and re-merges via the run.json-pinned dedup plan, so completion
+    truth comes from the run dir, not the in-memory plan. The live binary overrides feed both the
+    review fan-out and the dedup harness."""
     if entries:
-        await fan_out(store, entries, prompt_by_reviewer, cwd, timeout, override_harness_binaries)
+        await fan_out(
+            store,
+            entries,
+            prompt_by_reviewer,
+            cwd,
+            timeout,
+            override_harness_binaries,
+            schema_by_reviewer,
+        )
     report = await merge_reviews(
         store.read_reviews(), _merge_settings(manifest.dedup, override_harness_binaries), store, cwd
     )
@@ -726,11 +750,23 @@ def resume(
             _emit_report(report, json_out)
 
     # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
+    reviewer_names = list(dict.fromkeys(e.reviewer for e in pending))
     try:
-        prompts = {r: store.read_prompt(r) for r in dict.fromkeys(e.reviewer for e in pending)}
+        prompts = {r: store.read_prompt(r) for r in reviewer_names}
     except OSError as exc:
         typer.echo(f"aeview: cannot resume run '{rid}': {exc}", err=True)
         raise typer.Exit(EXIT_ERROR) from exc
+    # Reuse each reviewer's frozen finding schema. A run created before custom-schemas has no
+    # schema.json; a missing (or unreadable/corrupt) one falls back to the built-in default (omit
+    # it), so an older run still resumes. A present, valid one is reused verbatim — the
+    # byte-identical-resume invariant. (OSError = missing/unreadable, ValueError = bad JSON — the
+    # tolerant read pattern runstore uses; atomic writes make an in-house corrupt file unlikely.)
+    schemas: dict[str, dict] = {}
+    for r in reviewer_names:
+        try:
+            schemas[r] = store.read_review_schema(r)
+        except OSError, ValueError:
+            continue
 
     # Take ownership: mark running under this process so liveness tracks it; clear the old finish.
     # Drop the stale report so a crash mid-resume can't leave `result`/`status --wait` returning
@@ -750,6 +786,7 @@ def resume(
             manifest,
             pending,
             prompts,
+            schemas,
             cwd,
             settings.review_timeout_seconds,
             settings.override_harness_binaries,
