@@ -12,6 +12,7 @@ from aeview.cli import (
     _dedup_plan,
     _display_path,
     _Plan,
+    _PlannedDedup,
     _render_dry_run,
     _resolve_all_lenient,
     _split_reviewers,
@@ -21,7 +22,7 @@ from aeview.config import HarnessInstance, Settings, runs_dir
 from aeview.github import PrTarget
 from aeview.resolve import DedupPromptSource, ResolveError
 from aeview.runstore import RunStore
-from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
+from aeview.schema import DedupPlan, Invocation, RosterEntry, RunManifest, ScopeSpec
 from conftest import commit, make_reviewer
 
 _HARNESS = [{"harness": "claude-code", "model": "opus"}]
@@ -432,7 +433,7 @@ def _dry_plan(
     thinking: str | None = None,
     ignored: list[str] | None = None,
     auto_activated: list[str] | None = None,
-    dedup_source: DedupPromptSource | None = None,
+    dedup: _PlannedDedup | None = None,
 ) -> _Plan:
     roster = [
         RosterEntry(
@@ -454,12 +455,12 @@ def _dry_plan(
         bundle=bundle,
         ignored=ignored or [],
         auto_activated=auto_activated or [],
-        dedup_source=dedup_source,
+        dedup=dedup,
     )
 
 
 def test_dry_run_render_single_review_skips_dedup():
-    out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None))
+    out = _render_dry_run(_dry_plan(1))
     assert "scope: branch (base main)" in out
     assert "bundle: inline, 123 bytes" in out
     assert "roster (1 review):" in out  # singular
@@ -467,46 +468,49 @@ def test_dry_run_render_single_review_skips_dedup():
 
 
 def test_dry_run_render_lists_ignored_files():
-    out = _render_dry_run(_dry_plan(1, ignored=["dist/x.js", "uv.lock"]), Settings())
+    out = _render_dry_run(_dry_plan(1, ignored=["dist/x.js", "uv.lock"]))
     assert "ignored (2 via .aeviewignore): dist/x.js, uv.lock" in out
 
 
 def test_dry_run_render_no_ignored_shows_dash():
-    out = _render_dry_run(_dry_plan(1), Settings())  # the common case: nothing ignored
+    out = _render_dry_run(_dry_plan(1))  # the common case: nothing ignored
     assert "ignored (0 via .aeviewignore): —" in out
 
 
 def test_dry_run_render_lists_auto_activated():
-    out = _render_dry_run(_dry_plan(1, auto_activated=["py", "docs"]), Settings())
+    out = _render_dry_run(_dry_plan(1, auto_activated=["py", "docs"]))
     assert "auto-activated (2 via auto-activate-paths): py, docs" in out
 
 
 def test_dry_run_render_no_auto_activated_shows_dash():
-    out = _render_dry_run(_dry_plan(1), Settings())  # explicit/no-match: nothing auto-activated
+    out = _render_dry_run(_dry_plan(1))  # explicit/no-match: nothing auto-activated
     assert "auto-activated (0 via auto-activate-paths): —" in out
 
 
 def test_dry_run_render_multi_with_dedup_harness():
-    src = DedupPromptSource(text="x", source=Path("/repo/.aeview/DEDUPLICATION.md"))
-    out = _render_dry_run(_dry_plan(2, dedup_source=src), _settings_with_dedup())
+    planned = _PlannedDedup(
+        plan=DedupPlan(id="claude-code-opus", harness="claude-code", model="opus"),
+        source=DedupPromptSource(text="x", source=Path("/repo/.aeview/DEDUPLICATION.md")),
+    )
+    out = _render_dry_run(_dry_plan(2, dedup=planned))
     assert "roster (2 reviews):" in out  # plural
     assert "dedup: claude-code opus" in out
     assert "dedup prompt: /repo/.aeview/DEDUPLICATION.md" in out
 
 
 def test_dry_run_render_multi_without_dedup_harness():
-    out = _render_dry_run(_dry_plan(2), Settings(deduplication_harness=None))
+    out = _render_dry_run(_dry_plan(2))  # roster > 1 but no planned dedup -> not configured
     assert "dedup: not configured" in out
 
 
 def test_dry_run_render_lists_roster_entries():
     # The per-entry roster preview is the point of --dry-run; pin one entry line + thinking suffix.
-    out = _render_dry_run(_dry_plan(1, thinking="high"), Settings(deduplication_harness=None))
+    out = _render_dry_run(_dry_plan(1, thinking="high"))
     assert "  - r__h0  (claude-code m0 thinking=high)" in out
 
 
 def test_dry_run_render_self_collect_mode_label():
-    out = _render_dry_run(_dry_plan(1, mode="self-collect"), Settings(deduplication_harness=None))
+    out = _render_dry_run(_dry_plan(1, mode="self-collect"))
     assert "bundle: self-collect, 123 bytes" in out
 
 
@@ -524,7 +528,7 @@ def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
 
 def test_dry_run_render_includes_post_comments_target():
     target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
-    out = _render_dry_run(_dry_plan(1), Settings(deduplication_harness=None), pr_target=target)
+    out = _render_dry_run(_dry_plan(1), pr_target=target)
     assert "post-comments: will post a review to PR #7" in out
 
 
@@ -598,7 +602,6 @@ def test_post_comments_skips_post_when_no_reviews_contributed(
 def test_merge_settings_carries_the_pinned_dedup_plan():
     # run/resume re-merge with the harness frozen in run.json, never current settings.json.
     from aeview.cli import _merge_settings
-    from aeview.schema import DedupPlan
 
     plan = DedupPlan(id="x", harness="codex", model="gpt-5.5", thinking="high")
     settings = _merge_settings(plan, {"codex": "/x/codex"})

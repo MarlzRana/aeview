@@ -215,7 +215,7 @@ def run(
         raise typer.Exit(EXIT_ERROR) from exc
 
     if dry_run:
-        typer.echo(_render_dry_run(plan, settings, pr_target))
+        typer.echo(_render_dry_run(plan, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
@@ -351,6 +351,16 @@ def _dedup_plan(roster: list[RosterEntry], settings: Settings) -> DedupPlan | No
 
 
 @dataclass(slots=True)
+class _PlannedDedup:
+    """The dedup this run will perform: the harness plan pinned in run.json plus the walk-up-
+    resolved prompt frozen beside it. One nullable value on the plan (present iff the roster can
+    dedup) — so "will we dedup, and with what" can't drift out of sync across call sites."""
+
+    plan: DedupPlan  # harness identity recorded in run.json (its prompt_source already set)
+    source: DedupPromptSource  # the frozen prompt text + the file the walk-up chose
+
+
+@dataclass(slots=True)
 class _Plan:
     """The resolved, side-effect-free run plan shared by a real run and `--dry-run`."""
 
@@ -360,10 +370,11 @@ class _Plan:
     bundle: Bundle
     ignored: list[str]  # paths excluded by .aeviewignore (surfaced; never silently dropped)
     auto_activated: list[str]  # reviewers auto mode added beyond default (empty otherwise)
-    # The walk-up-resolved dedup prompt, or None when this roster can't dedup (<=1 review or no
-    # deduplicationHarness). Resolved here in the plan phase so a read error surfaces as a clean
-    # ResolveError (caught by `run`), and so `--dry-run` previews the same file a real run freezes.
-    dedup_source: DedupPromptSource | None
+    # The planned dedup (harness plan + walk-up-resolved prompt), or None when this roster can't
+    # dedup (<=1 review or no deduplicationHarness). Resolved here in the plan phase so a prompt
+    # read error surfaces as a clean ResolveError (caught by `run`), and so `--dry-run` previews the
+    # same file a real run freezes.
+    dedup: _PlannedDedup | None
 
 
 def _plan_run(
@@ -404,8 +415,14 @@ def _plan_run(
         raise ResolveError(
             "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
         )
-    # Resolve the dedup prompt only when the roster can actually dedup (same gate as _dedup_plan).
-    dedup_source = resolve_dedup_prompt(cwd) if _dedup_plan(roster, settings) is not None else None
+    # Resolve the dedup plan + its prompt once, only when the roster can actually dedup; bundle them
+    # so downstream never recomputes the harness plan or juggles two coupled optionals.
+    dedup_plan = _dedup_plan(roster, settings)
+    dedup: _PlannedDedup | None = None
+    if dedup_plan is not None:
+        source = resolve_dedup_prompt(cwd)
+        dedup_plan.prompt_source = source.source
+        dedup = _PlannedDedup(plan=dedup_plan, source=source)
     return _Plan(
         names=[r.name for r in reviewers],  # resolve_reviewer pins name == dir == frontmatter name
         reviewers=reviewers,
@@ -413,7 +430,7 @@ def _plan_run(
         bundle=build_bundle(resolved),
         ignored=ignored,
         auto_activated=auto_activated,
-        dedup_source=dedup_source,
+        dedup=dedup,
     )
 
 
@@ -462,13 +479,11 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     store = RunStore.create(new_run_id())
     typer.echo(f"run {store.run_id}", err=True)
 
-    # Pin + freeze the walk-up-resolved dedup prompt (present iff this roster can dedup) BEFORE the
+    # Freeze the walk-up-resolved dedup prompt (present iff this roster can dedup) BEFORE the
     # manifest that references it, so a crash can never leave a manifest pinning dedup without the
     # frozen prompt beside it — the byte-identical-resume invariant depends on that copy existing.
-    dedup_plan = _dedup_plan(plan.roster, settings)
-    if dedup_plan is not None and plan.dedup_source is not None:
-        dedup_plan.prompt_source = plan.dedup_source.source
-        store.write_dedup_prompt_source(plan.dedup_source.text)
+    if plan.dedup is not None:
+        store.write_dedup_prompt_source(plan.dedup.source.text)
 
     manifest = RunManifest(
         run_id=store.run_id,
@@ -477,7 +492,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
         overall="running",
         invocation=Invocation(reviewers=plan.names, scope=plan.bundle.scope),
         roster=plan.roster,
-        dedup=dedup_plan,
+        dedup=plan.dedup.plan if plan.dedup is not None else None,
         cwd=cwd,  # resume re-runs from here, not the caller's cwd
         pid=os.getpid(),  # recorded so liveness can tell a live run from a crash
     )
@@ -577,7 +592,7 @@ async def _run_reviews_and_merge(
     return report
 
 
-def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None = None) -> str:
+def _render_dry_run(plan: _Plan, pr_target: PrTarget | None = None) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
     ignored_display = ", ".join(plan.ignored) or "—"
@@ -594,11 +609,9 @@ def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None 
     for entry in plan.roster:
         thinking = f" thinking={entry.thinking}" if entry.thinking else ""
         lines.append(f"  - {entry.id}  ({entry.harness} {entry.model}{thinking})")
-    dedup = _dedup_plan(plan.roster, settings)
-    if dedup is not None:
-        lines.append(f"dedup: {dedup.harness} {dedup.model}")
-        if plan.dedup_source is not None:  # guaranteed when dedup is not None (same gate)
-            lines.append(f"dedup prompt: {plan.dedup_source.source}")
+    if plan.dedup is not None:
+        lines.append(f"dedup: {plan.dedup.plan.harness} {plan.dedup.plan.model}")
+        lines.append(f"dedup prompt: {plan.dedup.source.source}")
     elif len(plan.roster) <= 1:
         lines.append("dedup: skipped (single review)")
     else:
