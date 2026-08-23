@@ -17,7 +17,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
-from jsonschema import Draft202012Validator
+from jsonschema.validators import validator_for
 from pydantic import BaseModel, ConfigDict, Field
 
 Severity = Literal["critical", "high", "medium", "low"]
@@ -345,8 +345,12 @@ def build_review_validator(schema: dict) -> Callable[[dict], None]:
     sub-fields) included — so a drifting harness fails loudly (the base.py post-validation
     invariant). This matters most for the prompt-mode harnesses, which have no provider-side schema
     enforcement. Deriving it purely from the frozen schema keeps resume trivially correct: rebuild
-    from the frozen copy, never from live `REVIEWER.md`."""
-    validator = Draft202012Validator(schema)
+    from the frozen copy, never from live `REVIEWER.md`.
+
+    `validator_for` picks the validator matching the schema's declared JSON Schema draft — the
+    latest the library supports when `$schema` is absent (pydantic omits it), currently 2020-12 — so
+    this tracks the latest stable draft without hardcoding a version."""
+    validator = validator_for(schema)(schema)
 
     def _validate(payload: dict) -> None:
         validator.validate(payload)  # raises jsonschema.ValidationError on any mismatch

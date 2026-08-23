@@ -284,7 +284,7 @@ def _finding_md(f: MergedFinding, run_id: str, *, show_location: bool) -> str:
     blocks = [
         _BADGE,
         head,
-        _clip(_sanitize(body.strip()), run_id) if body is not None else None,
+        _clip(_sanitize(body.strip()), run_id) if body else None,
         f"**Fix:** {_clip(_sanitize(recommendation.strip()), run_id)}" if recommendation else None,
         _provenance(f),
         _FINDING_MARKER.format(run_id=run_id, finding_id=f.id),

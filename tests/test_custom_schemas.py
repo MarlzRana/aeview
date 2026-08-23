@@ -47,6 +47,7 @@ from aeview.schema import (
     UsageBreakdown,
     build_review_validator,
     compose_review_schema,
+    make_strict_schema,
     review_output_json_schema,
 )
 
@@ -571,6 +572,7 @@ async def test_merge_survives_reserved_key_collision(aeview_home):
             "title": "t",
             "id": "harness-supplied",
             "agreement": 99,
+            "sources": ["junk"],
         }
     )
     result = ReviewResult(
@@ -589,6 +591,8 @@ async def test_merge_survives_reserved_key_collision(aeview_home):
     assert len(report.findings) == 1
     assert report.findings[0].id == "f1"  # aeview's run-local id, not the harness-supplied one
     assert report.findings[0].agreement == 1  # aeview's, not the emitted 99
+    # sources is aeview's provenance, not the harness-supplied junk
+    assert [s.review for s in report.findings[0].sources] == ["r__claude-code-m"]
 
 
 def test_run_freezes_composed_schema(aeview_home, git_repo, stub_claude, monkeypatch):
@@ -691,3 +695,76 @@ def test_github_finding_md_clips_unbounded_custom_title():
     )
     md = _finding_md(finding, "run1", show_location=False)
     assert "truncated" in md  # the unbounded custom title was length-capped before posting
+
+
+def test_github_finding_md_renders_present_custom_category():
+    finding = MergedFinding.model_validate(
+        {
+            "id": "f1",
+            "severity": "low",
+            "confidence": 0.5,
+            "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+            "title": "t",
+            "category": "perf",  # a custom category value
+            "sources": [{"review": "r__x", "severity": "low", "confidence": 0.5}],
+            "agreement": 1,
+        }
+    )
+    md = _finding_md(finding, "run1", show_location=False)
+    assert "perf" in md  # a present custom category is rendered in the header
+
+
+def test_make_strict_schema_on_composed_custom_schema():
+    # The codex constrained path strictifies the composed schema; a custom fragment must survive:
+    # every object required + additionalProperties:false, recursively, so codex accepts it.
+    schema = make_strict_schema(compose_review_schema({"body": _RUBRIC, "recommendation": None}))
+    fd = _finding_props(schema)
+    assert fd["additionalProperties"] is False
+    assert set(fd["required"]) == set(fd["properties"])  # recommendation dropped, the rest required
+    assert "recommendation" not in fd["properties"]
+    body = fd["properties"]["body"]  # the inlined rubric object is strictified too
+    assert body["additionalProperties"] is False
+    assert set(body["required"]) == set(body["properties"])
+
+
+def test_resume_tolerates_corrupt_frozen_schema(aeview_home, monkeypatch):
+    # A corrupt schema.json (bad JSON) must not crash resume — it falls back to the default (omit).
+    import aeview.cli as cli
+
+    store = RunStore.create("cx")
+    store.write_prompt("r", "P")
+    (store.reviewers_dir / "r" / "schema.json").write_text("{not json")
+    store.write_manifest(
+        RunManifest(
+            run_id="cx",
+            created_at="2026-08-01T00:00:00Z",
+            overall="interrupted",
+            invocation=Invocation(reviewers=["r"], scope=ScopeSpec(type="working-tree")),
+            roster=[
+                RosterEntry(id="r__claude-code-m", reviewer="r", harness="claude-code", model="m")
+            ],
+            dedup=None,
+        )
+    )
+    store.write_review(
+        ReviewResult(
+            id="r__claude-code-m", reviewer="r", harness="claude-code", model="m", status="failed"
+        )
+    )
+    captured: dict = {}
+
+    async def fake_fan_out(
+        s,
+        roster,
+        prompts,
+        cwd,
+        timeout=None,
+        override_harness_binaries=None,
+        schema_by_reviewer=None,
+    ):
+        captured["schemas"] = schema_by_reviewer
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
+    CliRunner().invoke(app, ["resume", "cx"])
+    assert captured["schemas"] == {}  # corrupt schema omitted -> default fallback, no crash
