@@ -1,55 +1,62 @@
 [build-system]
-build-backend = "uv_build"
 requires = ["uv_build>=0.11,<0.12"]
-
-[dependency-groups]
-dev = [
-  "pyright>=1.1.380",
-  "pytest-asyncio>=0.23",
-  "pytest>=8",
-  "ruff>=0.6"
-]
+build-backend = "uv_build"
 
 [project]
-authors = [{name = "MarlzRana"}]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Environment :: Console",
-  "Intended Audience :: Developers",
-  "Operating System :: MacOS",
-  "Operating System :: POSIX :: Linux",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.14",
-  "Topic :: Software Development :: Quality Assurance"
-]
-dependencies = [
-  "claude-agent-sdk>=0.2.101",
-  "github-copilot-sdk>=1.0.1",
-  # Validate harness output against a reviewer's (possibly custom) finding schema. Already in the
-  # tree transitively (claude-agent-sdk -> mcp), but declared directly so the import is guaranteed.
-  "jsonschema>=4.26",
-  "openai-codex>=0.144.4",
-  "pathspec>=0.12",
-  "pydantic>=2.7",
-  "pyyaml>=6",
-  "typer>=0.12"
-]
-description = "Fan code reviewers across multiple agent harnesses and merge one verdict."
-keywords = ["agents", "ai", "cli", "code-review"]
-license = "MIT"
-license-files = ["LICENSE"]
 name = "aeview"
+version = "0.0.4"
+description = "Fan code reviewers across multiple agent harnesses and merge one verdict."
 readme = "README.md"
 requires-python = ">=3.14"
-version = "0.0.4"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "MarlzRana" }]
+keywords = ["code-review", "ai", "agents", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pyyaml>=6",
+    "pathspec>=0.12",
+    # Validate harness output against a reviewer's (possibly custom) finding schema. Already in the
+    # tree transitively (claude-agent-sdk -> mcp), but declared directly so the import is guaranteed.
+    "jsonschema>=4.26",
+    "claude-agent-sdk>=0.2.101",
+    "openai-codex>=0.144.4",
+    "github-copilot-sdk>=1.0.1",
+]
 
 [project.scripts]
 aeview = "aeview.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/MarlzRana/aeview"
-Issues = "https://github.com/MarlzRana/aeview/issues"
 Repository = "https://github.com/MarlzRana/aeview"
+Issues = "https://github.com/MarlzRana/aeview/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -60,10 +67,3 @@ typeCheckingMode = "standard"
 asyncio_mode = "auto"
 markers = ["smoke: live tests that hit real harness CLIs (local-only, never CI)"]
 testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 100
-src = ["src", "tests"]
-
-[tool.ruff.lint]
-select = ["B", "E", "F", "I", "SIM", "UP"]
