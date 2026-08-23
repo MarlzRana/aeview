@@ -58,13 +58,20 @@ def _carry(finding: Finding) -> dict:
 
 
 async def merge_reviews(
-    results: list[ReviewResult], settings: Settings, store: RunStore, cwd: Path
+    results: list[ReviewResult],
+    settings: Settings,
+    store: RunStore,
+    cwd: Path,
+    dedup_prompt: str | None = None,
+    dedup_prompt_source: Path | None = None,
 ) -> Report:
     done = [r for r in results if r.status == "done"]
     failed = [r for r in results if r.status != "done"]
 
     pool, by_id = _build_pool(done)
-    dedup, findings, dedup_usage = await _dedup_and_apply(pool, by_id, done, settings, store, cwd)
+    dedup, findings, dedup_usage = await _dedup_and_apply(
+        pool, by_id, done, settings, store, cwd, dedup_prompt, dedup_prompt_source
+    )
     findings.sort(key=_finding_sort_key)
 
     reviews_usage = _sum_usage(done)
@@ -99,6 +106,8 @@ async def _dedup_and_apply(
     settings: Settings,
     store: RunStore,
     cwd: Path,
+    dedup_prompt: str | None,
+    dedup_prompt_source: Path | None,
 ) -> tuple[Dedup, list[MergedFinding], Usage]:
     # Dedup is meaningful only with >1 contributing review (the corroboration signal) *and*
     # >1 finding (something that could be a duplicate); otherwise pass through unchanged and
@@ -125,12 +134,15 @@ async def _dedup_and_apply(
         cwd,
         DEDUP_TIMEOUT_S,
         binary_override=settings.override_harness_binaries.get(instance.harness),
+        dedup_prompt=dedup_prompt,
+        prompt_source=dedup_prompt_source,
     )
     if outcome.status != "ok":
         return (
             Dedup(
                 status="failed",
                 harness=outcome.harness_id,
+                prompt_source=dedup_prompt_source,
                 reason=outcome.reason,
                 warning=outcome.warning,
             ),
@@ -138,7 +150,7 @@ async def _dedup_and_apply(
             outcome.usage,
         )
     return (
-        Dedup(status="ok", harness=outcome.harness_id),
+        Dedup(status="ok", harness=outcome.harness_id, prompt_source=dedup_prompt_source),
         _apply_groups(outcome.groups, pool, by_id),
         outcome.usage,
     )

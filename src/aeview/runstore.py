@@ -335,6 +335,18 @@ class RunStore:
     def dedup_log_path(self, instance_id: str) -> Path:
         return self._dedup_dir(instance_id) / "dedup.log"
 
+    # --- dedup/DEDUPLICATION.md (the frozen source prompt; one per run, harness-independent) ---
+    def write_dedup_prompt_source(self, text: str) -> None:
+        """Freeze the walk-up-resolved dedup prompt at run start so a re-merge on resume re-reads
+        the exact bytes instead of re-discovering. Run-level (not per-instance): the source is
+        chosen from the run's cwd, independent of which harness runs the dedup call."""
+        path = self.dir / "dedup" / "DEDUPLICATION.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, text)
+
+    def read_dedup_prompt_source(self) -> str:
+        return (self.dir / "dedup" / "DEDUPLICATION.md").read_text("utf-8")
+
     # --- report.json (written last) ---
     def write_report(self, report: Report) -> None:
         atomic_write_text(self.dir / "report.json", report.model_dump_json(indent=2))

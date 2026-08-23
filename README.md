@@ -332,11 +332,20 @@ issues).
 
 ### Customizing the judge
 
-The judge's full instructions are a prompt file seeded to **`~/.aeview/DEDUPLICATION.md`** on first
-run — write-if-absent, so your edits are never clobbered. Edit it to tune how aggressively findings
-merge (or how `survivor` is chosen); any YAML frontmatter is stripped before it's sent to the
-harness. (Leaving `deduplicationHarness` unset leaves findings ungrouped — but aeview reports that
-as a `failed` dedup with a warning, not a silent off-switch; see below.)
+The judge's full instructions live in a **`DEDUPLICATION.md`** prompt file, discovered by the same
+walk-up as reviewers: aeview climbs from your cwd to home looking for `<dir>/.aeview/DEDUPLICATION.md`,
+and **first match wins**. So a repo can check in `.aeview/DEDUPLICATION.md` to tailor grouping to its
+domain — e.g. loosen the code-centric "same root cause at the same location" wording for a docs or
+LLM-wiki panel — and it shadows your personal one. Your home **`~/.aeview/DEDUPLICATION.md`** is
+seeded on first run (write-if-absent, so edits are never clobbered) and is the always-present
+fallback when nothing nearer is found. Any YAML frontmatter is stripped before it's sent to the
+harness.
+
+The resolved prompt is **frozen** into the run at start (`dedup/DEDUPLICATION.md`) and read back at
+merge time, so a `resume` re-groups against the exact bytes the run began with — never a
+since-edited file. `aeview doctor` reports which `DEDUPLICATION.md` resolves from your cwd, and
+`aeview run --dry-run` previews it. (Leaving `deduplicationHarness` unset leaves findings ungrouped —
+but aeview reports that as a `failed` dedup with a warning, not a silent off-switch; see below.)
 
 ### When dedup is skipped or fails
 
@@ -459,6 +468,7 @@ runs/<id>/
   reviewers/<reviewer>/<instance>/
     review.json                          # that review's findings + status + usage
     review.log                           # raw harness-SDK event stream (JSONL)
+  dedup/DEDUPLICATION.md                 # the walk-up-resolved judge prompt, frozen at run start
   dedup/<instance>/result.json           # the dedup judge's grouping decision
   report.json                            # the merged verdict
 ```

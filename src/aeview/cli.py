@@ -46,6 +46,7 @@ from .resolve import (
     build_roster,
     discover_reviewer_sources,
     discover_reviewers,
+    resolve_dedup_prompt,
     resolve_reviewer,
 )
 from .runstore import (
@@ -213,7 +214,14 @@ def run(
         raise typer.Exit(EXIT_ERROR) from exc
 
     if dry_run:
-        typer.echo(_render_dry_run(plan, settings, pr_target))
+        # Preview the dedup prompt the run would freeze (a file read; nothing persisted). Resolved
+        # here, not in the pure renderer, and only when the roster can actually dedup.
+        dedup_source = (
+            resolve_dedup_prompt(cwd).source
+            if _dedup_plan(plan.roster, settings) is not None
+            else None
+        )
+        typer.echo(_render_dry_run(plan, settings, dedup_source, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
@@ -453,6 +461,14 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     store = RunStore.create(new_run_id())
     typer.echo(f"run {store.run_id}", err=True)
 
+    # Resolve + freeze the dedup prompt only when this run can dedup (roster > 1 + a harness). The
+    # source is chosen by walk-up from the run's cwd and pinned in run.json, and its text is frozen
+    # below so a re-merge on resume is byte-identical, never re-read from a since-edited file.
+    dedup_plan = _dedup_plan(plan.roster, settings)
+    dedup_source = resolve_dedup_prompt(cwd) if dedup_plan is not None else None
+    if dedup_plan is not None and dedup_source is not None:
+        dedup_plan.prompt_source = dedup_source.source
+
     manifest = RunManifest(
         run_id=store.run_id,
         created_at=now_iso(),
@@ -460,12 +476,14 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
         overall="running",
         invocation=Invocation(reviewers=plan.names, scope=plan.bundle.scope),
         roster=plan.roster,
-        dedup=_dedup_plan(plan.roster, settings),
+        dedup=dedup_plan,
         cwd=cwd,  # resume re-runs from here, not the caller's cwd
         pid=os.getpid(),  # recorded so liveness can tell a live run from a crash
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
+    if dedup_source is not None:
+        store.write_dedup_prompt_source(dedup_source.text)
 
     prompt_by_reviewer = {
         r.name: compose_prompt(r, plan.bundle, full_diff_path) for r in plan.reviewers
@@ -531,8 +549,22 @@ async def _run_reviews_and_merge(
             override_harness_binaries,
             schema_by_reviewer,
         )
+    # The dedup prompt was frozen at run start (dedup/DEDUPLICATION.md); read it back so a re-merge
+    # on resume uses the exact bytes, never re-discovering from a since-edited file. Absent or
+    # unreadable (an older run, or one that never pinned a dedup plan) -> None, and dedup falls back
+    # to a live home read. OSError = missing/unreadable, ValueError = bad UTF-8 (the tolerant read).
+    try:
+        dedup_prompt = store.read_dedup_prompt_source()
+    except OSError, ValueError:
+        dedup_prompt = None
+    dedup_prompt_source = manifest.dedup.prompt_source if manifest.dedup else None
     report = await merge_reviews(
-        store.read_reviews(), _merge_settings(manifest.dedup, override_harness_binaries), store, cwd
+        store.read_reviews(),
+        _merge_settings(manifest.dedup, override_harness_binaries),
+        store,
+        cwd,
+        dedup_prompt,
+        dedup_prompt_source,
     )
     store.write_report(report)
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"
@@ -541,7 +573,12 @@ async def _run_reviews_and_merge(
     return report
 
 
-def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None = None) -> str:
+def _render_dry_run(
+    plan: _Plan,
+    settings: Settings,
+    dedup_prompt_source: Path | None = None,
+    pr_target: PrTarget | None = None,
+) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
     ignored_display = ", ".join(plan.ignored) or "—"
@@ -561,6 +598,8 @@ def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None 
     dedup = _dedup_plan(plan.roster, settings)
     if dedup is not None:
         lines.append(f"dedup: {dedup.harness} {dedup.model}")
+        if dedup_prompt_source is not None:  # the DEDUPLICATION.md the walk-up would freeze
+            lines.append(f"dedup prompt: {dedup_prompt_source}")
     elif len(plan.roster) <= 1:
         lines.append("dedup: skipped (single review)")
     else:

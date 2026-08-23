@@ -443,7 +443,7 @@ async def test_dedup_survivor_keeps_reshaped_body(aeview_home, monkeypatch):
             next_steps=[],
         )
 
-    async def fake_run_dedup(pool, instance, store, cwd, timeout, binary_override=None):
+    async def fake_run_dedup(pool, instance, store, cwd, timeout, binary_override=None, **_kwargs):
         return DedupOutcome("ok", [DuplicateGroup(survivor="f1", duplicates=["f2"])], Usage(), "h")
 
     monkeypatch.setattr(merge_mod, "run_dedup", fake_run_dedup)
