@@ -12,15 +12,16 @@ the frontmatter `name`.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .config import HarnessInstance, Settings, split_frontmatter
-from .schema import RosterEntry
+from .schema import CUSTOMIZABLE_SLOTS, RosterEntry
 
 REVIEWER_FILE = "REVIEWER.md"
 _AEVIEW_DIR = ".aeview"
@@ -28,6 +29,12 @@ _REVIEWERS = "reviewers"
 # Names that can't be reviewers because they're CLI keywords. `all` is the bulk-sweep
 # keyword for --reviewers, so a reviewer named `all` would be unreachable by name.
 RESERVED_REVIEWER_NAMES = {"all"}
+
+# Bounds on a user-supplied custom-schema fragment. The reviewer is a trusted checked-in artifact,
+# but the fragment is fed to make_strict_schema (which recurses) and embedded in every harness
+# prompt, so cap its size/depth and forbid $ref (no remote/recursive resolution in this build).
+_MAX_FRAGMENT_NODES = 512
+_MAX_FRAGMENT_DEPTH = 12
 
 
 class ResolveError(Exception):
@@ -56,6 +63,11 @@ class ReviewerFrontMatter(BaseModel):
     # Globs that opt this reviewer into auto mode: a bare `aeview run` activates it when a changed
     # file matches (consumed by activate.select_auto_reviewers). Validated here; kebab-case alias.
     auto_activate_paths: list[str] | None = Field(default=None, alias="auto-activate-paths")
+    # Per-slot overrides of the finding output schema. Keys are a closed set (CUSTOMIZABLE_SLOTS);
+    # each value is an inline JSON Schema object, a path to a `.json` schema file (relative to the
+    # reviewer dir), or null to drop the slot. The skeleton is never customizable. Resolved (paths
+    # read, bounds checked) in `_load_reviewer`; kebab-case alias.
+    custom_schemas: dict[str, object] | None = Field(default=None, alias="custom-schemas")
 
     @model_validator(mode="after")
     def _harnesses_present_means_nonempty(self) -> ReviewerFrontMatter:
@@ -69,6 +81,26 @@ class ReviewerFrontMatter(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _custom_schemas_shape(self) -> ReviewerFrontMatter:
+        # Shape-only here (keys ∈ the closed slot set; each value a mapping / path / null); the
+        # path read + fragment sanitize happen in _load_reviewer, which has the reviewer dir.
+        if self.custom_schemas is None:
+            return self
+        unknown = sorted(set(self.custom_schemas) - set(CUSTOMIZABLE_SLOTS))
+        if unknown:
+            raise ValueError(
+                f"custom-schemas keys must be among {list(CUSTOMIZABLE_SLOTS)}; "
+                f"got unsupported {unknown} (the skeleton severity/confidence/location "
+                f"is never customizable)"
+            )
+        for slot, value in self.custom_schemas.items():
+            if not (value is None or isinstance(value, dict | str)):
+                raise ValueError(
+                    f"custom-schemas.{slot} must be a JSON Schema object, a path to one, or null"
+                )
+        return self
+
 
 @dataclass(slots=True)
 class Reviewer:
@@ -77,6 +109,9 @@ class Reviewer:
     body: str
     source: Path  # the reviewer directory the prompt was loaded from
     harnesses: list[HarnessRef]
+    # Resolved per-slot finding-schema overrides: slot -> JSON Schema fragment, or slot -> None to
+    # drop it. Empty when the reviewer declares no `custom-schemas` (the built-in finding shape).
+    custom_schemas: dict[str, dict | None] = field(default_factory=dict)
 
 
 def parse_reviewer(path: Path) -> tuple[ReviewerFrontMatter, str]:
@@ -199,7 +234,76 @@ def _load_reviewer(reviewer_dir: Path, dir_name: str, settings: Settings) -> Rev
         body=body,
         source=reviewer_dir,
         harnesses=_resolve_harnesses(front.harnesses, reviewer_dir, settings),
+        custom_schemas=_resolve_custom_schemas(front.custom_schemas, reviewer_dir),
     )
+
+
+def _resolve_custom_schemas(
+    raw: dict[str, object] | None, reviewer_dir: Path
+) -> dict[str, dict | None]:
+    """Turn the validated-shape frontmatter into resolved fragments: read any path values (relative
+    to the reviewer dir), keep inline objects as-is, keep null as a drop marker, and sanitize every
+    fragment. Keys were already checked against CUSTOMIZABLE_SLOTS by the frontmatter validator."""
+    if not raw:
+        return {}
+    resolved: dict[str, dict | None] = {}
+    for slot, value in raw.items():
+        if value is None:
+            resolved[slot] = None  # drop this slot
+            continue
+        fragment = _load_fragment(value, reviewer_dir, slot)
+        _sanitize_fragment(fragment, slot, depth=0, counter=[0])
+        resolved[slot] = fragment
+    return resolved
+
+
+def _load_fragment(value: object, reviewer_dir: Path, slot: str) -> dict:
+    if isinstance(value, dict):
+        return value  # inline JSON Schema object
+    # A string is a path to a .json schema file, resolved relative to the reviewer dir (the same
+    # anchor the reviewer body's relative links use).
+    path = reviewer_dir / str(value)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ResolveError(
+            f"custom-schemas.{slot}: cannot read schema file '{value}': {exc}"
+        ) from exc
+    try:
+        fragment = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ResolveError(f"custom-schemas.{slot}: '{value}' is not valid JSON: {exc}") from exc
+    if not isinstance(fragment, dict):
+        raise ResolveError(
+            f"custom-schemas.{slot}: '{value}' must contain a JSON Schema object (got "
+            f"{type(fragment).__name__})"
+        )
+    return fragment
+
+
+def _sanitize_fragment(node: object, slot: str, depth: int, counter: list[int]) -> None:
+    if depth > _MAX_FRAGMENT_DEPTH:
+        raise ResolveError(
+            f"custom-schemas.{slot}: schema nests deeper than {_MAX_FRAGMENT_DEPTH} levels"
+        )
+    if isinstance(node, dict):
+        if "$ref" in node:
+            raise ResolveError(
+                f"custom-schemas.{slot}: $ref is not supported in a custom schema "
+                f"(inline the definition instead)"
+            )
+        children: list[object] = list(node.values())
+    elif isinstance(node, list):
+        children = list(node)
+    else:
+        return
+    for child in children:
+        counter[0] += 1
+        if counter[0] > _MAX_FRAGMENT_NODES:
+            raise ResolveError(
+                f"custom-schemas.{slot}: schema has more than {_MAX_FRAGMENT_NODES} nodes"
+            )
+        _sanitize_fragment(child, slot, depth + 1, counter)
 
 
 def _resolve_harnesses(

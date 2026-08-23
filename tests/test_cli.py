@@ -246,7 +246,7 @@ def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_cl
     captured: dict = {}
 
     async def fake_fan_out(
-        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None
+        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None, schema=None
     ):
         captured["timeout"] = timeout
         captured["override_harness_binaries"] = override_harness_binaries

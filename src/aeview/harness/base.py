@@ -115,7 +115,14 @@ class Adapter(Protocol):
         log_path: Path,
         thinking: str | None = None,
         timeout: float | None = None,
-    ) -> HarnessOutput: ...
+        *,
+        schema: dict | None = None,
+        validate: Callable[[dict], object] | None = None,
+    ) -> HarnessOutput:
+        """Run one review. `schema` is the per-reviewer review JSON Schema (None → the built-in
+        default); `validate` is the matching post-validator (None → derived from `schema`). Both are
+        keyword-only so the common call site (and the dedup/tests) can omit them."""
+        ...
 
     def preflight(self) -> Preflight:
         """Doctor check: is this harness's binary resolvable and (where probeable) authed? The

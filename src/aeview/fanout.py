@@ -32,6 +32,7 @@ async def _run_review(
     store: RunStore,
     entry: RosterEntry,
     prompt: str,
+    schema: dict | None,
     cwd: Path,
     timeout: float | None,
     binary_override: str | None,
@@ -48,7 +49,9 @@ async def _run_review(
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        return await _attempt_review(store, result, entry, prompt, cwd, timeout, binary_override)
+        return await _attempt_review(
+            store, result, entry, prompt, schema, cwd, timeout, binary_override
+        )
     except AdapterError as exc:
         return _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
@@ -60,6 +63,7 @@ async def _attempt_review(
     result: ReviewResult,
     entry: RosterEntry,
     prompt: str,
+    schema: dict | None,
     cwd: Path,
     timeout: float | None,
     binary_override: str | None,
@@ -75,6 +79,7 @@ async def _attempt_review(
                 store.log_path(entry.reviewer, entry.id),
                 thinking=entry.thinking,
                 timeout=timeout,
+                schema=schema,
             )
         except AdapterError as exc:
             last_error = str(exc)
@@ -113,8 +118,13 @@ async def fan_out(
     cwd: Path,
     timeout: float | None = None,
     override_harness_binaries: dict[str, str] | None = None,
+    schema_by_reviewer: dict[str, dict] | None = None,
 ) -> list[ReviewResult]:
     overrides = override_harness_binaries or {}
+    # A reviewer's per-reviewer review schema (from its custom-schemas); absent → None, and the
+    # adapter falls back to the built-in default schema + validator. The adapter derives its
+    # validator from whatever schema it receives, so passing the schema dict is all fan-out needs.
+    schemas = schema_by_reviewer or {}
     # Resolve each entry's binary override here (per harness) so the workers carry just the
     # resolved path, not the whole map.
     tasks = [
@@ -123,6 +133,7 @@ async def fan_out(
                 store,
                 entry,
                 prompt_by_reviewer[entry.reviewer],
+                schemas.get(entry.reviewer),
                 cwd,
                 timeout,
                 overrides.get(entry.harness),

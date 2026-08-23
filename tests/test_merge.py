@@ -8,7 +8,6 @@ from aeview.runstore import RunStore, new_run_id
 from aeview.schema import (
     DuplicateGroup,
     Finding,
-    Location,
     ReviewResult,
     Severity,
     Usage,
@@ -17,14 +16,17 @@ from aeview.schema import (
 
 
 def _finding(title: str, severity: Severity, *, file="a.py", line=1, conf=0.5) -> Finding:
-    return Finding(
-        title=title,
-        body="b",
-        severity=severity,
-        category="bug",
-        confidence=conf,
-        location=Location(file=file, line_start=line, line_end=line),
-        recommendation="fix",
+    # The descriptive slots ride as model_extra on the loose Finding carrier, so build from a dict.
+    return Finding.model_validate(
+        {
+            "title": title,
+            "body": "b",
+            "severity": severity,
+            "category": "bug",
+            "confidence": conf,
+            "location": {"file": file, "line_start": line, "line_end": line},
+            "recommendation": "fix",
+        }
     )
 
 

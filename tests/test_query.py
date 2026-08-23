@@ -15,7 +15,6 @@ from aeview.schema import (
     DedupPlan,
     Finding,
     Invocation,
-    Location,
     Report,
     ReviewOutput,
     ReviewResult,
@@ -35,7 +34,7 @@ _DEAD_PID = 999_999  # fits pid_t, ~never a live process -> reads as a crashed r
 class _ApproveAdapter:
     """A stub harness that approves with no findings — used to drive resume's re-run."""
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
         return HarnessOutput(
             review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
             usage=Usage(),
@@ -575,7 +574,7 @@ class _RecordingAdapter:
     def __init__(self):
         self.seen: list[dict] = []
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
         self.seen.append({"prompt": prompt, "cwd": str(cwd)})
         return HarnessOutput(
             review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
@@ -613,15 +612,19 @@ def test_resume_uses_manifest_cwd_and_frozen_prompt(aeview_home, tmp_path, monke
 class _DedupStubAdapter:
     """Each review returns one finding; the dedup call returns no groups."""
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
-        finding = Finding(
-            title="t",
-            body="b",
-            severity="low",
-            category="bug",
-            confidence=0.5,
-            location=Location(file="f.py", line_start=1, line_end=1),
-            recommendation="r",
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
+        # The descriptive slots ride as model_extra on the loose Finding carrier, so build from a
+        # dict rather than typed kwargs.
+        finding = Finding.model_validate(
+            {
+                "title": "t",
+                "body": "b",
+                "severity": "low",
+                "category": "bug",
+                "confidence": 0.5,
+                "location": {"file": "f.py", "line_start": 1, "line_end": 1},
+                "recommendation": "r",
+            }
         )
         return HarnessOutput(
             review=ReviewOutput(
@@ -680,7 +683,7 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     captured: dict = {}
 
     async def fake_fan_out(
-        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None
+        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None, schema=None
     ):
         captured["timeout"] = timeout
         captured["override_harness_binaries"] = override_harness_binaries
@@ -743,7 +746,9 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
     )
     seen: dict = {}
 
-    async def fake_fan_out(s, roster, prompts, cwd, timeout=None, override_harness_binaries=None):
+    async def fake_fan_out(
+        s, roster, prompts, cwd, timeout=None, override_harness_binaries=None, schema=None
+    ):
         seen["report_existed"] = (s.dir / "report.json").exists()
         return []
 
@@ -755,7 +760,7 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
 class _FailAdapter:
     """A stub harness that always fails non-transiently — drives resume's all-failed path."""
 
-    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None):
+    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
         raise AdapterError("boom", transient=False)
 
 
