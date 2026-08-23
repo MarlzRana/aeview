@@ -35,7 +35,7 @@ from aeview.schema import (
     ScopeSpec,
     UsageBreakdown,
 )
-from conftest import make_reviewer
+from conftest import git, make_reviewer
 
 
 def _finding_dict(fid: str, title: str) -> dict:
@@ -311,9 +311,9 @@ async def test_merge_threads_frozen_prompt_and_source_to_run_dedup(aeview_home, 
 
 
 async def test_re_merge_pinned_plan_missing_frozen_prompt(aeview_home, monkeypatch):
-    # Backward-compat: a run that pinned a dedup plan before this feature existed has no frozen
-    # file. The tolerant read yields None (dedup falls back to a live home read), while the source
-    # provenance still comes from the pinned plan.
+    # Backward-compat: a run that pinned a dedup plan before this feature has no frozen file. The
+    # tolerant read yields None (dedup falls back to a live home read) AND the source provenance
+    # is dropped — reporting the pinned path would falsely claim the frozen prompt was used.
     store = RunStore.create(new_run_id())  # note: no write_dedup_prompt_source
     src = Path("/old/.aeview/DEDUPLICATION.md")
     manifest = _dedup_manifest(
@@ -330,7 +330,7 @@ async def test_re_merge_pinned_plan_missing_frozen_prompt(aeview_home, monkeypat
     monkeypatch.setattr(cli, "merge_reviews", fake_merge)
     await cli._run_reviews_and_merge(store, manifest, [], {}, {}, aeview_home.parent, None, {})
     assert captured["prompt"] is None
-    assert captured["source"] == src
+    assert captured["source"] is None  # no frozen bytes read -> no (false) provenance claim
 
 
 async def test_re_merge_tolerates_bad_utf8_frozen_prompt(aeview_home, monkeypatch):
@@ -525,3 +525,83 @@ def test_resolve_dedup_prompt_read_failure_raises_resolve_error(aeview_home):
     (repo / ".aeview" / "DEDUPLICATION.md").write_bytes(b"\xff\xfe not valid utf-8")
     with pytest.raises(ResolveError):
         resolve_dedup_prompt(repo)
+
+
+def test_walk_up_from_subdirectory_finds_parent_prompt(aeview_home):
+    # cwd has no `.aeview/` of its own; the walk-up climbs to an ANCESTOR repo's prompt (not home).
+    repo = aeview_home.parent / "repo"
+    (repo / ".aeview").mkdir(parents=True)
+    (repo / ".aeview" / "DEDUPLICATION.md").write_text("PARENT RULES\n")
+    deep = repo / "src" / "pkg" / "mod"
+    deep.mkdir(parents=True)
+    resolved = resolve_dedup_prompt(deep)
+    assert resolved.source == repo / ".aeview" / "DEDUPLICATION.md"
+    assert resolved.text == "PARENT RULES\n"
+
+
+def test_run_exits_cleanly_on_unreadable_dedup_prompt(aeview_home, git_repo, monkeypatch):
+    # A dedup-eligible run (roster > 1) resolves the dedup prompt in the plan phase, so an
+    # unreadable DEDUPLICATION.md surfaces as a clean exit-2, not a traceback — before any model
+    # call. The bad prompt is committed (not a working-tree change) so it stays out of the diff.
+    make_reviewer(
+        git_repo,
+        "cs",
+        harnesses=[
+            {"harness": "claude-code", "model": "opus"},
+            {"harness": "claude-code", "model": "sonnet"},
+        ],
+    )
+    (git_repo / ".aeview" / "DEDUPLICATION.md").write_bytes(b"\xff\xfe not valid utf-8")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "--no-verify", "-m", "add reviewer + bad dedup prompt")
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")  # the reviewed change
+    res = CliRunner().invoke(app, ["run", "--reviewers", "cs", "--scope", "working-tree"])
+    assert res.exit_code == 2  # EXIT_ERROR, surfaced cleanly by run's ResolveError handler
+    assert "could not be read" in res.output
+
+
+async def test_merge_failed_dedup_carries_prompt_source(aeview_home, monkeypatch):
+    # The dedup-failure branch still reports prompt_source provenance on the report.
+    from aeview.config import HarnessInstance, Settings
+    from aeview.dedup import DedupOutcome
+    from aeview.schema import Finding, ReviewResult, Usage
+
+    def _review(rid: str, fid: str, title: str) -> ReviewResult:
+        return ReviewResult(
+            id=rid,
+            reviewer="r",
+            harness="claude-code",
+            model="m",
+            status="done",
+            verdict="needs-attention",
+            summary="s",
+            findings=[Finding.model_validate(_finding_dict(fid, title))],
+            next_steps=[],
+        )
+
+    async def fake_run_dedup(
+        pool,
+        instance,
+        store,
+        cwd,
+        timeout,
+        binary_override=None,
+        dedup_prompt=None,
+        prompt_source=None,
+    ):
+        return DedupOutcome("failed", [], Usage(), "h", reason="boom", warning="w")
+
+    monkeypatch.setattr(merge_mod, "run_dedup", fake_run_dedup)
+    src = Path("/repo/.aeview/DEDUPLICATION.md")
+    settings = Settings(deduplication_harness=HarnessInstance(harness="claude-code", model="m"))
+    report = await merge_mod.merge_reviews(
+        [_review("r__claude-code-a", "fa", "x"), _review("r__codex-b", "fb", "y")],
+        settings,
+        RunStore.create(new_run_id()),
+        aeview_home.parent,
+        dedup_prompt="FROZEN",
+        dedup_prompt_source=src,
+    )
+    assert report.dedup.status == "failed"
+    assert report.dedup.prompt_source == src

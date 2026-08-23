@@ -19,7 +19,7 @@ from aeview.cli import (
 )
 from aeview.config import HarnessInstance, Settings, runs_dir
 from aeview.github import PrTarget
-from aeview.resolve import ResolveError
+from aeview.resolve import DedupPromptSource, ResolveError
 from aeview.runstore import RunStore
 from aeview.schema import Invocation, RosterEntry, RunManifest, ScopeSpec
 from conftest import commit, make_reviewer
@@ -432,6 +432,7 @@ def _dry_plan(
     thinking: str | None = None,
     ignored: list[str] | None = None,
     auto_activated: list[str] | None = None,
+    dedup_source: DedupPromptSource | None = None,
 ) -> _Plan:
     roster = [
         RosterEntry(
@@ -453,7 +454,7 @@ def _dry_plan(
         bundle=bundle,
         ignored=ignored or [],
         auto_activated=auto_activated or [],
-        dedup_source=None,
+        dedup_source=dedup_source,
     )
 
 
@@ -486,8 +487,8 @@ def test_dry_run_render_no_auto_activated_shows_dash():
 
 
 def test_dry_run_render_multi_with_dedup_harness():
-    src = Path("/repo/.aeview/DEDUPLICATION.md")  # the walk-up-resolved source the run would freeze
-    out = _render_dry_run(_dry_plan(2), _settings_with_dedup(), src)
+    src = DedupPromptSource(text="x", source=Path("/repo/.aeview/DEDUPLICATION.md"))
+    out = _render_dry_run(_dry_plan(2, dedup_source=src), _settings_with_dedup())
     assert "roster (2 reviews):" in out  # plural
     assert "dedup: claude-code opus" in out
     assert "dedup prompt: /repo/.aeview/DEDUPLICATION.md" in out

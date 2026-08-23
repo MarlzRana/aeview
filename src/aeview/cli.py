@@ -215,9 +215,7 @@ def run(
         raise typer.Exit(EXIT_ERROR) from exc
 
     if dry_run:
-        # Preview the same dedup prompt a real run would freeze (already resolved on the plan).
-        source = plan.dedup_source.source if plan.dedup_source else None
-        typer.echo(_render_dry_run(plan, settings, source, pr_target))
+        typer.echo(_render_dry_run(plan, settings, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
@@ -552,16 +550,20 @@ async def _run_reviews_and_merge(
         )
     # Read back the run-start-frozen dedup prompt (dedup/DEDUPLICATION.md) only when a dedup plan is
     # pinned — otherwise dedup can't run and the file was never written. Reading the frozen bytes
-    # (not re-discovering) is what keeps a re-merge on resume byte-identical. Absent or unreadable
-    # (a run predating the frozen source) -> None, and dedup falls back to a live home read.
-    # OSError = missing/unreadable, ValueError = bad UTF-8 (the tolerant read pattern).
+    # (not re-discovering) is what keeps a re-merge on resume byte-identical. Report prompt_source
+    # provenance ONLY on a successful read: if the frozen copy is absent/corrupt (a run predating
+    # the frozen source, or on-disk damage) dedup falls back to the live home prompt, so claiming
+    # the pinned source would be false. OSError = missing/unreadable, ValueError = bad UTF-8.
     dedup_prompt: str | None = None
-    dedup_prompt_source = manifest.dedup.prompt_source if manifest.dedup else None
+    dedup_prompt_source = None
     if manifest.dedup is not None:
         try:
             dedup_prompt = store.read_dedup_prompt_source()
+            dedup_prompt_source = (
+                manifest.dedup.prompt_source
+            )  # only when the frozen bytes were used
         except OSError, ValueError:
-            dedup_prompt = None
+            dedup_prompt = None  # frozen copy gone/corrupt -> live fallback, no source claim
     report = await merge_reviews(
         store.read_reviews(),
         _merge_settings(manifest.dedup, override_harness_binaries),
@@ -577,12 +579,7 @@ async def _run_reviews_and_merge(
     return report
 
 
-def _render_dry_run(
-    plan: _Plan,
-    settings: Settings,
-    dedup_prompt_source: Path | None = None,
-    pr_target: PrTarget | None = None,
-) -> str:
+def _render_dry_run(plan: _Plan, settings: Settings, pr_target: PrTarget | None = None) -> str:
     bundle = plan.bundle
     mode = "inline" if bundle.is_inline else "self-collect"
     ignored_display = ", ".join(plan.ignored) or "—"
@@ -602,8 +599,8 @@ def _render_dry_run(
     dedup = _dedup_plan(plan.roster, settings)
     if dedup is not None:
         lines.append(f"dedup: {dedup.harness} {dedup.model}")
-        if dedup_prompt_source is not None:  # the DEDUPLICATION.md the walk-up would freeze
-            lines.append(f"dedup prompt: {dedup_prompt_source}")
+        if plan.dedup_source is not None:  # guaranteed when dedup is not None (same gate)
+            lines.append(f"dedup prompt: {plan.dedup_source.source}")
     elif len(plan.roster) <= 1:
         lines.append("dedup: skipped (single review)")
     else:
