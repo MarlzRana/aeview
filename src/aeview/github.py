@@ -252,10 +252,9 @@ def _provenance(f: MergedFinding) -> str:
 
 def _slot_text(f: MergedFinding, key: str) -> str | None:
     """A descriptive slot (title/body/category/recommendation) as display text, or None if the
-    reviewer dropped it via custom-schemas. These live in model_extra on the loose finding carrier;
-    a reshaped (non-string) slot — e.g. a rubric object — is rendered as compact JSON so it still
-    posts cleanly rather than crashing on `.strip()`."""
-    value = (f.model_extra or {}).get(key)
+    reviewer dropped it via custom-schemas. A reshaped (non-string) slot — e.g. a rubric object —
+    is rendered as compact JSON so it still posts cleanly rather than crashing on `.strip()`."""
+    value = f.slot(key)
     if value is None:
         return None
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)

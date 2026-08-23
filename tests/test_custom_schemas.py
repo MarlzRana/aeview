@@ -493,6 +493,32 @@ def test_render_human_renders_present_slots():
     assert "a.py:2-4 :: do the fix" in text
 
 
+def test_render_human_stringifies_reshaped_slots():
+    # A reviewer that reshaped title/body into objects must still render (f-string str), not crash.
+    finding = MergedFinding.model_validate(
+        {
+            "id": "f1",
+            "severity": "low",
+            "confidence": 0.5,
+            "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+            "title": {"score": 4},
+            "body": {"readability": 3},
+            "sources": [{"review": "r__x", "severity": "low", "confidence": 0.5}],
+            "agreement": 1,
+        }
+    )
+    report = Report(
+        verdict="needs-attention",
+        summary="s",
+        findings=[finding],
+        coverage=Coverage(contributed=1, failed=0),
+        dedup=Dedup(status="skipped"),
+        usage=UsageBreakdown(),
+    )
+    text = render_human(report)
+    assert "score" in text  # the reshaped object title is stringified inline
+
+
 # --- fragment sanitization edges -------------------------------------------------------------
 
 

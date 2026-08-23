@@ -92,6 +92,12 @@ class Finding(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     location: Location
 
+    def slot(self, key: str) -> object | None:
+        """A descriptive slot's value (title/body/recommendation/category + any custom field ride in
+        model_extra on this loose carrier), or None if the reviewer dropped it via custom-schemas.
+        The one place that knows slots live in model_extra — used by report + PR rendering."""
+        return (self.model_extra or {}).get(key)
+
 
 class ReviewOutput(BaseModel):
     """The carrier for a single harness invocation's output. Top-level shape is fixed

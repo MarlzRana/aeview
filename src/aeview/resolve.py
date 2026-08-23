@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -298,9 +299,9 @@ def _sanitize_fragment(fragment: dict, slot: str) -> None:
                     f"custom-schemas.{slot}: $ref is not supported in a custom schema "
                     f"(inline the definition instead)"
                 )
-            children: list[object] = list(node.values())
+            children: Iterable[object] = node.values()
         elif isinstance(node, list):
-            children = list(node)
+            children = node
         else:
             return
         for child in children:
