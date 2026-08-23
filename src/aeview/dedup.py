@@ -79,14 +79,11 @@ async def run_dedup(
             timeout,
         )
         groups = DuplicateGroups.model_validate(out.payload).duplicate_groups
+        outcome = DedupOutcome("ok", groups, out.usage, instance_id)
     except (AdapterError, ValidationError) as exc:
         outcome = DedupOutcome(
             "failed", [], Usage(), instance_id, reason=str(exc), warning=_FAIL_WARNING
         )
-        _persist(store, outcome, started, prompt_source)
-        return outcome
-
-    outcome = DedupOutcome("ok", groups, out.usage, instance_id)
     _persist(store, outcome, started, prompt_source)
     return outcome
 

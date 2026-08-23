@@ -550,15 +550,18 @@ async def _run_reviews_and_merge(
             override_harness_binaries,
             schema_by_reviewer,
         )
-    # The dedup prompt was frozen at run start (dedup/DEDUPLICATION.md); read it back so a re-merge
-    # on resume uses the exact bytes, never re-discovering from a since-edited file. Absent or
-    # unreadable (an older run, or one that never pinned a dedup plan) -> None, and dedup falls back
-    # to a live home read. OSError = missing/unreadable, ValueError = bad UTF-8 (the tolerant read).
-    try:
-        dedup_prompt = store.read_dedup_prompt_source()
-    except OSError, ValueError:
-        dedup_prompt = None
+    # Read back the run-start-frozen dedup prompt (dedup/DEDUPLICATION.md) only when a dedup plan is
+    # pinned — otherwise dedup can't run and the file was never written. Reading the frozen bytes
+    # (not re-discovering) is what keeps a re-merge on resume byte-identical. Absent or unreadable
+    # (a run predating the frozen source) -> None, and dedup falls back to a live home read.
+    # OSError = missing/unreadable, ValueError = bad UTF-8 (the tolerant read pattern).
+    dedup_prompt: str | None = None
     dedup_prompt_source = manifest.dedup.prompt_source if manifest.dedup else None
+    if manifest.dedup is not None:
+        try:
+            dedup_prompt = store.read_dedup_prompt_source()
+        except OSError, ValueError:
+            dedup_prompt = None
     report = await merge_reviews(
         store.read_reviews(),
         _merge_settings(manifest.dedup, override_harness_binaries),

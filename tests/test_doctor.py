@@ -74,6 +74,15 @@ def test_doctor_reports_dedup_prompt_source(tmp_path, monkeypatch):
     assert str(repo_prompt.resolve()) in check.detail
 
 
+def test_doctor_dedup_prompt_unreadable_fails(tmp_path, monkeypatch):
+    # A matched-but-unreadable DEDUPLICATION.md surfaces as a clean `fail` check, not a traceback.
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
+    (tmp_path / ".aeview" / "DEDUPLICATION.md").write_bytes(b"\xff\xfe not valid utf-8")
+    _mock_seams(monkeypatch)
+    report = doctor.run_doctor(tmp_path, _settings())
+    assert _check(report, "dedup-prompt").status == "fail"
+
+
 def test_doctor_omits_dedup_prompt_when_no_harness(tmp_path, monkeypatch):
     # No dedup harness -> no prompt would be used; doctor warns about the harness, not the prompt.
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])

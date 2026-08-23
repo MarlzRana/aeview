@@ -8,16 +8,18 @@ back at merge time so a re-merge on resume never re-reads a since-edited source.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from aeview import cli
 from aeview import merge as merge_mod
-from aeview.cli import app
+from aeview.cli import _emit_report, app
 from aeview.dedup import _compose
-from aeview.resolve import DedupPromptSource, resolve_dedup_prompt
+from aeview.resolve import DedupPromptSource, ResolveError, resolve_dedup_prompt
 from aeview.runstore import RunStore, latest_run_id, new_run_id
 from aeview.schema import (
     Coverage,
@@ -27,6 +29,7 @@ from aeview.schema import (
     Invocation,
     PooledFinding,
     Report,
+    ReviewResult,
     RosterEntry,
     RunManifest,
     ScopeSpec,
@@ -458,3 +461,67 @@ def test_dry_run_previews_walked_up_dedup_prompt(aeview_home, git_repo, monkeypa
     )
     assert res.exit_code == 0
     assert f"dedup prompt: {repo_prompt.resolve()}" in res.stdout
+
+
+# --- regression + resume/robustness ----------------------------------------------------------
+
+
+def test_emit_report_json_serializes_path_prompt_source(capsys):
+    # Regression: a Path-typed dedup.prompt_source must serialize as a string. Before the fix,
+    # json.dumps(model_dump()) crashed on the PosixPath, breaking `result --json` / `resume --json`.
+    report = _report()
+    report.dedup.prompt_source = Path("/repo/.aeview/DEDUPLICATION.md")
+    with pytest.raises(typer.Exit):  # _emit_report exits with the verdict code
+        _emit_report(report, json_out=True)
+    parsed = json.loads(capsys.readouterr().out)  # would raise pre-fix
+    assert parsed["dedup"]["prompt_source"] == "/repo/.aeview/DEDUPLICATION.md"
+
+
+def test_resume_threads_frozen_dedup_prompt(aeview_home, monkeypatch):
+    # End-to-end via the `resume` command: it must re-read the frozen prompt and thread it to merge
+    # (not a live re-read), and carry the pinned source through.
+    store = RunStore.create("dp")
+    store.write_dedup_prompt_source("FROZEN RESUME PROMPT")
+    store.write_prompt("r", "P")
+    src = Path("/repo/.aeview/DEDUPLICATION.md")
+    store.write_manifest(
+        RunManifest(
+            run_id="dp",
+            created_at="2026-08-01T00:00:00Z",
+            overall="interrupted",  # terminal + reviews already done -> a merge-only resume
+            invocation=Invocation(reviewers=["r"], scope=ScopeSpec(type="working-tree")),
+            roster=[
+                RosterEntry(id="r__claude-code-m", reviewer="r", harness="claude-code", model="m"),
+                RosterEntry(id="r__claude-code-n", reviewer="r", harness="claude-code", model="n"),
+            ],
+            dedup=DedupPlan(
+                id="claude-code-x", harness="claude-code", model="x", prompt_source=src
+            ),
+        )
+    )
+    for rid, mdl in [("r__claude-code-m", "m"), ("r__claude-code-n", "n")]:
+        store.write_review(
+            ReviewResult(id=rid, reviewer="r", harness="claude-code", model=mdl, status="done")
+        )
+
+    captured: dict = {}
+
+    async def fake_merge(results, settings, s, cwd, dedup_prompt=None, dedup_prompt_source=None):
+        captured["prompt"] = dedup_prompt
+        captured["source"] = dedup_prompt_source
+        return _report()
+
+    monkeypatch.setattr(cli, "merge_reviews", fake_merge)
+    CliRunner().invoke(app, ["resume", "dp"])
+    assert captured["prompt"] == "FROZEN RESUME PROMPT"
+    assert captured["source"] == src
+
+
+def test_resolve_dedup_prompt_read_failure_raises_resolve_error(aeview_home):
+    # A matched-but-unreadable DEDUPLICATION.md is normalized to ResolveError (like parse_reviewer),
+    # so `run`/`doctor` surface it cleanly instead of a bare UnicodeDecodeError traceback.
+    repo = aeview_home.parent / "repo"
+    (repo / ".aeview").mkdir(parents=True)
+    (repo / ".aeview" / "DEDUPLICATION.md").write_bytes(b"\xff\xfe not valid utf-8")
+    with pytest.raises(ResolveError):
+        resolve_dedup_prompt(repo)
