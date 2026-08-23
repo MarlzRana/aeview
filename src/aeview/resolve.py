@@ -262,8 +262,16 @@ def _load_fragment(value: object, reviewer_dir: Path, slot: str) -> dict:
     if isinstance(value, dict):
         return value  # inline JSON Schema object
     # A string is a path to a .json schema file, resolved relative to the reviewer dir (the same
-    # anchor the reviewer body's relative links use).
-    path = reviewer_dir / str(value)
+    # anchor the reviewer body's relative links use). Confine it to that dir: a value like
+    # `../../etc/passwd` (or an absolute path) would otherwise read an arbitrary file into the
+    # composed schema — and thus the prompt. The README documents these as reviewer-dir-relative, so
+    # escaping is always wrong; reject rather than read outside.
+    base = reviewer_dir.resolve()
+    path = (reviewer_dir / str(value)).resolve()
+    if not path.is_relative_to(base):
+        raise ResolveError(
+            f"custom-schemas.{slot}: schema path '{value}' escapes the reviewer directory"
+        )
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:

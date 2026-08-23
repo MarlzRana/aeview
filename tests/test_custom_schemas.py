@@ -651,3 +651,36 @@ def test_resume_reuses_frozen_custom_schema(aeview_home, monkeypatch):
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     CliRunner().invoke(app, ["resume", "cs"])
     assert captured["schemas"] == {"r": custom}
+
+
+# --- path-traversal + PR-posting bounds (cycle-4 fixes) --------------------------------------
+
+
+def test_schema_path_traversal_rejected(tmp_path):
+    # A `..`-escaping path must not read a file outside the reviewer dir into the schema/prompt.
+    _write_reviewer(tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: ../../../../etc/passwd")
+    with pytest.raises(ResolveError, match="escapes the reviewer directory"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_absolute_schema_path_rejected(tmp_path):
+    _write_reviewer(tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: /etc/passwd")
+    with pytest.raises(ResolveError, match="escapes the reviewer directory"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_github_finding_md_clips_unbounded_custom_title():
+    # A custom title has no schema length cap, so PR rendering must clip it like body/rec.
+    finding = MergedFinding.model_validate(
+        {
+            "id": "f1",
+            "severity": "low",
+            "confidence": 0.5,
+            "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+            "title": "x" * 5000,
+            "sources": [{"review": "r__x", "severity": "low", "confidence": 0.5}],
+            "agreement": 1,
+        }
+    )
+    md = _finding_md(finding, "run1", show_location=False)
+    assert "truncated" in md  # the unbounded custom title was length-capped before posting

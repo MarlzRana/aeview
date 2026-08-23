@@ -271,12 +271,13 @@ def _finding_md(f: MergedFinding, run_id: str, *, show_location: bool) -> str:
     category = _slot_text(f, "category")
     body = _slot_text(f, "body")
     recommendation = _slot_text(f, "recommendation")
-    # category is now model-controlled too (a custom-schemas enum/string), so sanitize it like the
-    # rest — a fixed built-in enum used to make it safe; a custom value is untrusted.
+    # category/title are now model-controlled too (custom-schemas can reshape/replace them) and
+    # unbounded, so sanitize AND length-cap them like body/recommendation — a fixed enum + a
+    # schema-capped title used to make this safe; a custom value is untrusted and unbounded.
     head = (
         f"`{f.severity}`"
-        + (f" · {_sanitize(category)}" if category else "")
-        + f" — **{_sanitize(title.strip())}**"
+        + (f" · {_clip(_sanitize(category), run_id)}" if category else "")
+        + f" — **{_clip(_sanitize(title.strip()), run_id)}**"
     )
     if show_location:
         head = f"{_location_md(f.location)} · {head}"
