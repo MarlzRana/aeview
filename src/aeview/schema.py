@@ -201,6 +201,9 @@ class Dedup(BaseModel):
 
     status: DedupState
     harness: str | None = None
+    # The DEDUPLICATION.md the walk-up chose (provenance; None when dedup was skipped or the run
+    # predates the frozen source and fell back to the home prompt).
+    prompt_source: Path | None = None
     reason: str | None = None
     warning: str | None = None
 
@@ -224,6 +227,7 @@ class DedupResult(BaseModel):
     status: DedupState
     started_at: str
     finished_at: str
+    prompt_source: Path | None = None  # the DEDUPLICATION.md the walk-up chose (provenance)
     groups: list[DuplicateGroup] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     reason: str | None = None
@@ -275,6 +279,9 @@ class DedupPlan(BaseModel):
     harness: str
     model: str
     thinking: str | None = None
+    # The DEDUPLICATION.md the walk-up chose at run start; its text is frozen to
+    # dedup/DEDUPLICATION.md so resume is byte-identical. None on runs predating the frozen source.
+    prompt_source: Path | None = None
 
 
 class RunManifest(BaseModel):

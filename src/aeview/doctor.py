@@ -16,7 +16,7 @@ from .config import Settings
 from .harness import AdapterError, get_adapter
 from .harness.base import AUTH_PROBE_TIMEOUT
 from .process import run_sync
-from .resolve import ResolveError, discover_reviewers, resolve_reviewer
+from .resolve import ResolveError, discover_reviewers, resolve_dedup_prompt, resolve_reviewer
 
 CheckStatus = Literal["ok", "warn", "fail"]
 
@@ -55,6 +55,7 @@ def run_doctor(cwd: Path, settings: Settings) -> DoctorReport:
 
     if settings.deduplication_harness:
         harness_types.add(settings.deduplication_harness.harness)
+        checks.append(_check_dedup_prompt(cwd))  # which DEDUPLICATION.md the walk-up would use
     elif names:
         checks.append(Check("dedup", "warn", "no deduplicationHarness configured"))
 
@@ -76,6 +77,16 @@ def _check_harness(harness: str, binary_override: str | None) -> Check:
     # already baked into the constructed adapter.
     pf = adapter.preflight()
     return Check(name, pf.status, pf.detail)
+
+
+def _check_dedup_prompt(cwd: Path) -> Check:
+    # The dedup prompt is discovered by the same cwd->home walk-up as reviewers, so which
+    # DEDUPLICATION.md wins is no longer obvious — surface the resolved source (and that it reads).
+    try:
+        source = resolve_dedup_prompt(cwd).source
+    except (ResolveError, OSError) as exc:
+        return Check("dedup-prompt", "fail", f"could not resolve DEDUPLICATION.md: {exc}")
+    return Check("dedup-prompt", "ok", f"using {source}")
 
 
 def _check_gh() -> Check:

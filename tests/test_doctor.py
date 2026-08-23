@@ -60,6 +60,42 @@ def test_doctor_all_ok(tmp_path, monkeypatch):
     assert _check(report, "reviewer:good").status == "ok"
 
 
+def test_doctor_reports_dedup_prompt_source(tmp_path, monkeypatch):
+    # With a dedup harness configured, doctor surfaces which DEDUPLICATION.md the walk-up resolves
+    # (no longer obvious now that it's discovered by cwd->home, not fixed at ~/.aeview).
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
+    repo_prompt = tmp_path / ".aeview" / "DEDUPLICATION.md"
+    repo_prompt.write_text("---\nname: d\n---\nREPO RULES\n")
+    _mock_seams(monkeypatch)
+    report = doctor.run_doctor(tmp_path, _settings())
+    check = _check(report, "dedup-prompt")
+    assert check.status == "ok"
+    # the repo's own prompt won over the seeded home one (proves the walk-up, not just "some file")
+    assert str(repo_prompt.resolve()) in check.detail
+
+
+def test_doctor_dedup_prompt_unreadable_fails(tmp_path, monkeypatch):
+    # A matched-but-unreadable DEDUPLICATION.md surfaces as a clean `fail` check, not a traceback.
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
+    (tmp_path / ".aeview" / "DEDUPLICATION.md").write_bytes(b"\xff\xfe not valid utf-8")
+    _mock_seams(monkeypatch)
+    report = doctor.run_doctor(tmp_path, _settings())
+    assert _check(report, "dedup-prompt").status == "fail"
+
+
+def test_doctor_omits_dedup_prompt_when_no_harness(tmp_path, monkeypatch):
+    # No dedup harness -> no prompt would be used; doctor warns about the harness, not the prompt.
+    make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
+    _mock_seams(monkeypatch)
+    settings = Settings(
+        fallback_reviewer_harnesses=[HarnessInstance(harness="claude-code", model="sonnet")],
+        deduplication_harness=None,
+    )
+    report = doctor.run_doctor(tmp_path, settings)
+    assert not any(c.name == "dedup-prompt" for c in report.checks)
+    assert _check(report, "dedup").status == "warn"
+
+
 def test_doctor_codex_ok(tmp_path, monkeypatch):
     # codex resolves its bundled binary (need not be on PATH) and probes auth: rc0 -> ok.
     make_reviewer(tmp_path, "cx", harnesses=[{"harness": "codex", "model": "gpt-5.5"}])

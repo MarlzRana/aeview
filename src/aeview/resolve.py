@@ -23,10 +23,11 @@ from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from .config import HarnessInstance, Settings, split_frontmatter
+from .config import HarnessInstance, Settings, ensure_seeded, split_frontmatter
 from .schema import CUSTOMIZABLE_SLOTS, RosterEntry
 
 REVIEWER_FILE = "REVIEWER.md"
+DEDUP_PROMPT_FILE = "DEDUPLICATION.md"
 _AEVIEW_DIR = ".aeview"
 _REVIEWERS = "reviewers"
 # Names that can't be reviewers because they're CLI keywords. `all` is the bulk-sweep
@@ -164,6 +165,38 @@ def candidate_rungs(cwd: Path) -> list[Path]:
     if home not in rungs:
         rungs.append(home)
     return rungs
+
+
+@dataclass(slots=True)
+class DedupPromptSource:
+    """The resolved dedup prompt: its frontmatter-stripped text plus the file it came from."""
+
+    text: str
+    source: Path  # the DEDUPLICATION.md the walk-up chose
+
+
+def resolve_dedup_prompt(cwd: Path) -> DedupPromptSource:
+    """Discover DEDUPLICATION.md by the same walk-up as reviewers: climb from cwd to home and
+    take the first `<rung>/.aeview/DEDUPLICATION.md`. Home's `.aeview` is `~/.aeview`, which
+    `ensure_seeded()` always populates, so the climb always terminates in a readable file — the
+    global fallback with no special case, exactly like the `default` reviewer. A repo can thus
+    check in its own dedup prompt (e.g. to make the deduplicator less code-specific). Frontmatter
+    is stripped (the dedup prompt requires none)."""
+    ensure_seeded()  # guarantees the home rung's ~/.aeview/DEDUPLICATION.md exists as the terminus
+    for rung in candidate_rungs(cwd):
+        path = rung / _AEVIEW_DIR / DEDUP_PROMPT_FILE
+        if path.is_file():
+            # is_file() passed, but the read can still fail (mode 000, or invalid UTF-8). Normalize
+            # to ResolveError — like parse_reviewer — so `run`/`doctor` surface it cleanly instead
+            # of a bare OSError/UnicodeDecodeError traceback.
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:
+                raise ResolveError(f"{path} could not be read: {exc}") from exc
+            return DedupPromptSource(text=split_frontmatter(text)[1], source=path)
+    raise ResolveError(  # unreachable: ensure_seeded guarantees ~/.aeview/DEDUPLICATION.md
+        "no DEDUPLICATION.md found on the walk-up and the ~/.aeview fallback is missing"
+    )
 
 
 def _reviewer_dir(rung: Path, name: str) -> Path:
