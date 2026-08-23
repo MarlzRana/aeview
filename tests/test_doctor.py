@@ -64,12 +64,14 @@ def test_doctor_reports_dedup_prompt_source(tmp_path, monkeypatch):
     # With a dedup harness configured, doctor surfaces which DEDUPLICATION.md the walk-up resolves
     # (no longer obvious now that it's discovered by cwd->home, not fixed at ~/.aeview).
     make_reviewer(tmp_path, "good", harnesses=[{"harness": "claude-code", "model": "sonnet"}])
-    (tmp_path / ".aeview" / "DEDUPLICATION.md").write_text("---\nname: d\n---\nREPO RULES\n")
+    repo_prompt = tmp_path / ".aeview" / "DEDUPLICATION.md"
+    repo_prompt.write_text("---\nname: d\n---\nREPO RULES\n")
     _mock_seams(monkeypatch)
     report = doctor.run_doctor(tmp_path, _settings())
     check = _check(report, "dedup-prompt")
     assert check.status == "ok"
-    assert check.detail.endswith(".aeview/DEDUPLICATION.md")
+    # the repo's own prompt won over the seeded home one (proves the walk-up, not just "some file")
+    assert str(repo_prompt.resolve()) in check.detail
 
 
 def test_doctor_omits_dedup_prompt_when_no_harness(tmp_path, monkeypatch):

@@ -186,8 +186,14 @@ def resolve_dedup_prompt(cwd: Path) -> DedupPromptSource:
     for rung in candidate_rungs(cwd):
         path = rung / _AEVIEW_DIR / DEDUP_PROMPT_FILE
         if path.is_file():
-            text = split_frontmatter(path.read_text(encoding="utf-8"))[1]
-            return DedupPromptSource(text=text, source=path)
+            # is_file() passed, but the read can still fail (mode 000, or invalid UTF-8). Normalize
+            # to ResolveError — like parse_reviewer — so `run`/`doctor` surface it cleanly instead
+            # of a bare OSError/UnicodeDecodeError traceback.
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:
+                raise ResolveError(f"{path} could not be read: {exc}") from exc
+            return DedupPromptSource(text=split_frontmatter(text)[1], source=path)
     raise ResolveError(  # unreachable: ensure_seeded guarantees ~/.aeview/DEDUPLICATION.md
         "no DEDUPLICATION.md found on the walk-up and the ~/.aeview fallback is missing"
     )

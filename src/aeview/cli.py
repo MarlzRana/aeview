@@ -40,6 +40,7 @@ from .report import (
 )
 from .resolve import (
     RESERVED_REVIEWER_NAMES,
+    DedupPromptSource,
     DiscoveredReviewer,
     ResolveError,
     Reviewer,
@@ -214,14 +215,9 @@ def run(
         raise typer.Exit(EXIT_ERROR) from exc
 
     if dry_run:
-        # Preview the dedup prompt the run would freeze (a file read; nothing persisted). Resolved
-        # here, not in the pure renderer, and only when the roster can actually dedup.
-        dedup_source = (
-            resolve_dedup_prompt(cwd).source
-            if _dedup_plan(plan.roster, settings) is not None
-            else None
-        )
-        typer.echo(_render_dry_run(plan, settings, dedup_source, pr_target))
+        # Preview the same dedup prompt a real run would freeze (already resolved on the plan).
+        source = plan.dedup_source.source if plan.dedup_source else None
+        typer.echo(_render_dry_run(plan, settings, source, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
@@ -366,6 +362,10 @@ class _Plan:
     bundle: Bundle
     ignored: list[str]  # paths excluded by .aeviewignore (surfaced; never silently dropped)
     auto_activated: list[str]  # reviewers auto mode added beyond default (empty otherwise)
+    # The walk-up-resolved dedup prompt, or None when this roster can't dedup (<=1 review or no
+    # deduplicationHarness). Resolved here in the plan phase so a read error surfaces as a clean
+    # ResolveError (caught by `run`), and so `--dry-run` previews the same file a real run freezes.
+    dedup_source: DedupPromptSource | None
 
 
 def _plan_run(
@@ -406,6 +406,8 @@ def _plan_run(
         raise ResolveError(
             "no harnesses resolved (check frontmatter harnesses / fallbackReviewerHarnesses)"
         )
+    # Resolve the dedup prompt only when the roster can actually dedup (same gate as _dedup_plan).
+    dedup_source = resolve_dedup_prompt(cwd) if _dedup_plan(roster, settings) is not None else None
     return _Plan(
         names=[r.name for r in reviewers],  # resolve_reviewer pins name == dir == frontmatter name
         reviewers=reviewers,
@@ -413,6 +415,7 @@ def _plan_run(
         bundle=build_bundle(resolved),
         ignored=ignored,
         auto_activated=auto_activated,
+        dedup_source=dedup_source,
     )
 
 
@@ -461,13 +464,13 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     store = RunStore.create(new_run_id())
     typer.echo(f"run {store.run_id}", err=True)
 
-    # Resolve + freeze the dedup prompt only when this run can dedup (roster > 1 + a harness). The
-    # source is chosen by walk-up from the run's cwd and pinned in run.json, and its text is frozen
-    # below so a re-merge on resume is byte-identical, never re-read from a since-edited file.
+    # Pin + freeze the walk-up-resolved dedup prompt (present iff this roster can dedup) BEFORE the
+    # manifest that references it, so a crash can never leave a manifest pinning dedup without the
+    # frozen prompt beside it — the byte-identical-resume invariant depends on that copy existing.
     dedup_plan = _dedup_plan(plan.roster, settings)
-    dedup_source = resolve_dedup_prompt(cwd) if dedup_plan is not None else None
-    if dedup_plan is not None and dedup_source is not None:
-        dedup_plan.prompt_source = dedup_source.source
+    if dedup_plan is not None and plan.dedup_source is not None:
+        dedup_plan.prompt_source = plan.dedup_source.source
+        store.write_dedup_prompt_source(plan.dedup_source.text)
 
     manifest = RunManifest(
         run_id=store.run_id,
@@ -482,8 +485,6 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
-    if dedup_source is not None:
-        store.write_dedup_prompt_source(dedup_source.text)
 
     prompt_by_reviewer = {
         r.name: compose_prompt(r, plan.bundle, full_diff_path) for r in plan.reviewers
@@ -751,7 +752,9 @@ def result(
 def _emit_report(report: Report, json_out: bool) -> None:
     """Print a report (human or JSON) and exit with its 0/1/2 verdict code — the shared tail of
     `result` and `resume`."""
-    rendered = json.dumps(report.model_dump(), indent=2) if json_out else render_human(report)
+    # Pydantic's JSON serializer (not json.dumps(model_dump())) so non-native fields like the
+    # Path-typed dedup.prompt_source render as strings instead of crashing the dump.
+    rendered = report.model_dump_json(indent=2) if json_out else render_human(report)
     typer.echo(rendered)
     raise typer.Exit(exit_code(report))
 

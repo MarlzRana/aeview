@@ -453,6 +453,7 @@ def _dry_plan(
         bundle=bundle,
         ignored=ignored or [],
         auto_activated=auto_activated or [],
+        dedup_source=None,
     )
 
 

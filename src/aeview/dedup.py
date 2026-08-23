@@ -47,7 +47,6 @@ class DedupOutcome:
     groups: list[DuplicateGroup]
     usage: Usage
     harness_id: str
-    prompt_source: Path | None = None
     reason: str | None = None
     warning: str | None = None
 
@@ -82,19 +81,13 @@ async def run_dedup(
         groups = DuplicateGroups.model_validate(out.payload).duplicate_groups
     except (AdapterError, ValidationError) as exc:
         outcome = DedupOutcome(
-            "failed",
-            [],
-            Usage(),
-            instance_id,
-            prompt_source,
-            reason=str(exc),
-            warning=_FAIL_WARNING,
+            "failed", [], Usage(), instance_id, reason=str(exc), warning=_FAIL_WARNING
         )
-        _persist(store, outcome, started)
+        _persist(store, outcome, started, prompt_source)
         return outcome
 
-    outcome = DedupOutcome("ok", groups, out.usage, instance_id, prompt_source)
-    _persist(store, outcome, started)
+    outcome = DedupOutcome("ok", groups, out.usage, instance_id)
+    _persist(store, outcome, started, prompt_source)
     return outcome
 
 
@@ -115,7 +108,9 @@ def _compose(pool: list[PooledFinding], dedup_prompt: str | None) -> str:
     )
 
 
-def _persist(store: RunStore, outcome: DedupOutcome, started: str) -> None:
+def _persist(
+    store: RunStore, outcome: DedupOutcome, started: str, prompt_source: Path | None
+) -> None:
     store.write_dedup_result(
         outcome.harness_id,
         DedupResult(
@@ -123,7 +118,7 @@ def _persist(store: RunStore, outcome: DedupOutcome, started: str) -> None:
             status=outcome.status,
             started_at=started,
             finished_at=now_iso(),
-            prompt_source=outcome.prompt_source,
+            prompt_source=prompt_source,
             groups=outcome.groups,
             usage=outcome.usage,
             reason=outcome.reason,
