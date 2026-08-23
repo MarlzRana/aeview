@@ -347,11 +347,13 @@ async def test_re_merge_tolerates_bad_utf8_frozen_prompt(aeview_home, monkeypatc
 
     async def fake_merge(results, settings, s, cwd, dedup_prompt=None, dedup_prompt_source=None):
         captured["prompt"] = dedup_prompt
+        captured["source"] = dedup_prompt_source
         return _report()
 
     monkeypatch.setattr(cli, "merge_reviews", fake_merge)
     await cli._run_reviews_and_merge(store, manifest, [], {}, {}, aeview_home.parent, None, {})
     assert captured["prompt"] is None
+    assert captured["source"] is None  # a failed frozen read drops the (would-be-false) provenance
 
 
 # --- run_dedup: the frozen prompt reaches the harness + is persisted --------------------------

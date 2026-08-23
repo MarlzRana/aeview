@@ -555,13 +555,11 @@ async def _run_reviews_and_merge(
     # the frozen source, or on-disk damage) dedup falls back to the live home prompt, so claiming
     # the pinned source would be false. OSError = missing/unreadable, ValueError = bad UTF-8.
     dedup_prompt: str | None = None
-    dedup_prompt_source = None
+    dedup_prompt_source: Path | None = None
     if manifest.dedup is not None:
         try:
             dedup_prompt = store.read_dedup_prompt_source()
-            dedup_prompt_source = (
-                manifest.dedup.prompt_source
-            )  # only when the frozen bytes were used
+            dedup_prompt_source = manifest.dedup.prompt_source  # only when frozen bytes were read
         except OSError, ValueError:
             dedup_prompt = None  # frozen copy gone/corrupt -> live fallback, no source claim
     report = await merge_reviews(
