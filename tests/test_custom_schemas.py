@@ -402,6 +402,7 @@ async def test_adapter_run_delivers_custom_schema_and_builds_carrier(
         prompt, schema, model, cwd, log_path, thinking=None, timeout=None, validate=None
     ):
         captured["schema"] = schema
+        captured["validate"] = validate
         payload = {"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []}
         if validate is not None:
             validate(payload)
@@ -412,6 +413,9 @@ async def test_adapter_run_delivers_custom_schema_and_builds_carrier(
     out = await adapter.run("p", "m", tmp_path, tmp_path / "log", schema=custom)
     assert captured["schema"] == custom
     assert out.review.verdict == "approve"
+    # the delegated validator is the real schema-derived one — it rejects an off-schema payload
+    with pytest.raises(ValidationError):
+        captured["validate"]({"summary": "no verdict"})
 
 
 async def test_dedup_survivor_keeps_reshaped_body(aeview_home, monkeypatch):
@@ -595,9 +599,12 @@ async def test_merge_survives_reserved_key_collision(aeview_home):
     assert [s.review for s in report.findings[0].sources] == ["r__claude-code-m"]
 
 
-def test_run_freezes_composed_schema(aeview_home, git_repo, stub_claude, monkeypatch):
-    # A real `run` composes each reviewer's schema and freezes it to the run dir, so resume can
-    # reuse it. stub_claude returns a default-shaped review; the loose custom validator accepts it.
+def test_run_freezes_composed_schema_and_delivers_to_fanout(aeview_home, git_repo, monkeypatch):
+    # A real `run` composes each reviewer's schema, freezes it to the run dir (so resume can reuse
+    # it), AND hands it to fan-out. fan_out is mocked so both are asserted regardless of harness
+    # outcome (no spurious pass on a failed review).
+    import aeview.cli as cli
+
     d = git_repo / ".aeview" / "reviewers" / "cs"
     d.mkdir(parents=True)
     (d / "REVIEWER.md").write_text(
@@ -609,6 +616,21 @@ def test_run_freezes_composed_schema(aeview_home, git_repo, stub_claude, monkeyp
         "  recommendation: null\n"
         "---\nreview it\n"
     )
+    captured: dict = {}
+
+    async def fake_fan_out(
+        s,
+        roster,
+        prompts,
+        cwd,
+        timeout=None,
+        override_harness_binaries=None,
+        schema_by_reviewer=None,
+    ):
+        captured["schemas"] = schema_by_reviewer
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     monkeypatch.chdir(git_repo)
     (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
     CliRunner().invoke(app, ["run", "--reviewers", "cs", "--scope", "working-tree"])
@@ -617,7 +639,8 @@ def test_run_freezes_composed_schema(aeview_home, git_repo, stub_claude, monkeyp
     expected = compose_review_schema(
         {"category": {"type": "string", "enum": ["x"]}, "recommendation": None}
     )
-    assert RunStore(rid).read_review_schema("cs") == expected
+    assert RunStore(rid).read_review_schema("cs") == expected  # frozen to the run dir
+    assert captured["schemas"] == {"cs": expected}  # and handed to fan-out
 
 
 def test_resume_reuses_frozen_custom_schema(aeview_home, monkeypatch):
@@ -768,3 +791,28 @@ def test_resume_tolerates_corrupt_frozen_schema(aeview_home, monkeypatch):
     monkeypatch.setattr(cli, "fan_out", fake_fan_out)
     CliRunner().invoke(app, ["resume", "cx"])
     assert captured["schemas"] == {}  # corrupt schema omitted -> default fallback, no crash
+
+
+# --- fragment validity, JSON-serializability, and size (resolve-time rejection) --------------
+
+
+def test_invalid_json_schema_fragment_rejected(tmp_path):
+    # A structurally-valid dict that isn't a valid JSON Schema (bad "type") is caught at resolve.
+    _write_reviewer(tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: {type: notatype}")
+    with pytest.raises(ResolveError, match="not a valid JSON Schema"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_non_json_serializable_inline_fragment_rejected(tmp_path):
+    # A YAML scalar that parses to a non-JSON value (a date) would crash the freeze — reject early.
+    _write_reviewer(tmp_path, "bad", "name: bad\ncustom-schemas:\n  body: {const: 2024-01-01}")
+    with pytest.raises(ResolveError, match="not JSON-serializable"):
+        resolve_reviewer("bad", tmp_path, _settings())
+
+
+def test_oversized_scalar_fragment_rejected(tmp_path):
+    # Node-count doesn't bound a single huge scalar; the byte cap does.
+    huge = "x" * 20000
+    _write_reviewer(tmp_path, "bad", f'name: bad\ncustom-schemas:\n  body: {{const: "{huge}"}}')
+    with pytest.raises(ResolveError, match="exceeds"):
+        resolve_reviewer("bad", tmp_path, _settings())

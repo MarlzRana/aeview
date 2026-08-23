@@ -38,6 +38,9 @@ RESERVED_REVIEWER_NAMES = {"all"}
 # prompt, so cap its size/depth and forbid $ref (no remote/recursive resolution in this build).
 _MAX_FRAGMENT_NODES = 512
 _MAX_FRAGMENT_DEPTH = 12
+# Cap the serialized fragment too: node-count alone doesn't bound a single huge scalar, and the
+# fragment is frozen (json.dumps) and embedded in every harness prompt.
+_MAX_FRAGMENT_BYTES = 10_000
 
 
 class ResolveError(Exception):
@@ -256,6 +259,17 @@ def _resolve_custom_schemas(
             continue
         fragment = _load_fragment(value, reviewer_dir, slot)
         _sanitize_fragment(fragment, slot)
+        # The fragment is frozen (json.dumps) and embedded in every harness prompt, so require it to
+        # be JSON-serializable and bounded. An inline YAML value like a date or inf/nan parses to a
+        # non-JSON object that passes the checks above but would crash the freeze; catch it here.
+        try:
+            serialized = json.dumps(fragment, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ResolveError(
+                f"custom-schemas.{slot}: schema is not JSON-serializable: {exc}"
+            ) from exc
+        if len(serialized) > _MAX_FRAGMENT_BYTES:
+            raise ResolveError(f"custom-schemas.{slot}: schema exceeds {_MAX_FRAGMENT_BYTES} bytes")
         # Fail early with a clear error if the fragment isn't a valid JSON Schema (e.g. a typo'd
         # type), rather than surfacing a cryptic error at review time when the output is validated.
         try:

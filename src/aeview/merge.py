@@ -53,10 +53,8 @@ _RESERVED_KEYS = ("id", "sources", "agreement")
 
 
 def _carry(finding: Finding) -> dict:
-    data = finding.model_dump()
-    for key in _RESERVED_KEYS:
-        data.pop(key, None)
-    return data
+    # exclude= drops the reserved keys whether they're real fields or extras (extra="allow").
+    return finding.model_dump(exclude=set(_RESERVED_KEYS))
 
 
 async def merge_reviews(
