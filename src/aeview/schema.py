@@ -17,6 +17,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field
 
 Severity = Literal["critical", "high", "medium", "low"]
@@ -26,12 +27,10 @@ ReviewStatus = Literal["pending", "running", "done", "failed"]
 RunState = Literal["running", "done", "failed", "interrupted"]
 DedupState = Literal["ok", "skipped", "failed"]
 
-# The finding skeleton — the fields the merge/report/dedup mechanics read (sort, verdict, survivor
-# choice, corroboration, location). It is strictly typed and can NEVER be customized: a reviewer's
-# `custom-schemas` may only reshape or drop the descriptive slots below, never these.
-SKELETON_FIELDS = ("severity", "confidence", "location")
 # The descriptive slots a reviewer may override (with a JSON Schema fragment) or drop (null) via
-# `custom-schemas`. A closed set: everything else in a finding is either the skeleton or internal.
+# `custom-schemas`. A closed set — everything else in a finding is either internal or the skeleton
+# (severity/confidence/location), which is strictly typed and never customizable because every
+# merge/report/dedup mechanic (sort, verdict, survivor choice, corroboration, location) reads it.
 CUSTOMIZABLE_SLOTS = ("title", "body", "recommendation", "category")
 
 
@@ -78,8 +77,8 @@ class _DefaultReviewOutput(BaseModel):
 class Finding(BaseModel):
     """A single issue as emitted by a reviewer (no provenance yet).
 
-    The skeleton (`SKELETON_FIELDS`) is strictly typed — every merge/report/dedup mechanic reads
-    only these, so they must always be present and well-formed. The descriptive slots
+    The skeleton (severity/confidence/location) is strictly typed — every merge/report/dedup
+    mechanic reads only these, so they must always be present and well-formed. The descriptive slots
     (`CUSTOMIZABLE_SLOTS`) and any reviewer-defined fields ride as extra (`extra="allow"`): a
     reviewer's `custom-schemas` reshapes or drops them, and the per-reviewer JSON schema — not this
     model — enforces their real shape at the harness boundary. This is why the pipeline is immune to
@@ -339,33 +338,18 @@ def compose_review_schema(custom_schemas: Mapping[str, dict | None] | None = Non
     return schema
 
 
-def build_review_validator(schema: dict) -> Callable[[dict], object]:
-    """A post-validator derived from a (frozen) review schema.
+def build_review_validator(schema: dict) -> Callable[[dict], None]:
+    """A post-validator: check a harness's output against the (frozen) review schema with a real
+    JSON-Schema engine. Validates every reviewer uniformly — the built-in shape AND a custom-schemas
+    reviewer's reshaped/dropped slots, inner fragment constraints (enums, ranges, required
+    sub-fields) included — so a drifting harness fails loudly (the base.py post-validation
+    invariant). This matters most for the prompt-mode harnesses, which have no provider-side schema
+    enforcement. Deriving it purely from the frozen schema keeps resume trivially correct: rebuild
+    from the frozen copy, never from live `REVIEWER.md`."""
+    validator = Draft202012Validator(schema)
 
-    For the built-in schema (a reviewer with no `custom-schemas`) this is the strict default
-    contract — byte-for-byte the pre-feature validation — so a default reviewer's category enum,
-    title length, and stray keys are still caught loudly, notably on the prompt-mode harnesses that
-    lean on this post-check.
-
-    For a customized schema it checks what the pipeline depends on — the review shape + the finding
-    skeleton (via the loose `ReviewOutput`) — plus that every finding carries the schema's required
-    non-skeleton slots. The slots' *inner* shape is enforced by the harness during generation
-    (constrained/validated/prompt), not re-checked here (no JSON-Schema engine is bundled).
-
-    Deriving the validator purely from the schema is what makes resume trivially correct: rebuild
-    from the frozen schema, never from live `REVIEWER.md`."""
-    if schema == review_output_json_schema():
-        return _DefaultReviewOutput.model_validate
-    required_slots = set(_finding_def(schema).get("required", ())) - set(SKELETON_FIELDS)
-
-    def _validate(payload: dict) -> ReviewOutput:
-        review = ReviewOutput.model_validate(payload)  # verdict/summary/skeleton/next_steps
-        for finding in payload.get("findings", []):
-            if isinstance(finding, dict):
-                missing = required_slots - finding.keys()
-                if missing:
-                    raise ValueError(f"finding missing required field(s): {sorted(missing)}")
-        return review
+    def _validate(payload: dict) -> None:
+        validator.validate(payload)  # raises jsonschema.ValidationError on any mismatch
 
     return _validate
 

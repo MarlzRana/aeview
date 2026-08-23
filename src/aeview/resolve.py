@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .config import HarnessInstance, Settings, split_frontmatter
@@ -254,6 +256,14 @@ def _resolve_custom_schemas(
             continue
         fragment = _load_fragment(value, reviewer_dir, slot)
         _sanitize_fragment(fragment, slot)
+        # Fail early with a clear error if the fragment isn't a valid JSON Schema (e.g. a typo'd
+        # type), rather than surfacing a cryptic error at review time when the output is validated.
+        try:
+            Draft202012Validator.check_schema(fragment)
+        except SchemaError as exc:
+            raise ResolveError(
+                f"custom-schemas.{slot}: not a valid JSON Schema: {exc.message}"
+            ) from exc
         resolved[slot] = fragment
     return resolved
 

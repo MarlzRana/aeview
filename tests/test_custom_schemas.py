@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import ValidationError
 from typer.testing import CliRunner
 
 from aeview import merge as merge_mod
@@ -196,8 +197,7 @@ def _default_finding(**over) -> dict:
 
 
 def test_default_validator_is_strict():
-    # No custom-schemas => the strict built-in contract (byte-for-byte the pre-feature validation),
-    # so a skeleton-only finding is rejected via pydantic ("Field required", a ValueError subclass).
+    # No custom-schemas => the built-in schema; a skeleton-only finding is missing required slots.
     v = build_review_validator(review_output_json_schema())
     v(_review([_default_finding()]))  # ok
     skeleton_only = {
@@ -205,33 +205,32 @@ def test_default_validator_is_strict():
         "confidence": 0.5,
         "location": {"file": "a", "line_start": 1, "line_end": 1},
     }
-    with pytest.raises(ValueError, match="required"):
+    with pytest.raises(ValidationError, match="required"):
         v(_review([skeleton_only]))
 
 
 def test_custom_validator_requires_surviving_slots():
-    # A customized schema (only category overridden) still requires the other slots; the loose
-    # validator's presence check fires with its own message when one is missing.
+    # A customized schema (only category overridden) still requires the other slots.
     schema = compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
     v = build_review_validator(schema)
     finding = _default_finding(category="x")
     del finding["body"]
-    with pytest.raises(ValueError, match="missing required field"):
+    with pytest.raises(ValidationError, match="required"):
         v(_review([finding]))
 
 
 def test_default_validator_rejects_bad_skeleton():
     v = build_review_validator(review_output_json_schema())
-    with pytest.raises(ValueError, match="confidence"):  # pydantic ValidationError ⊂ ValueError
+    with pytest.raises(ValidationError, match="maximum"):  # confidence 5.0 > 1.0
         v(_review([_default_finding(confidence=5.0)]))
 
 
 def test_custom_validator_enforces_skeleton():
-    # Even under a customized schema the skeleton is validated (via the loose ReviewOutput).
+    # Even under a customized schema the skeleton is still validated.
     v = build_review_validator(
         compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
     )
-    with pytest.raises(ValueError, match="confidence"):
+    with pytest.raises(ValidationError, match="maximum"):
         v(_review([_default_finding(category="x", confidence=5.0)]))
 
 
@@ -242,6 +241,14 @@ def test_custom_validator_accepts_reshaped_and_drops():
     finding = _default_finding(body={"readability": 4})
     del finding["recommendation"]
     v(_review([finding]))
+
+
+def test_custom_validator_enforces_fragment_inner_shape():
+    # The point of the jsonschema validator: a custom fragment's inner constraints are enforced,
+    # not just field presence (readability is bounded 1-5 by _RUBRIC).
+    v = build_review_validator(compose_review_schema({"body": _RUBRIC}))
+    with pytest.raises(ValidationError, match="maximum"):
+        v(_review([_default_finding(body={"readability": 99})]))
 
 
 # --- loose carrier round-trip ----------------------------------------------------------------

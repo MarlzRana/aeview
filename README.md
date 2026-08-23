@@ -237,6 +237,10 @@ custom-schemas:
   recommendation: null                                   # drop the slot entirely
 ```
 
+- Each harness's output is **validated against the composed schema** (a real JSON-Schema check),
+  including your fragment's inner constraints — a finding that doesn't conform fails the review
+  loudly rather than landing malformed in the report. A fragment that isn't a valid JSON Schema is
+  rejected up front, when the reviewer resolves.
 - **Optional sub-fields** in a fragment are expressed the OpenAI-strict way — nullable and still
   listed in `required` (e.g. `{ "type": ["string", "null"] }`) — so they behave the same across all
   four harnesses. Omitting a field from `required` makes it truly optional on claude/copilot/pi but
