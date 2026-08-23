@@ -683,7 +683,13 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
     captured: dict = {}
 
     async def fake_fan_out(
-        store, roster, prompts, cwd, timeout=None, override_harness_binaries=None, schema=None
+        store,
+        roster,
+        prompts,
+        cwd,
+        timeout=None,
+        override_harness_binaries=None,
+        schema_by_reviewer=None,
     ):
         captured["timeout"] = timeout
         captured["override_harness_binaries"] = override_harness_binaries
@@ -747,7 +753,13 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
     seen: dict = {}
 
     async def fake_fan_out(
-        s, roster, prompts, cwd, timeout=None, override_harness_binaries=None, schema=None
+        s,
+        roster,
+        prompts,
+        cwd,
+        timeout=None,
+        override_harness_binaries=None,
+        schema_by_reviewer=None,
     ):
         seen["report_existed"] = (s.dir / "report.json").exists()
         return []

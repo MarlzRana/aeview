@@ -43,13 +43,17 @@ class Location(BaseModel):
     line_end: int = Field(ge=0)
 
 
+# Strict, private schema-source models: they generate the default JSON schema
+# (`compose_review_schema` with no overrides) and strictly post-validate a default reviewer. They
+# are NOT carriers — findings are stored in the looser `Finding` below. Their name/docstring becomes
+# the model-facing schema `title`/`description`, so both are pinned to the clean pre-custom-schemas
+# text (via `title=` + a user-facing docstring) — never implementation notes, which would leak into
+# the schema every harness sees. (Only the internal `$defs` key differs from the old schema;
+# harnesses resolve `$ref` regardless.)
 class _DefaultFinding(BaseModel):
-    """The built-in finding shape — the contract a reviewer emits when it declares no
-    `custom-schemas`. Strict (`extra="forbid"`). Used ONLY to generate the default findings JSON
-    schema (`compose_review_schema` with no overrides); it is NOT a carrier — findings are stored in
-    the looser `Finding` below, which is why this stays private and unreferenced elsewhere."""
+    """A single issue as emitted by a reviewer (no provenance yet)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", title="Finding")
 
     title: str = Field(min_length=1, max_length=140)
     body: str
@@ -61,11 +65,9 @@ class _DefaultFinding(BaseModel):
 
 
 class _DefaultReviewOutput(BaseModel):
-    """Strict review contract used ONLY to generate the default review JSON schema
-    (`review_output_json_schema`). Kept field-for-field identical to the pre-custom-schemas models
-    so the default schema handed to every harness is byte-for-byte what it always was."""
+    """The structured output contract for a single harness invocation."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", title="ReviewOutput")
 
     verdict: Verdict
     summary: str

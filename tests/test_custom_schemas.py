@@ -11,29 +11,37 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from aeview import merge as merge_mod
+from aeview.cli import app
 from aeview.config import HarnessInstance, Settings
 from aeview.dedup import DedupOutcome
 from aeview.fanout import fan_out
 from aeview.github import _finding_md
 from aeview.harness.base import HarnessOutput, StructuredOutput
 from aeview.harness.claude_code import ClaudeCodeAdapter
+from aeview.harness.codex import CodexAdapter
+from aeview.harness.copilot import CopilotAdapter
+from aeview.harness.pi import PiAdapter
 from aeview.merge import merge_reviews
 from aeview.report import render_human
 from aeview.resolve import ResolveError, resolve_reviewer
-from aeview.runstore import RunStore, new_run_id
+from aeview.runstore import RunStore, latest_run_id, new_run_id
 from aeview.schema import (
     Coverage,
     Dedup,
     DuplicateGroup,
     Finding,
+    Invocation,
     MergedFinding,
     PooledFinding,
     Report,
     ReviewOutput,
     ReviewResult,
     RosterEntry,
+    RunManifest,
+    ScopeSpec,
     Usage,
     UsageBreakdown,
     build_review_validator,
@@ -214,8 +222,17 @@ def test_custom_validator_requires_surviving_slots():
 
 def test_default_validator_rejects_bad_skeleton():
     v = build_review_validator(review_output_json_schema())
-    with pytest.raises(Exception):  # noqa: B017 - pydantic ValidationError on bad confidence
+    with pytest.raises(ValueError, match="confidence"):  # pydantic ValidationError ⊂ ValueError
         v(_review([_default_finding(confidence=5.0)]))
+
+
+def test_custom_validator_enforces_skeleton():
+    # Even under a customized schema the skeleton is validated (via the loose ReviewOutput).
+    v = build_review_validator(
+        compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
+    )
+    with pytest.raises(ValueError, match="confidence"):
+        v(_review([_default_finding(category="x", confidence=5.0)]))
 
 
 def test_custom_validator_accepts_reshaped_and_drops():
@@ -319,29 +336,36 @@ def test_render_human_tolerates_dropped_title_and_recommendation():
 # --- freeze + fan-out delivery ----------------------------------------------------------------
 
 
-class _CaptureSchemaAdapter:
-    def __init__(self) -> None:
-        self.schema: object = "unset"
-
-    async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
-        self.schema = schema
-        return HarnessOutput(
-            review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
-            usage=Usage(),
-            raw="{}",
-        )
-
-
-async def test_fan_out_delivers_per_reviewer_schema(aeview_home, monkeypatch):
+async def test_fan_out_delivers_distinct_schema_per_reviewer(aeview_home, monkeypatch):
     from aeview import fanout
 
-    adapter = _CaptureSchemaAdapter()
-    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
+    seen: dict = {}
+
+    class _Rec:
+        async def run(self, prompt, model, cwd, log_path, thinking=None, timeout=None, schema=None):
+            seen[prompt] = schema  # each reviewer has a distinct prompt
+            return HarnessOutput(
+                review=ReviewOutput(verdict="approve", summary="ok", findings=[], next_steps=[]),
+                usage=Usage(),
+                raw="{}",
+            )
+
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: _Rec())
     store = RunStore.create(new_run_id())
-    entry = RosterEntry(id="r__claude-code-m", reviewer="r", harness="claude-code", model="m")
-    custom = compose_review_schema({"recommendation": None})
-    await fan_out(store, [entry], {"r": "p"}, aeview_home, schema_by_reviewer={"r": custom})
-    assert adapter.schema == custom
+    entries = [
+        RosterEntry(id="r1__claude-code-m", reviewer="r1", harness="claude-code", model="m"),
+        RosterEntry(id="r2__codex-m", reviewer="r2", harness="codex", model="m"),
+    ]
+    s1 = compose_review_schema({"recommendation": None})
+    s2 = compose_review_schema({"category": {"type": "string", "enum": ["x"]}})
+    await fan_out(
+        store,
+        entries,
+        {"r1": "p1", "r2": "p2"},
+        aeview_home,
+        schema_by_reviewer={"r1": s1, "r2": s2},
+    )
+    assert seen == {"p1": s1, "p2": s2}  # each reviewer got its own schema, not the last one
 
 
 def test_review_schema_freeze_round_trips(aeview_home):
@@ -354,10 +378,16 @@ def test_review_schema_freeze_round_trips(aeview_home):
 # --- adapter delegation, dedup survivor, downstream rendering (cycle-1 fixes) -----------------
 
 
-async def test_adapter_run_delivers_custom_schema_and_builds_carrier(tmp_path, monkeypatch):
-    # run() delegates to run_review: the per-reviewer schema reaches run_structured, a
-    # schema-derived validator is applied, and the loose ReviewOutput carrier is built.
-    adapter = ClaudeCodeAdapter()
+@pytest.mark.parametrize(
+    "adapter_cls", [ClaudeCodeAdapter, CodexAdapter, CopilotAdapter, PiAdapter]
+)
+async def test_adapter_run_delivers_custom_schema_and_builds_carrier(
+    adapter_cls, tmp_path, monkeypatch
+):
+    # Every adapter's run() delegates to the shared run_review: the per-reviewer schema reaches
+    # run_structured, a schema-derived validator is applied, and the loose ReviewOutput carrier
+    # is built. Parametrized so a delegation typo in any one adapter is caught.
+    adapter = adapter_cls()
     captured: dict = {}
 
     async def fake_run_structured(
@@ -492,3 +522,106 @@ def test_non_object_json_file_rejected(tmp_path):
     )
     with pytest.raises(ResolveError, match="must contain a JSON Schema object"):
         resolve_reviewer("bad", tmp_path, _settings())
+
+
+# --- merge robustness + freeze/resume wiring -------------------------------------------------
+
+
+async def test_merge_survives_reserved_key_collision(aeview_home):
+    # extra="allow" means a drifting harness could emit a finding key named id/sources/agreement;
+    # merge must strip those (aeview's provenance wins), not TypeError on `Model(id=fid, ...)`.
+    finding = Finding.model_validate(
+        {
+            "severity": "low",
+            "confidence": 0.5,
+            "location": {"file": "a.py", "line_start": 1, "line_end": 1},
+            "title": "t",
+            "id": "harness-supplied",
+            "agreement": 99,
+        }
+    )
+    result = ReviewResult(
+        id="r__claude-code-m",
+        reviewer="r",
+        harness="claude-code",
+        model="m",
+        status="done",
+        verdict="needs-attention",
+        summary="s",
+        findings=[finding],
+        next_steps=[],
+    )
+    store = RunStore.create(new_run_id())
+    report = await merge_reviews([result], Settings(), store, aeview_home)
+    assert len(report.findings) == 1
+    assert report.findings[0].id == "f1"  # aeview's run-local id, not the harness-supplied one
+    assert report.findings[0].agreement == 1  # aeview's, not the emitted 99
+
+
+def test_run_freezes_composed_schema(aeview_home, git_repo, stub_claude, monkeypatch):
+    # A real `run` composes each reviewer's schema and freezes it to the run dir, so resume can
+    # reuse it. stub_claude returns a default-shaped review; the loose custom validator accepts it.
+    d = git_repo / ".aeview" / "reviewers" / "cs"
+    d.mkdir(parents=True)
+    (d / "REVIEWER.md").write_text(
+        "---\n"
+        "name: cs\n"
+        "harnesses: [{harness: claude-code, model: opus}]\n"
+        "custom-schemas:\n"
+        "  category: {type: string, enum: [x]}\n"
+        "  recommendation: null\n"
+        "---\nreview it\n"
+    )
+    monkeypatch.chdir(git_repo)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    CliRunner().invoke(app, ["run", "--reviewers", "cs", "--scope", "working-tree"])
+    rid = latest_run_id()
+    assert rid is not None
+    expected = compose_review_schema(
+        {"category": {"type": "string", "enum": ["x"]}, "recommendation": None}
+    )
+    assert RunStore(rid).read_review_schema("cs") == expected
+
+
+def test_resume_reuses_frozen_custom_schema(aeview_home, monkeypatch):
+    # resume must re-read the frozen schema and hand it to fan_out, not recompose from REVIEWER.md.
+    import aeview.cli as cli
+
+    store = RunStore.create("cs")
+    custom = compose_review_schema({"body": _RUBRIC, "recommendation": None})
+    store.write_review_schema("r", custom)
+    store.write_prompt("r", "P")
+    store.write_manifest(
+        RunManifest(
+            run_id="cs",
+            created_at="2026-08-01T00:00:00Z",
+            overall="interrupted",  # terminal, so resume proceeds
+            invocation=Invocation(reviewers=["r"], scope=ScopeSpec(type="working-tree")),
+            roster=[
+                RosterEntry(id="r__claude-code-m", reviewer="r", harness="claude-code", model="m")
+            ],
+            dedup=None,
+        )
+    )
+    store.write_review(
+        ReviewResult(
+            id="r__claude-code-m", reviewer="r", harness="claude-code", model="m", status="failed"
+        )
+    )
+    captured: dict = {}
+
+    async def fake_fan_out(
+        s,
+        roster,
+        prompts,
+        cwd,
+        timeout=None,
+        override_harness_binaries=None,
+        schema_by_reviewer=None,
+    ):
+        captured["schemas"] = schema_by_reviewer
+        return []
+
+    monkeypatch.setattr(cli, "fan_out", fake_fan_out)
+    CliRunner().invoke(app, ["resume", "cs"])
+    assert captured["schemas"] == {"r": custom}
