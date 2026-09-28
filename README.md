@@ -83,7 +83,8 @@ skills, and verifies your setup:
 npx skills add MarlzRana/aeview --skill aeview-install --global
 ```
 
-Then run `/aeview-install` in your agent (Claude Code, …).
+Then run `/aeview-install` in your agent (Claude Code, …). Later, run `/aeview-update` to upgrade the
+CLI and skills to the latest release.
 
 <details>
 <summary>Prefer to install by hand?</summary>
