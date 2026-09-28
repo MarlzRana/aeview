@@ -219,9 +219,9 @@ Homebrew tap (deferred), PR CI, and Tier-2 smoke. Build history + per-increment 
 
 ## Skills shipped in this repo (`.agents/skills/`)
 
-`aeview` (run a review), `aeview-install` (bootstrap CLI + skills), `aeview-pr`, `aeview-loop`,
-`aeview-loop-with-confirmation`, `aeview-commits`, `aeview-effective-pr` — installed by users via
-`npx skills add MarlzRana/aeview`.
+`aeview` (run a review), `aeview-install` (bootstrap CLI + skills), `aeview-update` (upgrade CLI +
+skills), `aeview-pr`, `aeview-loop`, `aeview-loop-with-confirmation`, `aeview-commits`,
+`aeview-effective-pr` — installed by users via `npx skills add MarlzRana/aeview`.
 Plus `release` — a **maintainer-only** runbook (not for end-user install). Each has a
 `.claude/skills/<name>` symlink → `../../.agents/skills/<name>`.
 
