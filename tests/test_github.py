@@ -222,8 +222,10 @@ def test_build_review_anchors_finding_inline():
     assert c["path"] == "pr_file.py" and c["line"] == 2 and c["side"] == "RIGHT"
     assert "start_line" not in c  # single-line finding -> no range anchor
     assert "🤖 **aeview**" in c["body"]  # the visible badge
+    assert "https://github.com/MarlzRana/aeview" not in c["body"]
     assert "<!-- aeview:finding run=run1 id=f1 -->" in c["body"]  # the machine marker
     assert "reviewers: default__claude-code-opus" in c["body"]  # provenance
+    assert "🤖 **[aeview](https://github.com/MarlzRana/aeview)**" in payload["body"]
     assert "<!-- aeview:review run=run1 -->" in payload["body"]
 
 
@@ -279,6 +281,7 @@ def test_build_review_clean_run_posts_summary_only():
     assert built.inline_findings == 0 and built.body_findings == 0
     payload = _payload(built)
     assert "comments" not in payload
+    assert "🤖 **[aeview](https://github.com/MarlzRana/aeview)**" in payload["body"]
     assert "**approve**" in payload["body"]
 
 
@@ -352,6 +355,7 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     result = post_review(target, _report(findings), "run1", _DIFF, "sha9", tmp_path)
     assert result.fallback_reason and result.in_body == 2 and result.inline == 0
     body = json.loads(cap.read_text())["body"]
+    assert "🤖 **[aeview](https://github.com/MarlzRana/aeview)**" in body
     assert "could not attach inline comments" in body
     assert "<!-- aeview:finding run=run1 id=f1 -->" in body  # every finding carried over
     assert "<!-- aeview:finding run=run1 id=f2 -->" in body

@@ -37,6 +37,7 @@ from .schema import Location, MergedFinding, Report
 # Visible badge so a human reading the PR can tell aeview spoke (the comment is authored by the
 # gh-authenticated user, not a distinct bot account); the hidden marker is the machine signal.
 _BADGE = "🤖 **aeview** (automated review panel)"
+_SUMMARY_BADGE = "🤖 **[aeview](https://github.com/MarlzRana/aeview)** (automated review panel)"
 _REVIEW_MARKER = "<!-- aeview:review run={run_id} -->"
 _FINDING_MARKER = "<!-- aeview:finding run={run_id} id={finding_id} -->"
 
@@ -299,7 +300,7 @@ def _review_body(
     ones for a normal review, or every finding on the fallback path (where `note` explains why)."""
     label = report_verdict_label(report)
     parts = [
-        f"{_BADGE} — **{label}**",
+        f"{_SUMMARY_BADGE} — **{label}**",
         report.summary.strip() or "(no summary)",
     ]
     cov = report.coverage
