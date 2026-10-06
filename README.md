@@ -156,7 +156,8 @@ With `--scope pr`, add `--post-comments` to publish the merged review onto the P
 `gh`). aeview posts **one review per run** — a GitHub *review* with event `COMMENT`, so it never
 approves or requests changes and can't gate your merge — made of:
 
-- a **summary** comment (verdict, summary, coverage), and
+- a **summary** comment (verdict, summary, coverage) with a link from the aeview badge to its
+  GitHub repository, and
 - one **inline comment** per finding, anchored to its file and line in the PR diff. A finding whose
   line isn't part of the diff (reviewers can read your whole tree) is listed in the summary instead,
   so nothing is dropped.
