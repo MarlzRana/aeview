@@ -185,12 +185,12 @@ spot). Building to satisfy them is over-engineering. When genuinely unsure, flag
 files, pytest green.
 
 **Commits:** conventional-commit-style prefixes (`feat`/`fix`/`refactor`/`docs`/`chore`/`ci`/`perf`/
-`nit`), imperative, concise; group logically. Use the configured Git author and committer identity;
-do not set either to an AI model. Only add a `Co-Authored-By` trailer when it accurately identifies
-a contributor and follows the user's or platform's instructions. Never hard-code or guess a model
-or version for attribution. Follow the user's choice of branch, worktree, and PR flow; push when
-requested or when needed for a workflow the user requested. The maintainer handles releases unless
-explicitly delegated.
+`nit`), imperative, concise; group logically. Use the configured Git author and committer identity
+by default. An AI identity is valid in either field when it accurately names who authored or
+committed the change. Only add a `Co-Authored-By` trailer when it accurately identifies a contributor
+and follows the user's or platform's instructions. Never hard-code or guess a model or version for
+attribution. Follow the user's choice of branch, worktree, and PR flow; push when requested or when
+needed for a workflow the user requested. The maintainer handles releases unless explicitly delegated.
 
 **Asking:** use **AskUserQuestion** for genuine forks until you're ~95% confident; pick sensible
 defaults for everything else and say what you chose. Verify external/dependency behavior empirically
