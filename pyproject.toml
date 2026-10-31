@@ -30,7 +30,7 @@ dependencies = [
     # Validate harness output against a reviewer's (possibly custom) finding schema. Already in the
     # tree transitively (claude-agent-sdk -> mcp), but declared directly so the import is guaranteed.
     "jsonschema>=4.26",
-    "claude-agent-sdk>=0.2.101",
+    "claude-agent-sdk>=0.2.176",
     "openai-codex>=0.144.4",
     "github-copilot-sdk>=1.0.1",
 ]
