@@ -520,6 +520,46 @@ def test_delete_comment_treats_404_as_gone(tmp_path, monkeypatch):
     assert not delete_comment(_TARGET, 1, tmp_path)
 
 
+def test_delete_comment_hides_as_outdated_when_delete_is_refused(tmp_path, monkeypatch):
+    calls: list[tuple[list[str], str | None]] = []
+    replies = iter(
+        [
+            github.ProcResult(1, "", "gh: Must have admin rights (HTTP 403)"),
+            github.ProcResult(0, json.dumps({"id": 1, "node_id": "IC_x"}), ""),
+            github.ProcResult(
+                0,
+                json.dumps(
+                    {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
+                ),
+                "",
+            ),
+        ]
+    )
+
+    def fake_run(args, cwd=None, timeout=None, input_text=None):
+        calls.append((args, input_text))
+        return next(replies)
+
+    monkeypatch.setattr(github, "run_sync", fake_run)
+    assert delete_comment(_TARGET, 1, tmp_path)
+    graphql_args, graphql_body = calls[-1]
+    assert "graphql" in graphql_args
+    sent = json.loads(graphql_body or "{}")
+    assert "classifier: OUTDATED" in sent["query"] and sent["variables"] == {"id": "IC_x"}
+
+
+def test_delete_comment_refused_and_unhideable_is_not_gone(tmp_path, monkeypatch):
+    replies = iter(
+        [
+            github.ProcResult(1, "", "gh: Must have admin rights (HTTP 403)"),
+            github.ProcResult(0, json.dumps({"id": 1, "node_id": "IC_x"}), ""),
+            github.ProcResult(1, json.dumps({"data": {"minimizeComment": None}}), "gh: forbidden"),
+        ]
+    )
+    monkeypatch.setattr(github, "run_sync", lambda *a, **k: next(replies))
+    assert not delete_comment(_TARGET, 1, tmp_path)  # left for the next sweep to retry
+
+
 async def test_progress_coalesces_bursts_and_ends_on_latest_state(tmp_path, monkeypatch):
     import time
 

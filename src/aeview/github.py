@@ -470,6 +470,11 @@ _BAR_WIDTH = 20
 # (a Ctrl-C waits on an in-flight edit) for as long as the final post may take.
 _PROGRESS_TIMEOUT_S = 15
 _NOT_FOUND = re.compile(r"HTTP 404")
+_FORBIDDEN = re.compile(r"HTTP 403")
+_HIDE_AS_OUTDATED = (
+    "mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) "
+    "{ minimizedComment { isMinimized } } }"
+)
 
 
 def _cell(text: str) -> str:
@@ -542,9 +547,31 @@ def _edit_comment(target: PrTarget, comment_id: int, body: str, cwd: Path) -> Pr
 
 
 def delete_comment(target: PrTarget, comment_id: int, cwd: Path) -> bool:
-    """Delete an issue comment; True if it's gone afterwards (a 404 means it already was)."""
+    """Remove an issue comment; True once it no longer shows: deleted, already gone (404), or — if
+    GitHub refuses the delete (403) — hidden as outdated instead. A transient failure is False, so
+    the next run's sweep retries."""
     res = _gh_api("DELETE", _comment_endpoint(target, comment_id), None, cwd)
-    return res.returncode == 0 or bool(_NOT_FOUND.search(res.stderr))
+    if res.returncode == 0 or _NOT_FOUND.search(res.stderr):
+        return True
+    return bool(_FORBIDDEN.search(res.stderr)) and _hide_as_outdated(target, comment_id, cwd)
+
+
+def _hide_as_outdated(target: PrTarget, comment_id: int, cwd: Path) -> bool:
+    # Minimizing is GraphQL-only and keyed by node id, which the REST comment carries.
+    got = _gh_api("GET", _comment_endpoint(target, comment_id), None, cwd)
+    try:
+        node_id = json.loads(got.stdout).get("node_id") if got.returncode == 0 else None
+    except json.JSONDecodeError, AttributeError:
+        node_id = None
+    if not isinstance(node_id, str):
+        return False
+    payload = {"query": _HIDE_AS_OUTDATED, "variables": {"id": node_id}}
+    res = _gh_api("POST", "graphql", payload, cwd)
+    try:
+        hidden = json.loads(res.stdout)["data"]["minimizeComment"]["minimizedComment"]
+    except json.JSONDecodeError, KeyError, TypeError:
+        return False
+    return res.returncode == 0 and hidden.get("isMinimized") is True
 
 
 @dataclass(slots=True)

@@ -164,7 +164,7 @@ approves or requests changes and can't gate your merge — made of:
 
 While the panel runs, a separate **progress comment** on the PR shows the roster and a live
 progress bar, updated as each review finishes. Once the review is posted, the progress comment is
-deleted. (GitHub can't add inline comments to a review that's already submitted, so the review itself
+deleted. If GitHub refuses the delete, it's hidden as outdated instead. (GitHub can't add inline comments to a review that's already submitted, so the review itself
 can't be the live view.) Each run gets its own progress comment, so several `aeview` runs can work the
 same PR at once. If a run is interrupted, its comment says so and how to `aeview resume` it, and
 resuming picks the same comment back up. When a later `--post-comments` run starts, it deletes
