@@ -560,6 +560,21 @@ def test_delete_comment_refused_and_unhideable_is_not_gone(tmp_path, monkeypatch
     assert not delete_comment(_TARGET, 1, tmp_path)  # left for the next sweep to retry
 
 
+def test_delete_comment_tolerates_a_null_minimized_comment(tmp_path, monkeypatch):
+    # The schema allows a null leaf with gh exiting 0; that's "not hidden", never an exception.
+    replies = iter(
+        [
+            github.ProcResult(1, "", "gh: Must have admin rights (HTTP 403)"),
+            github.ProcResult(0, json.dumps({"id": 1, "node_id": "IC_x"}), ""),
+            github.ProcResult(
+                0, json.dumps({"data": {"minimizeComment": {"minimizedComment": None}}}), ""
+            ),
+        ]
+    )
+    monkeypatch.setattr(github, "run_sync", lambda *a, **k: next(replies))
+    assert not delete_comment(_TARGET, 1, tmp_path)
+
+
 async def test_progress_coalesces_bursts_and_ends_on_latest_state(tmp_path, monkeypatch):
     import time
 

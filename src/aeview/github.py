@@ -571,7 +571,7 @@ def _hide_as_outdated(target: PrTarget, comment_id: int, cwd: Path) -> bool:
         hidden = json.loads(res.stdout)["data"]["minimizeComment"]["minimizedComment"]
     except json.JSONDecodeError, KeyError, TypeError:
         return False
-    return res.returncode == 0 and hidden.get("isMinimized") is True
+    return res.returncode == 0 and isinstance(hidden, dict) and hidden.get("isMinimized") is True
 
 
 @dataclass(slots=True)
