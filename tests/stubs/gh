@@ -22,7 +22,8 @@ Behaviour is steered by env vars so a test can simulate the non-happy paths:
   AEVIEW_GH_LOG          file to append every `gh api` call to, one JSON {method, endpoint, body}
                          per line (the order of progress-comment edits matters)
   AEVIEW_GH_COMMENT_FAIL "post" -> issues-comment POST exits 1; "edit" -> PATCH exits 1 (HTTP 404);
-                         "edit-5xx" -> PATCH exits 1 (HTTP 502)
+                         "edit-5xx" -> PATCH exits 1 (HTTP 502); "post-timeout" -> issues-comment
+                         POST exits 124 (ambiguous: may have posted)
 """
 
 import json
@@ -102,6 +103,8 @@ if argv[:1] == ["api"]:
         if fail == "post":
             sys.stderr.write("gh: Resource not accessible by integration (HTTP 403)\n")
             sys.exit(1)
+        if fail == "post-timeout":
+            sys.exit(124)
         if cap := os.environ.get("AEVIEW_GH_CAPTURE_COMMENT"):
             Path(cap).write_text(body)
         sys.stdout.write(json.dumps({"id": 9001, "html_url": f"{url}#issuecomment-9001"}))

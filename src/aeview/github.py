@@ -434,7 +434,9 @@ def post_review(
         cwd,
     )
     if cres.returncode != 0:
-        raise GitHubError(
+        # Same rule as the review POST: only a definite 4xx proves the fallback wasn't created.
+        error = GitHubError if _CLIENT_REJECTION.search(cres.stderr) else AmbiguousPostError
+        raise error(
             f"failed to post the review to PR #{target.number} ({reason}); "
             f"the fallback comment also failed ({cres.stderr.strip() or cres.returncode})."
         )

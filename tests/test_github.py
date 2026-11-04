@@ -368,6 +368,29 @@ def test_post_review_falls_back_to_comment_when_review_rejected(tmp_path, stub_g
     assert "<!-- aeview:finding run=run1 id=f2 -->" in body
 
 
+def test_post_review_ambiguous_fallback_failure_is_ambiguous(tmp_path, stub_gh, monkeypatch):
+    # The review was rejected (4xx), but the fallback comment timed out: it may exist, so the
+    # error must say ambiguous (a resume must not post again).
+    from aeview.github import AmbiguousPostError
+
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "reviews")
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "post-timeout")
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
+    with pytest.raises(AmbiguousPostError, match="fallback comment also failed"):
+        post_review(target, _report([_finding(line=2)]), "run1", _DIFF, "sha9", tmp_path)
+
+
+def test_post_review_definite_fallback_failure_is_definite(tmp_path, stub_gh, monkeypatch):
+    from aeview.github import AmbiguousPostError
+
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "reviews")
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "post")  # 403
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
+    with pytest.raises(GitHubError) as info:
+        post_review(target, _report([_finding(line=2)]), "run1", _DIFF, "sha9", tmp_path)
+    assert not isinstance(info.value, AmbiguousPostError)
+
+
 def test_post_review_ambiguous_failure_does_not_fall_back(tmp_path, stub_gh, monkeypatch):
     # A timed-out (or otherwise non-4xx) reviews POST is ambiguous — GitHub may have created it
     # server-side. Falling back to a comment would double-post, so we raise and post nothing more.

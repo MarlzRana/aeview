@@ -757,6 +757,26 @@ def test_post_comments_marks_the_comment_interrupted_on_ctrl_c(
     assert f"aeview resume {_only_run().run_id}" in body
 
 
+def test_post_comments_marks_the_comment_failed_on_an_unexpected_error(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    from aeview import cli
+
+    async def crash(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(cli, "_run_reviews_and_merge", crash)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert isinstance(result.exception, RuntimeError)
+    body = json.loads(json.loads(log.read_text().splitlines()[-1])["body"])["body"]
+    assert "❌ **failed**" in body and "unexpected error" in body
+
+
 def test_post_comments_posts_while_the_run_still_reads_live(
     aeview_home, git_repo, stub_claude, stub_gh, monkeypatch
 ):
@@ -850,11 +870,13 @@ def test_definite_post_failure_lets_resume_retry(
 
     real_post = cli.post_review
     reject = [True]
+    overall_at_post: list[str] = []
 
-    def post(*args):
+    def post(target, report, run_id, *rest):
         if reject[0]:
             raise GitHubError("HTTP 422 and the fallback comment also failed")
-        return real_post(*args)
+        overall_at_post.append(RunStore(run_id).read_manifest().overall)
+        return real_post(target, report, run_id, *rest)
 
     monkeypatch.setattr(cli, "post_review", post)
     monkeypatch.chdir(git_repo)
@@ -868,6 +890,8 @@ def test_definite_post_failure_lets_resume_retry(
     monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
     CliRunner().invoke(app, ["resume", store.run_id])
     assert ("POST", "repos/o/r/pulls/7/reviews") in _gh_calls(log)
+    assert overall_at_post == ["running"]  # the post-only resume owns the run while posting
+    assert store.read_manifest().overall == "done"
 
 
 def test_sweep_rechecks_liveness_before_deleting(aeview_home, stub_gh, monkeypatch, tmp_path):

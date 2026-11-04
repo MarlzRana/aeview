@@ -261,9 +261,8 @@ def run(
         )
     try:
         report = asyncio.run(_execute(plan, settings, cwd, run_id, pr_post, progress))
-    except KeyboardInterrupt:
-        if progress is not None:
-            progress.finish("interrupted")
+    except BaseException as exc:
+        _abandon_progress(progress, exc)
         raise
 
     # `run` emits the gate (full findings minus the result-only fields); the full report is
@@ -939,6 +938,11 @@ def resume(
             # A crash between the merge and the post leaves the review unposted (or the progress
             # comment undeleted) and the run non-terminal; finish that rather than re-merging.
             if manifest.pr_post is not None:
+                # Own the run while posting, as the full resume below does, so a concurrent run
+                # neither sweeps its comment nor prunes it mid-post.
+                manifest.overall, manifest.finished_at = "running", None
+                manifest.pid = os.getpid()
+                store.write_manifest(manifest)
                 _finish_pr_post(store, manifest, report, None)
                 _mark_terminal(store, manifest, report)
             _emit_report(report, json_out)
@@ -995,11 +999,21 @@ def resume(
                 progress,
             )
         )
-    except KeyboardInterrupt:
-        if progress is not None:
-            progress.finish("interrupted")
+    except BaseException as exc:
+        _abandon_progress(progress, exc)
         raise
     _emit_report(report, json_out)
+
+
+def _abandon_progress(progress: ProgressComment | None, exc: BaseException) -> None:
+    """Don't leave the comment claiming the run is still going: Ctrl-C reads as resumable, any
+    other crash as failed. Typer's Exit is a normal exit, already handled by the run itself."""
+    if progress is None or isinstance(exc, typer.Exit):
+        return
+    if isinstance(exc, KeyboardInterrupt):
+        progress.finish("interrupted")
+    else:
+        progress.finish("failed", "aeview stopped with an unexpected error.")
 
 
 def _resume_progress(store: RunStore, manifest: RunManifest, cwd: Path) -> ProgressComment | None:
