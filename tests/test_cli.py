@@ -633,6 +633,20 @@ def test_post_comments_progress_comment_lifecycle(
     assert pr_post.review_url and pr_post.progress_comment_id is None
 
 
+def test_pr_scope_without_post_comments_never_calls_the_github_api(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # No progress comment, no sweep (even with a stale local run on this PR), no review: only
+    # --post-comments touches `gh api`; plain --scope pr just reads the diff via `gh pr`.
+    _stale_pr_run("dead-run", 555)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default"])
+    assert result.exit_code == 1
+    assert not log.exists()
+
+
 def test_post_comments_progress_post_failure_aborts_before_the_run(
     aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
 ):
