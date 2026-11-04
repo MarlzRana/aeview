@@ -21,7 +21,8 @@ Behaviour is steered by env vars so a test can simulate the non-happy paths:
   AEVIEW_GH_CAPTURE_COMMENT  file to write the issues-comment POST body to
   AEVIEW_GH_LOG          file to append every `gh api` call to, one JSON {method, endpoint, body}
                          per line (the order of progress-comment edits matters)
-  AEVIEW_GH_COMMENT_FAIL "post" -> issues-comment POST exits 1; "edit" -> PATCH exits 1 (HTTP 404)
+  AEVIEW_GH_COMMENT_FAIL "post" -> issues-comment POST exits 1; "edit" -> PATCH exits 1 (HTTP 404);
+                         "edit-5xx" -> PATCH exits 1 (HTTP 502)
 """
 
 import json
@@ -81,6 +82,9 @@ if argv[:1] == ["api"]:
     if "/issues/comments/" in endpoint:
         if method == "PATCH" and fail == "edit":
             sys.stderr.write("gh: Not Found (HTTP 404)\n")
+            sys.exit(1)
+        if method == "PATCH" and fail == "edit-5xx":
+            sys.stderr.write("gh: Bad Gateway (HTTP 502)\n")
             sys.exit(1)
         sys.stdout.write(json.dumps({"id": int(endpoint.rsplit("/", 1)[1])}) if method == "PATCH" else "")
         sys.exit(0)

@@ -464,6 +464,19 @@ def test_open_progress_replaces_a_vanished_comment(tmp_path, stub_gh, monkeypatc
     assert [c["method"] for c in _log(log)] == ["PATCH", "POST"]
 
 
+def test_open_progress_keeps_the_old_comment_on_a_non_404_edit_failure(
+    tmp_path, stub_gh, monkeypatch
+):
+    # A 5xx/timeout doesn't prove the comment is gone; a second POST would orphan the first.
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "edit-5xx")
+    progress = open_progress(_TARGET, "run1", _ROSTER, "sha", tmp_path, existing_id=42)
+    assert progress.comment_id == 42
+    assert progress.error is not None and "HTTP 502" in progress.error
+    assert [c["method"] for c in _log(log)] == ["PATCH"]
+
+
 def test_open_progress_raises_when_post_fails(tmp_path, stub_gh, monkeypatch):
     monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "post")
     with pytest.raises(GitHubError, match="HTTP 403"):

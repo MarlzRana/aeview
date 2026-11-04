@@ -299,14 +299,16 @@ class PrTarget(BaseModel):
 
 class PrPost(BaseModel):
     """A `--post-comments` run's GitHub state, in run.json so resume posts to the same PR/commit and
-    finishes (or replaces) the same progress comment. `review_url` is set once the review is
-    posted, so a resume after that point never double-posts it."""
+    finishes (or replaces) the same progress comment. `review_attempted` is set *before* the review
+    POST and `review_url` once it succeeds: a timed-out POST (or a crash after GitHub accepted it)
+    may have created the review, so a resume never re-posts the same report after an attempt."""
 
     model_config = ConfigDict(extra="forbid")
 
     target: PrTarget
     head_sha: str | None = None
     progress_comment_id: int | None = None
+    review_attempted: bool = False
     review_url: str | None = None
 
 

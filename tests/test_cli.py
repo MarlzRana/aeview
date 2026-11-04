@@ -734,6 +734,112 @@ def test_resume_finishes_the_progress_comment_and_posts_the_review(
     assert pr_post is not None and pr_post.review_url and pr_post.progress_comment_id is None
 
 
+def test_post_comments_marks_the_comment_interrupted_on_ctrl_c(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    from aeview import cli
+
+    async def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_run_reviews_and_merge", interrupted)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert result.exit_code != 0  # the interrupt still propagates
+    last = json.loads(log.read_text().splitlines()[-1])
+    assert (last["method"], last["endpoint"]) == ("PATCH", "repos/o/r/issues/comments/9001")
+    body = json.loads(last["body"])["body"]
+    assert "⚠️ **interrupted**" in body
+    assert f"aeview resume {_only_run().run_id}" in body
+
+
+def test_post_comments_posts_while_the_run_still_reads_live(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch
+):
+    # Terminal only after posting: a concurrent sweep/resume must not treat a posting run as dead.
+    from aeview import cli
+
+    seen: list[str] = []
+    real_post = cli.post_review
+
+    def spy(target, report, run_id, *rest):
+        seen.append(RunStore(run_id).read_manifest().overall)
+        return real_post(target, report, run_id, *rest)
+
+    monkeypatch.setattr(cli, "post_review", spy)
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"])
+    assert seen == ["running"]
+    assert _only_run().read_manifest().overall == "done"
+
+
+def test_post_comments_sweeps_before_pruning(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # Pruning first would rmtree a stale run (and its recorded comment id) before the sweep saw it.
+    from aeview import cli
+
+    _stale_pr_run("dead-run", 555)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    swept_at_prune: list[bool] = []
+    monkeypatch.setattr(
+        cli,
+        "prune_runs",
+        lambda retention: swept_at_prune.append(
+            ("DELETE", "repos/o/r/issues/comments/555") in _gh_calls(log)
+        ),
+    )
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"])
+    assert swept_at_prune == [True]
+
+
+def test_resume_does_not_repost_after_an_ambiguous_post(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # A timed-out reviews POST may have created the review; resume must not post it again.
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "timeout")
+    monkeypatch.chdir(git_repo)
+    first = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert "failed ambiguously" in first.stderr
+    store = _only_run()
+    pr_post = store.read_manifest().pr_post
+    assert pr_post is not None and pr_post.review_attempted and pr_post.review_url is None
+
+    monkeypatch.delenv("AEVIEW_GH_API_FAIL")
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    resumed = CliRunner().invoke(app, ["resume", store.run_id])
+    assert "may have succeeded; not re-posting" in resumed.stderr
+    assert not log.exists()  # no review POST (nor any other API call)
+
+
+def test_resume_that_reruns_reviews_posts_the_new_report(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # The first post covered the earlier report; a resume that re-runs a review makes a new one.
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"])
+    store = _only_run()
+    [review] = store.read_reviews()
+    review.status = "failed"  # as if it had failed (e.g. a usage limit) and been posted without it
+    store.write_review(review)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    resumed = CliRunner().invoke(app, ["resume", store.run_id])
+    assert resumed.exit_code == 1
+    calls = _gh_calls(log)
+    assert calls[0] == ("POST", "repos/o/r/issues/7/comments")  # the old comment was deleted
+    assert ("POST", "repos/o/r/pulls/7/reviews") in calls
+
+
 def test_merge_settings_carries_the_pinned_dedup_plan():
     # run/resume re-merge with the harness frozen in run.json, never current settings.json.
     from aeview.cli import _merge_settings

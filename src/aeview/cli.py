@@ -238,12 +238,13 @@ def run(
         )
 
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
+    if pr_target is not None:
+        _sweep_stale_progress(pr_target, cwd)  # before prune: a pruned run's comment id is lost
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
     run_id = new_run_id()
     pr_post: PrPost | None = None
     progress: ProgressComment | None = None
     if pr_target is not None:
-        _sweep_stale_progress(pr_target, cwd)
         # Posted before the run dir exists: if GitHub won't take a comment, fail fast (like a
         # missing PR) rather than spend a whole panel with nowhere to post.
         try:
@@ -379,7 +380,18 @@ def _finish_pr_post(
         if progress is not None:
             progress.finish("failed", "No reviews contributed, so no review was posted.")
         return
-    if pr.review_url is None:  # set once posted, so a resume never double-posts the review
+    if pr.review_url is None and pr.review_attempted:
+        typer.echo(
+            "aeview: an earlier attempt to post this review may have succeeded; not re-posting — "
+            f"check the PR ({pr.target.url})",
+            err=True,
+        )
+        if progress is not None:
+            progress.finish("failed", "An earlier attempt to post this review may have succeeded.")
+        return
+    if pr.review_url is None:
+        pr.review_attempted = True
+        store.write_manifest(manifest)
         try:
             posted = post_review(
                 pr.target, report, store.run_id, store.read_bundle_diff(), pr.head_sha, cwd
@@ -679,13 +691,19 @@ async def _run_reviews_and_merge(
         dedup_prompt_source,
     )
     store.write_report(report)
+    if progress is not None:
+        await progress.drain()  # no in-flight edit may land after the comment is deleted
+    # Post before going terminal: until then the run reads as live, so a concurrent run's sweep
+    # won't delete its comment and a resume won't race it into posting a duplicate review.
+    _finish_pr_post(store, manifest, report, progress)
+    _mark_terminal(store, manifest, report)
+    return report
+
+
+def _mark_terminal(store: RunStore, manifest: RunManifest, report: Report) -> None:
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"
     manifest.finished_at = now_iso()
     store.write_manifest(manifest)
-    if progress is not None:
-        await progress.drain()  # no in-flight edit may land after the comment is deleted
-    _finish_pr_post(store, manifest, report, progress)
-    return report
 
 
 def _render_dry_run(plan: _Plan, pr_target: PrTarget | None = None) -> str:
@@ -898,8 +916,10 @@ def resume(
         else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
             # A crash between the merge and the post leaves the review unposted (or the progress
-            # comment undeleted); finish that rather than re-merging.
-            _finish_pr_post(store, manifest, report, None)
+            # comment undeleted) and the run non-terminal; finish that rather than re-merging.
+            if manifest.pr_post is not None:
+                _finish_pr_post(store, manifest, report, None)
+                _mark_terminal(store, manifest, report)
             _emit_report(report, json_out)
 
     # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
@@ -932,6 +952,12 @@ def resume(
     manifest.pid = os.getpid()
     store.write_manifest(manifest)
 
+    if manifest.pr_post is not None and pending:
+        # Re-running reviews produces a new report, so it gets its own review; the old one (if
+        # any) stays on the PR as that earlier report's record, as for a fresh run.
+        manifest.pr_post.review_attempted = False
+        manifest.pr_post.review_url = None
+        store.write_manifest(manifest)
     progress = _resume_progress(store, manifest, cwd)
     settings = load_settings()
     try:
@@ -957,10 +983,10 @@ def resume(
 
 def _resume_progress(store: RunStore, manifest: RunManifest, cwd: Path) -> ProgressComment | None:
     """Bring a `--post-comments` run's progress comment back to life for the resume (or post a new
-    one if it was swept). Skipped once the review is posted — a resume never posts a second one.
-    Unlike `run`, a failure here only costs the live view, so it warns instead of aborting."""
+    one if it was swept). Skipped once this report's review was posted (or attempted). Unlike
+    `run`, a failure here only costs the live view, so it warns instead of aborting."""
     pr = manifest.pr_post
-    if pr is None or pr.review_url is not None:
+    if pr is None or pr.review_url is not None or pr.review_attempted:
         return None
     done = {r.id: r for r in store.read_reviews() if r.status == "done"}
     try:

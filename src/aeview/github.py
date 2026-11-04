@@ -613,15 +613,16 @@ def open_progress(
     existing_id: int | None = None,
 ) -> ProgressComment:
     """Post the run's progress comment — or, on resume, take back `existing_id` by editing it, and
-    post a fresh one if that comment is gone (e.g. swept while the run was interrupted). Raises
-    GitHubError if no comment could be posted."""
+    post a fresh one only if that comment is definitely gone (a 404, e.g. swept while the run was
+    interrupted). Any other edit failure keeps the old id: posting a second comment would orphan
+    the first, which nothing then tracks. Raises GitHubError if no comment could be posted."""
     progress = ProgressComment(target, run_id, roster, head_sha, cwd, dict(reviews or {}))
-    if (
-        existing_id is not None
-        and _edit_comment(target, existing_id, progress.body(), cwd).returncode == 0
-    ):
+    if existing_id is not None:
         progress.comment_id = existing_id
-        return progress
+        res = _edit_comment(target, existing_id, progress.body(), cwd)
+        if not _NOT_FOUND.search(res.stderr) or res.returncode == 0:
+            progress._note_failure(res)
+            return progress
     res = _gh_api(
         "POST",
         f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
