@@ -12,6 +12,7 @@ review failing never aborts the run — it is recorded in coverage.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 from collections.abc import Callable
 from pathlib import Path
@@ -52,8 +53,7 @@ async def _run_review(
         started_at=now_iso(),
     )
     store.write_review(result)
-    if on_update is not None:
-        on_update(result)
+    _notify(on_update, result)
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
@@ -64,9 +64,17 @@ async def _run_review(
         final = _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
         final = _mark_failed(store, result, f"unexpected error: {exc}")
-    if on_update is not None:
-        on_update(final)
+    _notify(on_update, final)
     return final
+
+
+def _notify(on_update: OnUpdate | None, result: ReviewResult) -> None:
+    # The hook is cosmetic (progress display); a bug in it must not escape the worker and cancel
+    # its siblings mid-review via gather().
+    if on_update is None:
+        return
+    with contextlib.suppress(Exception):
+        on_update(result)
 
 
 async def _attempt_review(
