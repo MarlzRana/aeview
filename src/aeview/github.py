@@ -14,6 +14,9 @@ is all-or-nothing (one out-of-diff line 422s the whole batch). So we pre-validat
 against the diff and route the rest into the body; if the post still fails, we fall back to a single
 top-level comment carrying every finding (the findings are never silently dropped).
 
+Live progress: before the fan-out, a separate issue comment shows the roster and a progress bar, is
+edited as reviews finish, and is deleted once the review is posted (see the progress section).
+
 Threading: each run is its own review, so re-running leaves a fresh thread per finding even on a
 line a previous run already commented on — the series of reviews is the PR's audit trail. Within one
 review, findings sharing an anchor are merged into one comment (the API can't thread siblings that
@@ -24,15 +27,17 @@ All `gh` interaction for posting is funnelled through here, keeping merge.py/rep
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from .process import ProcResult, run_sync
 from .report import report_verdict_label
-from .schema import Location, MergedFinding, Report
+from .schema import Location, MergedFinding, PrTarget, Report, ReviewResult, RosterEntry
 
 # Visible badge so a human reading the PR can tell aeview spoke (the comment is authored by the
 # gh-authenticated user, not a distinct bot account); the hidden marker is the machine signal.
@@ -68,19 +73,9 @@ class GitHubError(Exception):
     """Raised when the PR target can't be resolved or posting fails irrecoverably."""
 
 
-@dataclass(slots=True)
-class PrTarget:
-    """The open PR a review posts to (resolved before the fan-out, so a missing PR fails fast).
-
-    The commit to anchor comments to is NOT here — it's the diff's head SHA (captured with the diff
-    in scope.py, carried on the bundle), so posts land on the reviewed commit, not a later one."""
-
-    number: int
-    url: str
-    # The PR's own repo; used to address the API explicitly instead of gh's cwd-derived
-    # {owner}/{repo} (which would target a local fork, not the upstream the PR lives on).
-    owner: str = "{owner}"
-    repo: str = "{repo}"
+class AmbiguousPostError(GitHubError):
+    """The review POST failed in a way that doesn't prove GitHub rejected it (timeout, 5xx,
+    network): the review may exist, so it must not be retried automatically."""
 
 
 @dataclass(slots=True)
@@ -371,15 +366,21 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
 # --- posting --------------------------------------------------------------------------
 
 
-def _gh_api_post(endpoint: str, payload: Mapping[str, object], cwd: Path) -> ProcResult:
+def _gh_api(
+    method: str,
+    endpoint: str,
+    payload: Mapping[str, object] | None,
+    cwd: Path,
+    timeout: float = _GH_TIMEOUT_S,
+) -> ProcResult:
     # The JSON body is encoded here (the single JSON boundary) and piped on stdin, so a comments[]
     # array (which `-f` flags can't express) and large bodies both pass cleanly. Bounded by a
     # timeout so a stalled gh can't hang the CLI after the run already produced its report.
+    args = ["gh", "api", "--method", method, *_GH_API_HEADERS, endpoint]
+    if payload is None:
+        return run_sync(args, cwd=cwd, timeout=timeout)
     return run_sync(
-        ["gh", "api", "--method", "POST", *_GH_API_HEADERS, endpoint, "--input", "-"],
-        cwd=cwd,
-        input_text=json.dumps(payload),
-        timeout=_GH_TIMEOUT_S,
+        [*args, "--input", "-"], cwd=cwd, input_text=json.dumps(payload), timeout=timeout
     )
 
 
@@ -397,7 +398,8 @@ def post_review(
     against — comments anchor to it. On API rejection, fall back to a single top-level comment with
     every finding so nothing is lost. Raises GitHubError only if both posts fail."""
     built = build_review(report, run_id, diff, head_sha)
-    res = _gh_api_post(
+    res = _gh_api(
+        "POST",
         f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
         built.payload,
         cwd,
@@ -413,7 +415,7 @@ def post_review(
     # comment). Anything else (timeout, 5xx, network) is ambiguous — the review may exist, so a
     # fallback would double-post; raise instead.
     if not _CLIENT_REJECTION.search(res.stderr):
-        raise GitHubError(
+        raise AmbiguousPostError(
             f"posting the review to PR #{target.number} failed ambiguously ({reason}); it may or "
             "may not have been created — check the PR before re-running --post-comments."
         )
@@ -425,13 +427,16 @@ def post_review(
         f"({reason}); all findings are listed below._"
     )
     body = _review_body(report, run_id, report.findings, note=note)
-    cres = _gh_api_post(
+    cres = _gh_api(
+        "POST",
         f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
         {"body": body},
         cwd,
     )
     if cres.returncode != 0:
-        raise GitHubError(
+        # Same rule as the review POST: only a definite 4xx proves the fallback wasn't created.
+        error = GitHubError if _CLIENT_REJECTION.search(cres.stderr) else AmbiguousPostError
+        raise error(
             f"failed to post the review to PR #{target.number} ({reason}); "
             f"the fallback comment also failed ({cres.stderr.strip() or cres.returncode})."
         )
@@ -441,3 +446,231 @@ def post_review(
         in_body=len(report.findings),
         fallback_reason=reason,
     )
+
+
+# --- the live progress comment ----------------------------------------------------------
+#
+# A review can't be "in progress" on GitHub: inline comments only attach to a *pending* review,
+# which nobody else can see, and a submitted one can't gain inline comments (verified against the
+# API). So live progress is a separate issue comment, edited as reviews finish and deleted once the
+# real review lands. One comment per run (never shared), so concurrent runs on a PR can't clobber
+# each other's edits; the hidden marker names the run for humans and tooling.
+
+ProgressPhase = Literal["reviewing", "merging", "interrupted", "failed"]
+
+_PROGRESS_MARKER = "<!-- aeview:progress run={run_id} -->"
+_PHASE_HEADLINE: dict[ProgressPhase, str] = {
+    "reviewing": "⏳ **reviewing…**",
+    "merging": "⏳ **merging findings…**",
+    "interrupted": "⚠️ **interrupted**",
+    "failed": "❌ **failed**",
+}
+_BAR_WIDTH = 20
+# Edits are cosmetic and run while the panel is live; keep a stalled gh from holding up the run
+# (a Ctrl-C waits on an in-flight edit) for as long as the final post may take.
+_PROGRESS_TIMEOUT_S = 15
+_NOT_FOUND = re.compile(r"HTTP 404")
+_FORBIDDEN = re.compile(r"HTTP 403")
+_HIDE_AS_OUTDATED = (
+    "mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) "
+    "{ minimizedComment { isMinimized } } }"
+)
+
+
+def _cell(text: str) -> str:
+    return _sanitize(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _status_cell(r: ReviewResult | None, phase: ProgressPhase) -> str:
+    if r is None or r.status == "pending":
+        return "⏸️ pending"
+    if r.status == "running":
+        # Once the run is over, nothing is still running — it was cut off mid-review.
+        return "🔄 running" if phase in ("reviewing", "merging") else "⚠️ interrupted"
+    if r.status == "failed":
+        return "❌ failed"
+    n = len(r.findings)
+    return f"✅ done · {n} finding{'' if n == 1 else 's'}"
+
+
+def render_progress(
+    run_id: str,
+    roster: list[RosterEntry],
+    reviews: Mapping[str, ReviewResult],
+    phase: ProgressPhase,
+    head_sha: str | None,
+    note: str | None = None,
+) -> str:
+    total = len(roster)
+    finished = sum(
+        1 for e in roster if (r := reviews.get(e.id)) is not None and r.status in ("done", "failed")
+    )
+    filled = round(_BAR_WIDTH * finished / total) if total else _BAR_WIDTH
+    bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+    rows = ["| Reviewer | Harness | Model | Status |", "|---|---|---|---|"]
+    for e in roster:
+        model = f"{e.model} ({e.thinking})" if e.thinking else e.model
+        rows.append(
+            f"| {_cell(e.reviewer)} | {_cell(e.harness)} | {_cell(model)} "
+            f"| {_status_cell(reviews.get(e.id), phase)} |"
+        )
+    if phase == "interrupted" and note is None:
+        note = f"Resume with `aeview resume {run_id}`."
+    meta = [f"run `{run_id}`"]
+    if head_sha:
+        meta.append(f"commit `{head_sha[:12]}`")
+    if phase in ("reviewing", "merging"):
+        meta.append("replaced by the review when the run finishes")
+    parts = [
+        f"{_SUMMARY_BADGE} — {_PHASE_HEADLINE[phase]}",
+        f"`{bar}` {finished}/{total} reviews finished",
+        "\n".join(rows),
+        note,
+        "<sub>" + " · ".join(meta) + "</sub>",
+        _PROGRESS_MARKER.format(run_id=run_id),
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
+def _comment_endpoint(target: PrTarget, comment_id: int) -> str:
+    return f"repos/{target.owner}/{target.repo}/issues/comments/{comment_id}"
+
+
+def _edit_comment(target: PrTarget, comment_id: int, body: str, cwd: Path) -> ProcResult:
+    return _gh_api(
+        "PATCH",
+        _comment_endpoint(target, comment_id),
+        {"body": body},
+        cwd,
+        timeout=_PROGRESS_TIMEOUT_S,
+    )
+
+
+def delete_comment(target: PrTarget, comment_id: int, cwd: Path) -> bool:
+    """Remove an issue comment; True once it no longer shows: deleted, already gone (404), or — if
+    GitHub refuses the delete (403) — hidden as outdated instead. A transient failure is False, so
+    the next run's sweep retries."""
+    res = _gh_api("DELETE", _comment_endpoint(target, comment_id), None, cwd)
+    if res.returncode == 0 or _NOT_FOUND.search(res.stderr):
+        return True
+    return bool(_FORBIDDEN.search(res.stderr)) and _hide_as_outdated(target, comment_id, cwd)
+
+
+def _hide_as_outdated(target: PrTarget, comment_id: int, cwd: Path) -> bool:
+    # Minimizing is GraphQL-only and keyed by node id, which the REST comment carries.
+    got = _gh_api("GET", _comment_endpoint(target, comment_id), None, cwd)
+    try:
+        node_id = json.loads(got.stdout).get("node_id") if got.returncode == 0 else None
+    except json.JSONDecodeError, AttributeError:
+        node_id = None
+    if not isinstance(node_id, str):
+        return False
+    payload = {"query": _HIDE_AS_OUTDATED, "variables": {"id": node_id}}
+    res = _gh_api("POST", "graphql", payload, cwd)
+    try:
+        hidden = json.loads(res.stdout)["data"]["minimizeComment"]["minimizedComment"]
+    except json.JSONDecodeError, KeyError, TypeError:
+        return False
+    return res.returncode == 0 and isinstance(hidden, dict) and hidden.get("isMinimized") is True
+
+
+@dataclass(slots=True)
+class ProgressComment:
+    """One run's live progress comment. The run's orchestrator is its sole writer. Edits from the
+    fan-out are coalesced: while one PATCH is in flight, further updates just mark the body dirty,
+    so a burst of finishing reviews costs one more edit, not one each. Edits are best-effort — the
+    first failure is kept in `error` for the CLI to surface and never interrupts the run."""
+
+    target: PrTarget
+    run_id: str
+    roster: list[RosterEntry]
+    head_sha: str | None
+    cwd: Path
+    reviews: dict[str, ReviewResult] = field(default_factory=dict)
+    comment_id: int = 0
+    phase: ProgressPhase = "reviewing"
+    note: str | None = None
+    error: str | None = None
+    _flush: asyncio.Task[None] | None = field(default=None, init=False)
+    _dirty: bool = field(default=False, init=False)
+
+    def body(self) -> str:
+        return render_progress(
+            self.run_id, self.roster, self.reviews, self.phase, self.head_sha, self.note
+        )
+
+    def record(self, result: ReviewResult) -> None:
+        """fan_out's on_update hook: runs on the event loop, never blocks, never raises."""
+        self.reviews[result.id] = result
+        self._schedule()
+
+    def set_phase(self, phase: ProgressPhase) -> None:
+        self.phase = phase
+        self._schedule()
+
+    def _schedule(self) -> None:
+        self._dirty = True
+        if self._flush is None or self._flush.done():
+            self._flush = asyncio.get_running_loop().create_task(self._run_flush())
+
+    async def _run_flush(self) -> None:
+        # In a worker thread (not run_async): on Ctrl-C asyncio.run joins the executor before
+        # returning, so an in-flight edit always lands *before* the "interrupted" edit, never after.
+        while self._dirty:
+            self._dirty = False
+            res = await asyncio.to_thread(
+                _edit_comment, self.target, self.comment_id, self.body(), self.cwd
+            )
+            self._note_failure(res)
+
+    async def drain(self) -> None:
+        if self._flush is not None:
+            await self._flush
+
+    def finish(self, phase: ProgressPhase, note: str | None = None) -> None:
+        """Synchronous terminal edit (interrupted/failed), made outside the event loop."""
+        self.phase, self.note = phase, note
+        self._note_failure(_edit_comment(self.target, self.comment_id, self.body(), self.cwd))
+
+    def _note_failure(self, res: ProcResult) -> None:
+        if res.returncode != 0 and self.error is None:
+            self.error = res.stderr.strip() or f"gh exited {res.returncode}"
+
+
+def open_progress(
+    target: PrTarget,
+    run_id: str,
+    roster: list[RosterEntry],
+    head_sha: str | None,
+    cwd: Path,
+    reviews: Mapping[str, ReviewResult] | None = None,
+    existing_id: int | None = None,
+) -> ProgressComment:
+    """Post the run's progress comment — or, on resume, take back `existing_id` by editing it, and
+    post a fresh one only if that comment is definitely gone (a 404, e.g. swept while the run was
+    interrupted). Any other edit failure keeps the old id: posting a second comment would orphan
+    the first, which nothing then tracks. Raises GitHubError if no comment could be posted."""
+    progress = ProgressComment(target, run_id, roster, head_sha, cwd, dict(reviews or {}))
+    if existing_id is not None:
+        progress.comment_id = existing_id
+        res = _edit_comment(target, existing_id, progress.body(), cwd)
+        if not _NOT_FOUND.search(res.stderr) or res.returncode == 0:
+            progress._note_failure(res)
+            return progress
+    res = _gh_api(
+        "POST",
+        f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
+        {"body": progress.body()},
+        cwd,
+    )
+    if res.returncode != 0:
+        detail = res.stderr.strip() or f"gh exited {res.returncode}"
+        raise GitHubError(f"could not post the progress comment to PR #{target.number} ({detail})")
+    try:
+        comment_id = json.loads(res.stdout).get("id")
+    except json.JSONDecodeError, AttributeError:
+        comment_id = None
+    if not isinstance(comment_id, int):
+        raise GitHubError("`gh api` returned no id for the posted progress comment")
+    progress.comment_id = comment_id
+    return progress

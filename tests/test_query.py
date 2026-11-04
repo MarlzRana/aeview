@@ -690,6 +690,7 @@ def test_resume_passes_configured_timeout_to_fan_out(aeview_home, monkeypatch):
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         captured["timeout"] = timeout
         captured["override_harness_binaries"] = override_harness_binaries
@@ -760,6 +761,7 @@ def test_resume_clears_stale_report_before_rerunning(aeview_home, monkeypatch):
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         seen["report_existed"] = (s.dir / "report.json").exists()
         return []

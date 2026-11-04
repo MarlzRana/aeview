@@ -12,12 +12,18 @@ review failing never aborts the run — it is recorded in coverage.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
+from collections.abc import Callable
 from pathlib import Path
 
 from .harness import AdapterError, HarnessOutput, get_adapter
 from .runstore import RunStore, now_iso
 from .schema import ReviewResult, RosterEntry
+
+# Called on the event loop with each review's `running` and terminal state (e.g. to drive the PR
+# progress comment). Must not block or raise.
+OnUpdate = Callable[[ReviewResult], None]
 
 MAX_ATTEMPTS = 3
 _BASE_DELAY_S = 1.0
@@ -36,6 +42,7 @@ async def _run_review(
     cwd: Path,
     timeout: float | None,
     binary_override: str | None,
+    on_update: OnUpdate | None,
 ) -> ReviewResult:
     result = ReviewResult(
         id=entry.id,
@@ -46,16 +53,28 @@ async def _run_review(
         started_at=now_iso(),
     )
     store.write_review(result)
+    _notify(on_update, result)
     # A worker never raises: any failure becomes a failed ReviewResult, so one bad review
     # can't abort gather() and orphan its siblings (and their live subprocesses).
     try:
-        return await _attempt_review(
+        final = await _attempt_review(
             store, result, entry, prompt, schema, cwd, timeout, binary_override
         )
     except AdapterError as exc:
-        return _mark_failed(store, result, str(exc))
+        final = _mark_failed(store, result, str(exc))
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the run never crashes
-        return _mark_failed(store, result, f"unexpected error: {exc}")
+        final = _mark_failed(store, result, f"unexpected error: {exc}")
+    _notify(on_update, final)
+    return final
+
+
+def _notify(on_update: OnUpdate | None, result: ReviewResult) -> None:
+    # The hook is cosmetic (progress display); a bug in it must not escape the worker and cancel
+    # its siblings mid-review via gather().
+    if on_update is None:
+        return
+    with contextlib.suppress(Exception):
+        on_update(result)
 
 
 async def _attempt_review(
@@ -119,6 +138,7 @@ async def fan_out(
     timeout: float | None = None,
     override_harness_binaries: dict[str, str] | None = None,
     schema_by_reviewer: dict[str, dict] | None = None,
+    on_update: OnUpdate | None = None,
 ) -> list[ReviewResult]:
     overrides = override_harness_binaries or {}
     # A reviewer's per-reviewer review schema (from its custom-schemas); absent → None, and the
@@ -137,6 +157,7 @@ async def fan_out(
                 cwd,
                 timeout,
                 overrides.get(entry.harness),
+                on_update,
             )
         )
         for entry in roster

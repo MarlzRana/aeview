@@ -146,3 +146,23 @@ async def test_fan_out_resolves_binary_override_per_harness(aeview_home, monkeyp
         override_harness_binaries={"claude-code": "/a/claude", "codex": "/b/codex"},
     )
     assert seen == {"claude-code": "/a/claude", "codex": "/b/codex"}
+
+
+async def test_on_update_sees_running_then_terminal_and_cannot_fail_the_review(
+    aeview_home, monkeypatch
+):
+    adapter = _FlakyAdapter(transient_failures=0)
+    monkeypatch.setattr(fanout, "get_adapter", lambda h, override=None: adapter)
+    store = RunStore.create(new_run_id())
+    seen: list[str] = []
+
+    def broken_hook(result):
+        seen.append(result.status)
+        raise RuntimeError("display bug")
+
+    [result] = await fanout.fan_out(
+        store, [_ENTRY], {"default": "p"}, aeview_home, on_update=broken_hook
+    )
+
+    assert seen == ["running", "done"]
+    assert result.status == "done"  # the hook's exception never reached the worker
