@@ -8,6 +8,7 @@ merges, and writes report.json with a 0/1/2 exit code. `version` reports the bui
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -26,7 +27,15 @@ from .bundle import Bundle, build_bundle
 from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
 from .fanout import fan_out
-from .github import GitHubError, PostResult, PrTarget, post_review, resolve_pr_target
+from .github import (
+    GitHubError,
+    PostResult,
+    ProgressComment,
+    delete_comment,
+    open_progress,
+    post_review,
+    resolve_pr_target,
+)
 from .ignore import filter_resolved
 from .merge import merge_reviews
 from .prompt import compose_prompt
@@ -64,6 +73,8 @@ from .runstore import (
 from .schema import (
     DedupPlan,
     Invocation,
+    PrPost,
+    PrTarget,
     Report,
     RosterEntry,
     RunManifest,
@@ -228,18 +239,30 @@ def run(
 
     reconcile_interrupted()  # crashed 'running' runs -> 'interrupted' so prune can collect them
     prune_runs(settings.retention)  # keep ~/.aeview/runs bounded — only ever on a real `run`
-    run_id, report = asyncio.run(_execute(plan, settings, cwd))
-
+    run_id = new_run_id()
+    pr_post: PrPost | None = None
+    progress: ProgressComment | None = None
     if pr_target is not None:
-        # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
-        # than re-deriving the threshold: an `error` verdict means no real review to post.
-        if report_verdict_label(report) != "error":
-            _post_to_pr(pr_target, report, run_id, plan.bundle.diff, plan.bundle.head_sha, cwd)
-        else:
-            typer.echo(
-                "aeview: not posting to the PR — no reviews contributed (nothing to review)",
-                err=True,
-            )
+        _sweep_stale_progress(pr_target, cwd)
+        # Posted before the run dir exists: if GitHub won't take a comment, fail fast (like a
+        # missing PR) rather than spend a whole panel with nowhere to post.
+        try:
+            progress = open_progress(pr_target, run_id, plan.roster, plan.bundle.head_sha, cwd)
+        except GitHubError as exc:
+            typer.echo(f"aeview: {exc}", err=True)
+            raise typer.Exit(EXIT_ERROR) from exc
+        typer.echo(f"aeview: posted a live progress comment to PR #{pr_target.number}", err=True)
+        pr_post = PrPost(
+            target=pr_target,
+            head_sha=plan.bundle.head_sha,
+            progress_comment_id=progress.comment_id,
+        )
+    try:
+        report = asyncio.run(_execute(plan, settings, cwd, run_id, pr_post, progress))
+    except KeyboardInterrupt:
+        if progress is not None:
+            progress.finish("interrupted")
+        raise
 
     # `run` emits the gate (full findings minus the result-only fields); the full report is
     # persisted to the run dir (read it via `aeview result`). The human form is the gate too
@@ -306,17 +329,73 @@ def _validate_post_comments(post_comments: bool, stype: str) -> None:
         )
 
 
-def _post_to_pr(
-    target: PrTarget, report: Report, run_id: str, diff: str, head_sha: str | None, cwd: Path
+def _sweep_stale_progress(target: PrTarget, cwd: Path) -> None:
+    """Best-effort: delete progress comments this machine's runs left on the PR and no longer drive
+    (interrupted/crashed runs, or a finished run whose own delete failed). Only comments a local
+    run.json recorded as its own are touched — a run on another machine is invisible here, so its
+    (possibly live) comment is left alone."""
+    pr_key = (target.owner, target.repo, target.number)
+    for m in list_manifests():
+        pr = m.pr_post
+        if pr is None or pr.progress_comment_id is None or effective_overall(m) == "running":
+            continue
+        if (pr.target.owner, pr.target.repo, pr.target.number) != pr_key:
+            continue
+        if not delete_comment(pr.target, pr.progress_comment_id, cwd):
+            continue
+        # Record it so later sweeps skip it. Re-read first (as reconcile_interrupted does): a
+        # resume may have taken the run over since the snapshot and now owns its run.json.
+        store = RunStore(m.run_id)
+        try:
+            fresh = store.read_manifest()
+        except OSError, ValueError:
+            continue
+        if effective_overall(fresh) == "running" or fresh.pr_post is None:
+            continue
+        if fresh.pr_post.progress_comment_id == pr.progress_comment_id:
+            fresh.pr_post.progress_comment_id = None
+            with contextlib.suppress(OSError):
+                store.write_manifest(fresh)
+
+
+def _finish_pr_post(
+    store: RunStore, manifest: RunManifest, report: Report, progress: ProgressComment | None
 ) -> None:
-    """Post the merged report onto the PR and report what landed on stderr (so --json stdout stays
-    the pure gate). The review already ran, so a posting failure is surfaced, never fatal."""
-    try:
-        posted = post_review(target, report, run_id, diff, head_sha, cwd)
-    except GitHubError as exc:
-        typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
+    """Post the merged review, then delete the progress comment it replaces (shared by run and
+    resume). The review already ran, so a GitHub failure is surfaced on stderr, never fatal; the
+    progress comment then says what happened and is left for the next run's sweep."""
+    pr = manifest.pr_post
+    if pr is None:
         return
-    typer.echo(_posted_summary(posted), err=True)
+    cwd = manifest.cwd or Path.cwd()
+    if progress is not None and progress.error:
+        typer.echo(f"aeview: couldn't update the progress comment ({progress.error})", err=True)
+    # Gate on report.py's verdict (the single owner of the contributed==0 -> error rule) rather
+    # than re-deriving the threshold: an `error` verdict means no real review to post.
+    if report_verdict_label(report) == "error":
+        typer.echo(
+            "aeview: not posting to the PR — no reviews contributed (nothing to review)", err=True
+        )
+        if progress is not None:
+            progress.finish("failed", "No reviews contributed, so no review was posted.")
+        return
+    if pr.review_url is None:  # set once posted, so a resume never double-posts the review
+        try:
+            posted = post_review(
+                pr.target, report, store.run_id, store.read_bundle_diff(), pr.head_sha, cwd
+            )
+        except (GitHubError, OSError) as exc:
+            typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
+            if progress is not None:
+                progress.finish("failed", "Posting the review to this PR failed.")
+            return
+        typer.echo(_posted_summary(posted), err=True)
+        pr.review_url = posted.url
+        store.write_manifest(manifest)
+    comment_id = progress.comment_id if progress is not None else pr.progress_comment_id
+    if comment_id is not None and delete_comment(pr.target, comment_id, cwd):
+        pr.progress_comment_id = None
+        store.write_manifest(manifest)
 
 
 def _posted_summary(p: PostResult) -> str:
@@ -475,8 +554,15 @@ def _select_auto(
     return [default, *extra_reviewers], [r.name for r in extra_reviewers]
 
 
-async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Report]:
-    store = RunStore.create(new_run_id())
+async def _execute(
+    plan: _Plan,
+    settings: Settings,
+    cwd: Path,
+    run_id: str,
+    pr_post: PrPost | None,
+    progress: ProgressComment | None,
+) -> Report:
+    store = RunStore.create(run_id)
     typer.echo(f"run {store.run_id}", err=True)
 
     # Freeze the walk-up-resolved dedup prompt (present iff this roster can dedup) BEFORE the
@@ -495,6 +581,7 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
         dedup=plan.dedup.plan if plan.dedup is not None else None,
         cwd=cwd,  # resume re-runs from here, not the caller's cwd
         pid=os.getpid(),  # recorded so liveness can tell a live run from a crash
+        pr_post=pr_post,
     )
     store.write_manifest(manifest)
     full_diff_path = store.write_bundle(plan.bundle)
@@ -520,8 +607,9 @@ async def _execute(plan: _Plan, settings: Settings, cwd: Path) -> tuple[str, Rep
         cwd,
         settings.review_timeout_seconds,
         settings.override_harness_binaries,
+        progress,
     )
-    return store.run_id, report
+    return report
 
 
 def _merge_settings(dedup: DedupPlan | None, override_harness_binaries: dict[str, str]) -> Settings:
@@ -547,12 +635,14 @@ async def _run_reviews_and_merge(
     cwd: Path,
     timeout: float | None,
     override_harness_binaries: dict[str, str],
+    progress: ProgressComment | None = None,
 ) -> Report:
     """Run the given roster entries (fresh run = all; resume = the non-done subset), then merge
     *all* on-disk reviews. The shared core of `run` and `resume`: it reads the persisted prompts +
     frozen schemas + frozen bundle and re-merges via the run.json-pinned dedup plan, so completion
     truth comes from the run dir, not the in-memory plan. The live binary overrides feed both the
-    review fan-out and the dedup harness."""
+    review fan-out and the dedup harness. A `--post-comments` run also posts its review here, after
+    the progress comment has caught up."""
     if entries:
         await fan_out(
             store,
@@ -562,7 +652,10 @@ async def _run_reviews_and_merge(
             timeout,
             override_harness_binaries,
             schema_by_reviewer,
+            progress.record if progress is not None else None,
         )
+    if progress is not None:
+        progress.set_phase("merging")
     # Read back the run-start-frozen dedup prompt (dedup/DEDUPLICATION.md) only when a dedup plan is
     # pinned — otherwise dedup can't run and the file was never written. Reading the frozen bytes
     # (not re-discovering) is what keeps a re-merge on resume byte-identical. Report prompt_source
@@ -589,6 +682,9 @@ async def _run_reviews_and_merge(
     manifest.overall = "failed" if report.coverage.contributed == 0 else "done"
     manifest.finished_at = now_iso()
     store.write_manifest(manifest)
+    if progress is not None:
+        await progress.drain()  # no in-flight edit may land after the comment is deleted
+    _finish_pr_post(store, manifest, report, progress)
     return report
 
 
@@ -618,7 +714,8 @@ def _render_dry_run(plan: _Plan, pr_target: PrTarget | None = None) -> str:
         lines.append("dedup: not configured (findings pass through as a raw union)")
     if pr_target is not None:
         lines.append(
-            f"post-comments: will post a review to PR #{pr_target.number} ({pr_target.url})"
+            f"post-comments: will post a live progress comment, then a review, to PR "
+            f"#{pr_target.number} ({pr_target.url})"
         )
     return "\n".join(lines)
 
@@ -800,6 +897,9 @@ def resume(
             pass
         else:
             typer.echo(f"aeview: run '{rid}' already complete; nothing to resume", err=True)
+            # A crash between the merge and the post leaves the review unposted (or the progress
+            # comment undeleted); finish that rather than re-merging.
+            _finish_pr_post(store, manifest, report, None)
             _emit_report(report, json_out)
 
     # Read each reviewer's frozen prompt once (a reviewer may have several pending instances).
@@ -832,20 +932,47 @@ def resume(
     manifest.pid = os.getpid()
     store.write_manifest(manifest)
 
+    progress = _resume_progress(store, manifest, cwd)
     settings = load_settings()
-    report = asyncio.run(
-        _run_reviews_and_merge(
-            store,
-            manifest,
-            pending,
-            prompts,
-            schemas,
-            cwd,
-            settings.review_timeout_seconds,
-            settings.override_harness_binaries,
+    try:
+        report = asyncio.run(
+            _run_reviews_and_merge(
+                store,
+                manifest,
+                pending,
+                prompts,
+                schemas,
+                cwd,
+                settings.review_timeout_seconds,
+                settings.override_harness_binaries,
+                progress,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        if progress is not None:
+            progress.finish("interrupted")
+        raise
     _emit_report(report, json_out)
+
+
+def _resume_progress(store: RunStore, manifest: RunManifest, cwd: Path) -> ProgressComment | None:
+    """Bring a `--post-comments` run's progress comment back to life for the resume (or post a new
+    one if it was swept). Skipped once the review is posted — a resume never posts a second one.
+    Unlike `run`, a failure here only costs the live view, so it warns instead of aborting."""
+    pr = manifest.pr_post
+    if pr is None or pr.review_url is not None:
+        return None
+    done = {r.id: r for r in store.read_reviews() if r.status == "done"}
+    try:
+        progress = open_progress(
+            pr.target, store.run_id, manifest.roster, pr.head_sha, cwd, done, pr.progress_comment_id
+        )
+    except GitHubError as exc:
+        typer.echo(f"aeview: {exc}; resuming without live progress", err=True)
+        return None
+    pr.progress_comment_id = progress.comment_id
+    store.write_manifest(manifest)
+    return progress
 
 
 def _run_row(manifest: RunManifest) -> dict:

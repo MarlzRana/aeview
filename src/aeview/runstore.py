@@ -260,6 +260,12 @@ class RunStore:
         atomic_write_text(self.bundle_dir / "self_collect_bundle.md", summary_md)
         return full
 
+    def read_bundle_diff(self) -> str:
+        # The frozen reviewed diff (whichever mode wrote it) — resume posts against these bytes.
+        inline = self.bundle_dir / "inline_bundle.diff"
+        path = inline if inline.exists() else self.bundle_dir / "self_collect.diff"
+        return path.read_text("utf-8")
+
     # --- reviewers/<reviewer>/ (prompt shared across that reviewer's harness instances) ---
     def write_prompt(self, reviewer: str, prompt: str) -> None:
         reviewer_dir = self.reviewers_dir / reviewer

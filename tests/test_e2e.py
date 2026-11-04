@@ -9,6 +9,7 @@ from aeview.cli import _execute, _plan_run
 from aeview.config import load_settings, runs_dir
 from aeview.report import EXIT_APPROVE, EXIT_ERROR, EXIT_NEEDS_ATTENTION, exit_code
 from aeview.resolve import ResolveError
+from aeview.runstore import new_run_id
 from aeview.schema import Report
 from aeview.scope import ScopeError
 from conftest import commit, git, make_reviewer
@@ -18,8 +19,7 @@ async def _orchestrate(names, stype, value, cwd, include_dirty, allow_conflicts,
     # The full run path = plan (sync, raises ScopeError/ResolveError) then execute (async).
     settings = load_settings()
     plan = _plan_run(names, stype, value, cwd, include_dirty, allow_conflicts, patch_text, settings)
-    _run_id, report = await _execute(plan, settings, cwd)  # _execute returns (run_id, report)
-    return report
+    return await _execute(plan, settings, cwd, new_run_id(), None, None)
 
 
 def _run(repo):

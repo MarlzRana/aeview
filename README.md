@@ -162,6 +162,15 @@ approves or requests changes and can't gate your merge — made of:
   line isn't part of the diff (reviewers can read your whole tree) is listed in the summary instead,
   so nothing is dropped.
 
+While the panel runs, a separate **progress comment** on the PR shows the roster and a live
+progress bar, updated as each review finishes. Once the review is posted, the progress comment is
+deleted. (GitHub can't add inline comments to a review that's already submitted, so the review itself
+can't be the live view.) Each run gets its own progress comment, so several `aeview` runs can work the
+same PR at once. If a run is interrupted, its comment says so and how to `aeview resume` it, and
+resuming picks the same comment back up. When a later `--post-comments` run starts, it deletes
+progress comments left on that PR by this machine's runs that are no longer active. It leaves
+comments from other machines alone.
+
 Findings on the same line are combined into one comment; each run posts a fresh review, so re-running
 across a loop leaves a thread-per-finding audit trail on the PR. A clean run still posts a short
 "approved — no findings" note. Every comment is authored by your `gh` account (aeview has no separate

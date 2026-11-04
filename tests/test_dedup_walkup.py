@@ -139,6 +139,7 @@ def test_run_freezes_dedup_prompt_source(aeview_home, git_repo, monkeypatch):
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         return []
 
@@ -168,6 +169,7 @@ def test_single_review_run_does_not_freeze_dedup_prompt(aeview_home, git_repo, m
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         return []
 

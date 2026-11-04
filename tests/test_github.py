@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import pytest
 
+from aeview import github
 from aeview.github import (
     BuiltReview,
     GitHubError,
@@ -13,7 +15,10 @@ from aeview.github import (
     _diff_anchorable_lines,
     _finding_md,
     build_review,
+    delete_comment,
+    open_progress,
     post_review,
+    render_progress,
     resolve_pr_target,
 )
 from aeview.schema import (
@@ -22,6 +27,8 @@ from aeview.schema import (
     Location,
     MergedFinding,
     Report,
+    ReviewResult,
+    RosterEntry,
     Severity,
     Source,
     UsageBreakdown,
@@ -372,3 +379,138 @@ def test_post_review_ambiguous_failure_does_not_fall_back(tmp_path, stub_gh, mon
     with pytest.raises(GitHubError, match="ambiguously"):
         post_review(target, _report([_finding(line=2)]), "run1", _DIFF, "sha9", tmp_path)
     assert not cap.exists()  # no fallback comment -> no duplicate artifact
+
+
+# --- progress comment -----------------------------------------------------------------
+
+_TARGET = PrTarget(number=7, url="https://github.com/o/r/pull/7", owner="o", repo="r")
+_ROSTER = [
+    RosterEntry(id="a__claude-code-opus", reviewer="a", harness="claude-code", model="opus"),
+    RosterEntry(id="b__codex-gpt", reviewer="b", harness="codex", model="gpt", thinking="high"),
+]
+
+
+def _review(entry: RosterEntry, status, findings=()) -> ReviewResult:
+    return ReviewResult(
+        id=entry.id,
+        reviewer=entry.reviewer,
+        harness=entry.harness,
+        model=entry.model,
+        status=status,
+        findings=list(findings),
+    )
+
+
+def _log(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_render_progress_shows_bar_roster_status_and_marker():
+    reviews = {
+        _ROSTER[0].id: _review(_ROSTER[0], "done"),
+        _ROSTER[1].id: _review(_ROSTER[1], "running"),
+    }
+    body = render_progress("run1", _ROSTER, reviews, "reviewing", "deadbeefcafe0123")
+    assert "⏳ **reviewing…**" in body
+    assert "`" + "█" * 10 + "░" * 10 + "` 1/2 reviews finished" in body
+    assert "| a | claude-code | opus | ✅ done · 0 findings |" in body
+    assert "| b | codex | gpt (high) | 🔄 running |" in body
+    assert "commit `deadbeefcafe`" in body  # short sha
+    assert body.endswith("<!-- aeview:progress run=run1 -->")
+
+
+def test_render_progress_pending_and_interrupted_hint():
+    body = render_progress("run1", _ROSTER, {}, "interrupted", None)
+    assert "⚠️ **interrupted**" in body and "0/2 reviews finished" in body
+    assert "⏸️ pending" in body
+    assert "Resume with `aeview resume run1`." in body
+    assert "replaced by the review" not in body  # terminal phases don't promise a replacement
+
+
+def test_render_progress_escapes_table_cells():
+    entry = RosterEntry(id="x__pi-m", reviewer="x", harness="pi", model="a|b @team")
+    body = render_progress("run1", [entry], {}, "reviewing", None)
+    assert "a\\|b @\u200bteam" in body  # pipe can't break the row; mention defused
+
+
+def test_open_progress_posts_a_new_comment(tmp_path, stub_gh, monkeypatch):
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    progress = open_progress(_TARGET, "run1", _ROSTER, "sha", tmp_path)
+    assert progress.comment_id == 9001
+    [call] = _log(log)
+    assert call["method"] == "POST" and call["endpoint"] == "repos/o/r/issues/7/comments"
+    assert "<!-- aeview:progress run=run1 -->" in json.loads(call["body"])["body"]
+
+
+def test_open_progress_reuses_existing_comment(tmp_path, stub_gh, monkeypatch):
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    progress = open_progress(_TARGET, "run1", _ROSTER, "sha", tmp_path, existing_id=42)
+    assert progress.comment_id == 42
+    assert [(c["method"], c["endpoint"]) for c in _log(log)] == [
+        ("PATCH", "repos/o/r/issues/comments/42")
+    ]
+
+
+def test_open_progress_replaces_a_vanished_comment(tmp_path, stub_gh, monkeypatch):
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "edit")  # the old comment 404s (e.g. swept)
+    progress = open_progress(_TARGET, "run1", _ROSTER, "sha", tmp_path, existing_id=42)
+    assert progress.comment_id == 9001
+    assert [c["method"] for c in _log(log)] == ["PATCH", "POST"]
+
+
+def test_open_progress_raises_when_post_fails(tmp_path, stub_gh, monkeypatch):
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "post")
+    with pytest.raises(GitHubError, match="HTTP 403"):
+        open_progress(_TARGET, "run1", _ROSTER, "sha", tmp_path)
+
+
+def test_delete_comment_treats_404_as_gone(tmp_path, monkeypatch):
+    calls = iter(
+        [
+            github.ProcResult(0, "", ""),
+            github.ProcResult(1, "", "gh: Not Found (HTTP 404)"),
+            github.ProcResult(1, "", "gh: Server Error (HTTP 502)"),
+        ]
+    )
+    monkeypatch.setattr(github, "run_sync", lambda *a, **k: next(calls))
+    assert delete_comment(_TARGET, 1, tmp_path)
+    assert delete_comment(_TARGET, 1, tmp_path)
+    assert not delete_comment(_TARGET, 1, tmp_path)
+
+
+async def test_progress_coalesces_bursts_and_ends_on_latest_state(tmp_path, monkeypatch):
+    import time
+
+    edits: list[str] = []
+
+    def slow_edit(target, comment_id, body, cwd):
+        time.sleep(0.05)  # an in-flight PATCH while more reviews finish
+        edits.append(body)
+        return github.ProcResult(0, "", "")
+
+    monkeypatch.setattr(github, "_edit_comment", slow_edit)
+    progress = github.ProgressComment(_TARGET, "run1", _ROSTER, None, tmp_path, comment_id=1)
+    progress.record(_review(_ROSTER[0], "running"))
+    await asyncio.sleep(0.01)  # let that first edit go in flight
+    progress.record(_review(_ROSTER[1], "running"))
+    for entry in _ROSTER:
+        progress.record(_review(entry, "done"))
+    progress.set_phase("merging")
+    await progress.drain()
+    assert len(edits) == 2  # the first edit, then one coalesced edit for everything after it
+    assert "merging findings" in edits[-1] and "2/2 reviews finished" in edits[-1]
+    assert progress.error is None
+
+
+async def test_progress_records_first_edit_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        github, "_edit_comment", lambda *a: github.ProcResult(1, "", "gh: boom (HTTP 500)")
+    )
+    progress = github.ProgressComment(_TARGET, "run1", _ROSTER, None, tmp_path, comment_id=1)
+    progress.record(_review(_ROSTER[0], "running"))
+    await progress.drain()
+    assert progress.error == "gh: boom (HTTP 500)"

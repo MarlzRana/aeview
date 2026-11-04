@@ -5,7 +5,8 @@ Handles just what aeview uses:
   gh pr view [<n>] --json <fields>  -> a PR record (baseRefName/number/state/headRefOid/url)
   gh pr diff [<number>]             -> a small canned unified diff
   gh api ... /pulls/<n>/reviews     -> records the posted review body, returns a fake html_url
-  gh api ... /issues/<n>/comments   -> records the posted comment body, returns a fake html_url
+  gh api ... /issues/<n>/comments   -> records the posted comment body, returns a fake id + html_url
+  gh api -X PATCH|DELETE ... /issues/comments/<id>  -> edits / deletes a comment (progress comment)
 
 Behaviour is steered by env vars so a test can simulate the non-happy paths:
   AEVIEW_GH_BASE         base branch name (default "main")
@@ -18,6 +19,9 @@ Behaviour is steered by env vars so a test can simulate the non-happy paths:
                          "timeout" -> reviews POST exits 124 (mimics a run_sync timeout)
   AEVIEW_GH_CAPTURE          file to write the reviews POST body to
   AEVIEW_GH_CAPTURE_COMMENT  file to write the issues-comment POST body to
+  AEVIEW_GH_LOG          file to append every `gh api` call to, one JSON {method, endpoint, body}
+                         per line (the order of progress-comment edits matters)
+  AEVIEW_GH_COMMENT_FAIL "post" -> issues-comment POST exits 1; "edit" -> PATCH exits 1 (HTTP 404)
 """
 
 import json
@@ -67,8 +71,19 @@ if argv[:2] == ["pr", "diff"]:
 
 if argv[:1] == ["api"]:
     endpoint = next((a for a in argv if "/pulls/" in a or "/issues/" in a), "")
+    method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
     body = _read_input(argv)
     url = os.environ.get("AEVIEW_GH_PR_URL", "https://github.com/o/r/pull/7")
+    fail = os.environ.get("AEVIEW_GH_COMMENT_FAIL")
+    if log := os.environ.get("AEVIEW_GH_LOG"):
+        with open(log, "a") as fh:
+            fh.write(json.dumps({"method": method, "endpoint": endpoint, "body": body}) + "\n")
+    if "/issues/comments/" in endpoint:
+        if method == "PATCH" and fail == "edit":
+            sys.stderr.write("gh: Not Found (HTTP 404)\n")
+            sys.exit(1)
+        sys.stdout.write(json.dumps({"id": int(endpoint.rsplit("/", 1)[1])}) if method == "PATCH" else "")
+        sys.exit(0)
     if endpoint.endswith("/reviews"):
         if os.environ.get("AEVIEW_GH_API_FAIL") == "reviews":
             sys.stderr.write("HTTP 422: Validation Failed (line must be part of the diff)\n")
@@ -80,9 +95,12 @@ if argv[:1] == ["api"]:
         sys.stdout.write(json.dumps({"html_url": f"{url}#pullrequestreview-1"}))
         sys.exit(0)
     if endpoint.endswith("/comments"):
+        if fail == "post":
+            sys.stderr.write("gh: Resource not accessible by integration (HTTP 403)\n")
+            sys.exit(1)
         if cap := os.environ.get("AEVIEW_GH_CAPTURE_COMMENT"):
             Path(cap).write_text(body)
-        sys.stdout.write(json.dumps({"html_url": f"{url}#issuecomment-1"}))
+        sys.stdout.write(json.dumps({"id": 9001, "html_url": f"{url}#issuecomment-9001"}))
         sys.exit(0)
     sys.stderr.write(f"gh stub: unhandled api endpoint {endpoint!r}\n")
     sys.exit(1)

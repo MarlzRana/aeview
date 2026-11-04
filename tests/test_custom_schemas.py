@@ -626,6 +626,7 @@ def test_run_freezes_composed_schema_and_delivers_to_fanout(aeview_home, git_rep
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         captured["schemas"] = schema_by_reviewer
         return []
@@ -678,6 +679,7 @@ def test_resume_reuses_frozen_custom_schema(aeview_home, monkeypatch):
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         captured["schemas"] = schema_by_reviewer
         return []
@@ -784,6 +786,7 @@ def test_resume_tolerates_corrupt_frozen_schema(aeview_home, monkeypatch):
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         captured["schemas"] = schema_by_reviewer
         return []

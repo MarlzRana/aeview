@@ -254,6 +254,7 @@ def test_run_passes_configured_timeout_to_fan_out(aeview_home, git_repo, stub_cl
         timeout=None,
         override_harness_binaries=None,
         schema_by_reviewer=None,
+        on_update=None,
     ):
         captured["timeout"] = timeout
         captured["override_harness_binaries"] = override_harness_binaries
@@ -529,7 +530,7 @@ def test_failed_planning_does_not_prune(aeview_home, tmp_path, monkeypatch):
 def test_dry_run_render_includes_post_comments_target():
     target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
     out = _render_dry_run(_dry_plan(1), pr_target=target)
-    assert "post-comments: will post a review to PR #7" in out
+    assert "will post a live progress comment, then a review, to PR #7" in out
 
 
 def test_post_comments_requires_pr_scope(aeview_home, git_repo, monkeypatch):
@@ -558,7 +559,7 @@ def test_post_comments_dry_run_reports_target(aeview_home, git_repo, stub_gh, mo
         app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments", "--dry-run"]
     )
     assert result.exit_code == 0
-    assert "post-comments: will post a review to PR #7" in result.stdout
+    assert "will post a live progress comment, then a review, to PR #7" in result.stdout
 
 
 def test_post_comments_posts_review_to_pr(
@@ -597,6 +598,126 @@ def test_post_comments_skips_post_when_no_reviews_contributed(
     assert result.exit_code == 2  # error verdict (no reviews contributed)
     assert "not posting to the PR" in result.stderr
     assert not cap.exists()  # nothing was posted to GitHub
+
+
+def _gh_calls(log: Path) -> list[tuple[str, str]]:
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    return [(c["method"], c["endpoint"]) for c in calls]
+
+
+def _only_run() -> RunStore:
+    [run_dir] = [d for d in runs_dir().iterdir() if d.is_dir()]
+    return RunStore(run_dir.name)
+
+
+def test_post_comments_progress_comment_lifecycle(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # The progress comment is posted before the fan-out, edited live, and deleted only after the
+    # review is posted; run.json records the review and that the comment is gone.
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert result.exit_code == 1
+    assert "posted a live progress comment to PR #7" in result.stderr
+    calls = _gh_calls(log)
+    assert calls[0] == ("POST", "repos/o/r/issues/7/comments")
+    assert calls[-2] == ("POST", "repos/o/r/pulls/7/reviews")
+    assert calls[-1] == ("DELETE", "repos/o/r/issues/comments/9001")
+    assert ("PATCH", "repos/o/r/issues/comments/9001") in calls[1:-2]
+    pr_post = _only_run().read_manifest().pr_post
+    assert pr_post is not None and pr_post.head_sha == "deadbeefcafe"
+    assert pr_post.review_url and pr_post.progress_comment_id is None
+
+
+def test_post_comments_progress_post_failure_aborts_before_the_run(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.setenv("AEVIEW_GH_COMMENT_FAIL", "post")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert result.exit_code == 2
+    assert "could not post the progress comment" in result.stderr
+    assert not any(d.is_dir() for d in runs_dir().iterdir())  # no panel was spent
+    assert _gh_calls(log) == [("POST", "repos/o/r/issues/7/comments")]
+
+
+def _stale_pr_run(run_id: str, comment_id: int, *, number=7, live=False) -> None:
+    import os
+
+    from aeview.schema import PrPost
+
+    store = RunStore.create(run_id)
+    store.write_manifest(
+        RunManifest(
+            run_id=run_id,
+            created_at="2026-01-01T00:00:00.000000Z",
+            overall="running" if live else "interrupted",
+            invocation=Invocation(reviewers=["default"], scope=ScopeSpec(type="pr")),
+            roster=[],
+            pid=os.getpid() if live else None,
+            pr_post=PrPost(
+                target=PrTarget(
+                    number=number, url=f"https://github.com/o/r/pull/{number}", owner="o", repo="r"
+                ),
+                progress_comment_id=comment_id,
+            ),
+        )
+    )
+
+
+def test_post_comments_sweeps_only_this_prs_dead_local_progress_comments(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    _stale_pr_run("dead-run", 555)
+    _stale_pr_run("live-run", 556, live=True)  # another run still driving its comment
+    _stale_pr_run("other-pr", 557, number=8)
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"])
+    deletes = [e for m, e in _gh_calls(log) if m == "DELETE"]
+    assert "repos/o/r/issues/comments/555" in deletes
+    assert not any(e.endswith(("/556", "/557")) for e in deletes)
+    swept = RunStore("dead-run").read_manifest().pr_post
+    assert swept is not None and swept.progress_comment_id is None  # later sweeps skip it
+
+
+def test_resume_finishes_the_progress_comment_and_posts_the_review(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # A run whose every review failed leaves a "failed" progress comment and posts nothing; resuming
+    # it takes the same comment back, then posts the review and deletes the comment.
+    stub_claude("error")
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    monkeypatch.chdir(git_repo)
+    first = CliRunner().invoke(
+        app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"]
+    )
+    assert first.exit_code == 2 and "not posting to the PR" in first.stderr
+    last_body = json.loads(json.loads(log.read_text().splitlines()[-1])["body"])["body"]
+    assert "❌ **failed**" in last_body and "no review was posted" in last_body
+    assert not any(m == "DELETE" for m, _ in _gh_calls(log))  # left for a resume / the sweep
+
+    stub_claude("ok")
+    log.unlink()
+    store = _only_run()
+    resumed = CliRunner().invoke(app, ["resume", store.run_id])
+    assert resumed.exit_code == 1
+    calls = _gh_calls(log)
+    assert calls[0] == ("PATCH", "repos/o/r/issues/comments/9001")  # same comment, not a new one
+    assert ("POST", "repos/o/r/pulls/7/reviews") in calls
+    assert calls[-1] == ("DELETE", "repos/o/r/issues/comments/9001")
+    pr_post = store.read_manifest().pr_post
+    assert pr_post is not None and pr_post.review_url and pr_post.progress_comment_id is None
 
 
 def test_merge_settings_carries_the_pinned_dedup_plan():
