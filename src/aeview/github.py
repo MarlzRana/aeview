@@ -469,11 +469,12 @@ def _cell(text: str) -> str:
     return _sanitize(text).replace("|", "\\|").replace("\n", " ")
 
 
-def _status_cell(r: ReviewResult | None) -> str:
+def _status_cell(r: ReviewResult | None, phase: ProgressPhase) -> str:
     if r is None or r.status == "pending":
         return "⏸️ pending"
     if r.status == "running":
-        return "🔄 running"
+        # Once the run is over, nothing is still running — it was cut off mid-review.
+        return "🔄 running" if phase in ("reviewing", "merging") else "⚠️ interrupted"
     if r.status == "failed":
         return "❌ failed"
     n = len(r.findings)
@@ -499,7 +500,7 @@ def render_progress(
         model = f"{e.model} ({e.thinking})" if e.thinking else e.model
         rows.append(
             f"| {_cell(e.reviewer)} | {_cell(e.harness)} | {_cell(model)} "
-            f"| {_status_cell(reviews.get(e.id))} |"
+            f"| {_status_cell(reviews.get(e.id), phase)} |"
         )
     if phase == "interrupted" and note is None:
         note = f"Resume with `aeview resume {run_id}`."

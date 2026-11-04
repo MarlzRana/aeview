@@ -420,8 +420,10 @@ def test_render_progress_shows_bar_roster_status_and_marker():
 
 
 def test_render_progress_pending_and_interrupted_hint():
-    body = render_progress("run1", _ROSTER, {}, "interrupted", None)
+    reviews = {_ROSTER[0].id: _review(_ROSTER[0], "running")}
+    body = render_progress("run1", _ROSTER, reviews, "interrupted", None)
     assert "⚠️ **interrupted**" in body and "0/2 reviews finished" in body
+    assert "| a | claude-code | opus | ⚠️ interrupted |" in body  # cut off, not still running
     assert "⏸️ pending" in body
     assert "Resume with `aeview resume run1`." in body
     assert "replaced by the review" not in body  # terminal phases don't promise a replacement
