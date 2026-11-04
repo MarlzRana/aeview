@@ -73,6 +73,11 @@ class GitHubError(Exception):
     """Raised when the PR target can't be resolved or posting fails irrecoverably."""
 
 
+class AmbiguousPostError(GitHubError):
+    """The review POST failed in a way that doesn't prove GitHub rejected it (timeout, 5xx,
+    network): the review may exist, so it must not be retried automatically."""
+
+
 @dataclass(slots=True)
 class PostResult:
     """What post_review did, for the CLI's stderr status line."""
@@ -410,7 +415,7 @@ def post_review(
     # comment). Anything else (timeout, 5xx, network) is ambiguous — the review may exist, so a
     # fallback would double-post; raise instead.
     if not _CLIENT_REJECTION.search(res.stderr):
-        raise GitHubError(
+        raise AmbiguousPostError(
             f"posting the review to PR #{target.number} failed ambiguously ({reason}); it may or "
             "may not have been created — check the PR before re-running --post-comments."
         )

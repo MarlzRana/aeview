@@ -840,6 +840,51 @@ def test_resume_that_reruns_reviews_posts_the_new_report(
     assert ("POST", "repos/o/r/pulls/7/reviews") in calls
 
 
+def test_definite_post_failure_lets_resume_retry(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # GitHub definitely rejected it (nothing posted), so unlike an ambiguous failure, a resume of
+    # the all-done run retries the post.
+    from aeview import cli
+    from aeview.github import GitHubError
+
+    real_post = cli.post_review
+    reject = [True]
+
+    def post(*args):
+        if reject[0]:
+            raise GitHubError("HTTP 422 and the fallback comment also failed")
+        return real_post(*args)
+
+    monkeypatch.setattr(cli, "post_review", post)
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "default", "--post-comments"])
+    store = _only_run()
+    pr_post = store.read_manifest().pr_post
+    assert pr_post is not None and not pr_post.review_attempted and pr_post.review_url is None
+
+    reject[0] = False
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    CliRunner().invoke(app, ["resume", store.run_id])
+    assert ("POST", "repos/o/r/pulls/7/reviews") in _gh_calls(log)
+
+
+def test_sweep_rechecks_liveness_before_deleting(aeview_home, stub_gh, monkeypatch, tmp_path):
+    # The snapshot says interrupted, but a resume has since taken the run over: don't delete.
+    from aeview import cli
+
+    _stale_pr_run("resumed-run", 555, live=True)
+    snapshot = RunStore("resumed-run").read_manifest()
+    snapshot.overall, snapshot.pid = "interrupted", None
+    monkeypatch.setattr(cli, "list_manifests", lambda: [snapshot])
+    log = tmp_path / "gh.jsonl"
+    monkeypatch.setenv("AEVIEW_GH_LOG", str(log))
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7", owner="o", repo="r")
+    cli._sweep_stale_progress(target, tmp_path)
+    assert not log.exists()
+
+
 def test_merge_settings_carries_the_pinned_dedup_plan():
     # run/resume re-merge with the harness frozen in run.json, never current settings.json.
     from aeview.cli import _merge_settings

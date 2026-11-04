@@ -28,6 +28,7 @@ from .config import HarnessInstance, Settings, ensure_seeded, load_settings
 from .doctor import run_doctor
 from .fanout import fan_out
 from .github import (
+    AmbiguousPostError,
     GitHubError,
     PostResult,
     ProgressComment,
@@ -342,21 +343,30 @@ def _sweep_stale_progress(target: PrTarget, cwd: Path) -> None:
             continue
         if (pr.target.owner, pr.target.repo, pr.target.number) != pr_key:
             continue
-        if not delete_comment(pr.target, pr.progress_comment_id, cwd):
-            continue
-        # Record it so later sweeps skip it. Re-read first (as reconcile_interrupted does): a
-        # resume may have taken the run over since the snapshot and now owns its run.json.
+        # Re-read right before deleting (as reconcile_interrupted does): a resume may have taken
+        # the run over since the snapshot and be driving this very comment again.
         store = RunStore(m.run_id)
-        try:
-            fresh = store.read_manifest()
-        except OSError, ValueError:
+        comment_id = pr.progress_comment_id
+        fresh = _sweepable_manifest(store, comment_id)
+        if fresh is None or not delete_comment(pr.target, comment_id, cwd):
             continue
-        if effective_overall(fresh) == "running" or fresh.pr_post is None:
-            continue
-        if fresh.pr_post.progress_comment_id == pr.progress_comment_id:
+        # Record it so later sweeps skip it (re-read again: the delete took a round trip).
+        if (fresh := _sweepable_manifest(store, comment_id)) is not None:
+            assert fresh.pr_post is not None
             fresh.pr_post.progress_comment_id = None
             with contextlib.suppress(OSError):
                 store.write_manifest(fresh)
+
+
+def _sweepable_manifest(store: RunStore, comment_id: int) -> RunManifest | None:
+    """The run's manifest iff it's still not running and still records `comment_id` as its own."""
+    try:
+        fresh = store.read_manifest()
+    except OSError, ValueError:
+        return None
+    if effective_overall(fresh) == "running" or fresh.pr_post is None:
+        return None
+    return fresh if fresh.pr_post.progress_comment_id == comment_id else None
 
 
 def _finish_pr_post(
@@ -390,14 +400,25 @@ def _finish_pr_post(
             progress.finish("failed", "An earlier attempt to post this review may have succeeded.")
         return
     if pr.review_url is None:
+        try:
+            diff = store.read_bundle_diff()
+        except OSError as exc:
+            typer.echo(
+                f"aeview: can't post the review — the frozen diff is unreadable: {exc}", err=True
+            )
+            if progress is not None:
+                progress.finish("failed", "Posting the review to this PR failed.")
+            return
         pr.review_attempted = True
         store.write_manifest(manifest)
         try:
-            posted = post_review(
-                pr.target, report, store.run_id, store.read_bundle_diff(), pr.head_sha, cwd
-            )
-        except (GitHubError, OSError) as exc:
+            posted = post_review(pr.target, report, store.run_id, diff, pr.head_sha, cwd)
+        except GitHubError as exc:
             typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
+            if not isinstance(exc, AmbiguousPostError):
+                # GitHub definitely rejected it, so nothing was posted: let a resume retry.
+                pr.review_attempted = False
+                store.write_manifest(manifest)
             if progress is not None:
                 progress.finish("failed", "Posting the review to this PR failed.")
             return
