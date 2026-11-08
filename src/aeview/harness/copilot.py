@@ -366,9 +366,12 @@ def _runtime_preflight() -> Preflight:
         pair_dir = get_cache_dir(CLI_VERSION) / "prebuilds" / get_runtime_platform()
     except RuntimeError as exc:  # unsupported platform: the run path raises the same
         return Preflight("fail", f"copilot runtime unavailable: {exc}")
+    wrapper = pair_dir / _RUNTIME_WRAPPER
     if _runtime_bundle_is_complete(pair_dir, _RUNTIME_WRAPPER):
-        wrapper = pair_dir / _RUNTIME_WRAPPER
         return Preflight("warn", f"copilot SDK ready ({wrapper}); auth not verifiable")
+    # The SDK refuses to repair a half-present pair (raises instead of re-downloading).
+    if _nonempty_file(wrapper) != _nonempty_file(pair_dir / "runtime.node"):
+        return Preflight("fail", f"copilot runtime cache incomplete; delete {pair_dir}")
     if _should_skip_download():
         return Preflight("fail", f"copilot runtime {CLI_VERSION} not cached; downloads disabled")
     return Preflight(
@@ -376,6 +379,10 @@ def _runtime_preflight() -> Preflight:
         f"copilot runtime {CLI_VERSION} not cached yet (downloaded on first run); "
         "auth not verifiable",
     )
+
+
+def _nonempty_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _resolve_via_sdk_rule(path: str) -> str | None:

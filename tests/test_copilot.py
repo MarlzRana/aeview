@@ -1017,15 +1017,23 @@ def test_preflight_no_override_cached_runtime_warns_ready(monkeypatch, tmp_path)
     assert "auth not verifiable" in pf.detail
 
 
-@pytest.mark.parametrize(
-    "files", [(), ("copilot-runtime",), ("copilot-runtime", "runtime.node")], ids=len
-)
-def test_preflight_incomplete_runtime_warns_download(monkeypatch, tmp_path, files):
+@pytest.mark.parametrize("files", [(), ("copilot-runtime", "runtime.node")], ids=len)
+def test_preflight_uncached_runtime_warns_download(monkeypatch, tmp_path, files):
     # Not (fully) cached → the SDK (re)downloads it on first run; doctor warns, never downloads.
     _runtime_cache(monkeypatch, tmp_path, files=files)
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
     assert "not cached yet" in pf.detail
+
+
+@pytest.mark.parametrize("files", [("copilot-runtime",), ("runtime.node",)])
+def test_preflight_half_present_runtime_fails(monkeypatch, tmp_path, files):
+    # The SDK raises "Incomplete Copilot runtime bundle" for a wrapper/runtime mismatch rather
+    # than re-downloading, so doctor must fail rather than promise a download.
+    _runtime_cache(monkeypatch, tmp_path, files=files)
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "fail"
+    assert "incomplete" in pf.detail
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes"])
@@ -1170,6 +1178,7 @@ def test_runtime_cache_layout_matches_the_real_sdk():
     assert 'get_cache_dir(ver) / "prebuilds" / runtime_platform' in source
     assert "_runtime_bundle_is_complete(pair_dir, wrapper_name)" in source
     assert "_should_skip_download()" in source
+    assert "wrapper_exists != runtime_exists" in source  # the half-present pair raises
 
 
 def test_sdk_logger_is_silenced():
