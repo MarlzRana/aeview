@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from copilot import SessionEvent, SessionEventType
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
-from copilot.session_events import AssistantMessageData, AssistantUsageData
+from copilot.session_events import (
+    AssistantMessageData,
+    AssistantUsageData,
+    session_event_from_dict,
+)
 
 from aeview.harness import copilot, get_adapter
 from aeview.harness.base import AdapterError
@@ -84,6 +88,11 @@ class _Controller:
         # (and stop() must still run after).
         self._state["delete_error"] = exc
 
+    def set_teardown_notification(self, callback) -> None:
+        # Make client.stop() dispatch `callback` as a bare loop callback, the way the SDK delivers
+        # every notification (loop.call_soon_threadsafe) — e.g. one the SDK fails to parse.
+        self._state["teardown_notification"] = callback
+
     def set_delete_delay(self, seconds: float) -> None:
         # Make client.delete_session() hang so _teardown_client's wait_for must bound it.
         self._state["delete_delay"] = seconds
@@ -107,6 +116,7 @@ def copilot_sdk(monkeypatch):
         "create_error": None,
         "delete_error": None,
         "delete_delay": 0.0,
+        "teardown_notification": None,
     }
     captured: dict = {
         "clients": 0,
@@ -190,6 +200,9 @@ def copilot_sdk(monkeypatch):
         async def stop(self):
             captured["teardown_order"].append("stop")
             captured["stopped"] += 1
+            if state["teardown_notification"] is not None:
+                asyncio.get_running_loop().call_soon_threadsafe(state["teardown_notification"])
+                await asyncio.sleep(0)
             if state["stop_delay"]:
                 await asyncio.sleep(state["stop_delay"])
             if state["stop_error"] is not None:
@@ -833,6 +846,55 @@ async def test_writes_success_log(copilot_sdk, tmp_path):
     assert "approve" in log.read_text()  # the assistant message (review JSON) is in the stream
     assert lines[-1]["kind"] == "result"
     assert all("seq" in ln and "ts" in ln for ln in lines)
+
+
+async def test_unparseable_sdk_notification_goes_to_log_not_stderr(copilot_sdk, tmp_path, caplog):
+    # Issue #37: a newer copilot CLI sends `session.shutdown` with shutdownType "destroy", which the
+    # SDK's ShutdownType enum rejects in its notification callback → asyncio printed a traceback.
+    # Use a value that stays invalid even once the SDK learns "destroy".
+    def _notify() -> None:
+        session_event_from_dict(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": datetime.now(UTC).isoformat(),
+                "type": "session.shutdown",
+                "data": {
+                    "codeChanges": {"filesModified": [], "linesAdded": 0, "linesRemoved": 0},
+                    "modelMetrics": {},
+                    "sessionStartTime": 0,
+                    "shutdownType": "aeview-never-valid",
+                    "totalApiDurationMs": 0,
+                },
+            }
+        )
+
+    copilot_sdk.set_teardown_notification(_notify)
+    log = tmp_path / "review.log"
+    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
+    assert out.review.verdict == "approve"
+    assert not [r for r in caplog.records if r.name == "asyncio"]
+    errors = [
+        ln["event"]
+        for ln in map(json.loads, log.read_text().splitlines())
+        if ln["kind"] == "event" and ln["event"].get("type") == "aeview.sdk_callback_error"
+    ]
+    assert len(errors) == 1
+    assert "aeview-never-valid" in errors[0]["exception"]
+
+
+async def test_message_only_loop_error_is_logged(copilot_sdk, tmp_path):
+    def _notify() -> None:
+        asyncio.get_running_loop().call_exception_handler({"message": "sdk hiccup"})
+
+    copilot_sdk.set_teardown_notification(_notify)
+    log = tmp_path / "review.log"
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
+    logged = [json.loads(ln)["event"] for ln in log.read_text().splitlines()]
+    assert {
+        "type": "aeview.sdk_callback_error",
+        "message": "sdk hiccup",
+        "exception": None,
+    } in logged
 
 
 async def test_writes_error_log_on_failure(copilot_sdk, tmp_path):
