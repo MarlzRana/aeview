@@ -33,8 +33,6 @@ from shutil import which
 from typing import TYPE_CHECKING, Any
 
 from copilot import CopilotClient, RuntimeConnection
-from copilot._cli_download import get_cache_dir
-from copilot._cli_version import CLI_VERSION, get_runtime_platform
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from copilot.session_events import AssistantMessageData, AssistantUsageData
 
@@ -59,7 +57,7 @@ if TYPE_CHECKING:
 # last-resort handler prints over aeview's stderr; the failure already surfaces as an AdapterError.
 logging.getLogger("copilot").addHandler(logging.NullHandler())
 
-# Mirrors the SDK's _cli_download layout: <cache>/<version>/prebuilds/<platform>/copilot-runtime.
+# The SDK's runtime wrapper name in <cache>/<version>/prebuilds/<platform>/ (non-Windows).
 _RUNTIME_WRAPPER = "copilot-runtime"
 
 # send_and_wait requires a float timeout (defaults to 60s, which would fire prematurely). When no
@@ -281,22 +279,7 @@ class CopilotAdapter:
             if binary is None:
                 return Preflight("fail", f"copilot binary not resolvable: {configured}")
             return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
-        if not CLI_VERSION:
-            return Preflight("fail", "copilot SDK pins no runtime version; set COPILOT_CLI_PATH")
-        wrapper = (
-            get_cache_dir(CLI_VERSION) / "prebuilds" / get_runtime_platform() / _RUNTIME_WRAPPER
-        )
-        if wrapper.is_file() and os.access(wrapper, os.X_OK):
-            return Preflight("warn", f"copilot SDK ready ({wrapper}); auth not verifiable")
-        if os.environ.get("COPILOT_SKIP_CLI_DOWNLOAD", "").lower() in ("1", "true"):
-            return Preflight(
-                "fail", f"copilot runtime {CLI_VERSION} not cached; downloads disabled"
-            )
-        return Preflight(
-            "warn",
-            f"copilot runtime {CLI_VERSION} not cached yet (downloaded on first run); "
-            "auth not verifiable",
-        )
+        return _runtime_preflight()
 
     def _build_connection(self) -> RuntimeConnection | None:
         # No override → SDK resolves its pinned runtime. With an override, resolve it the
@@ -362,6 +345,37 @@ def _log_callback_error(
         )
 
     return _handler
+
+
+def _runtime_preflight() -> Preflight:
+    # Ask the SDK's own (private — no public equivalent) cache helpers rather than re-deriving its
+    # completeness/skip rules. Imported here, guarded, so an SDK reshuffle degrades only doctor's
+    # copilot line instead of breaking the adapter import (and with it every harness).
+    try:
+        from copilot._cli_download import (
+            _runtime_bundle_is_complete,
+            _should_skip_download,
+            get_cache_dir,
+        )
+        from copilot._cli_version import CLI_VERSION, get_runtime_platform
+    except ImportError as exc:
+        return Preflight("warn", f"copilot runtime layout unrecognized ({exc}); can't verify")
+    if not CLI_VERSION:
+        return Preflight("fail", "copilot SDK pins no runtime version; set COPILOT_CLI_PATH")
+    try:
+        pair_dir = get_cache_dir(CLI_VERSION) / "prebuilds" / get_runtime_platform()
+    except RuntimeError as exc:  # unsupported platform: the run path raises the same
+        return Preflight("fail", f"copilot runtime unavailable: {exc}")
+    if _runtime_bundle_is_complete(pair_dir, _RUNTIME_WRAPPER):
+        wrapper = pair_dir / _RUNTIME_WRAPPER
+        return Preflight("warn", f"copilot SDK ready ({wrapper}); auth not verifiable")
+    if _should_skip_download():
+        return Preflight("fail", f"copilot runtime {CLI_VERSION} not cached; downloads disabled")
+    return Preflight(
+        "warn",
+        f"copilot runtime {CLI_VERSION} not cached yet (downloaded on first run); "
+        "auth not verifiable",
+    )
 
 
 def _resolve_via_sdk_rule(path: str) -> str | None:
