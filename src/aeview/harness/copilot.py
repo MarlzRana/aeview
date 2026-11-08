@@ -412,21 +412,18 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
 
 
 async def _ensure_runtime() -> None:
+    download = _runtime_future()
     try:
-        await asyncio.wait_for(
-            asyncio.shield(asyncio.wrap_future(_runtime_future())), _PROVISION_TIMEOUT
-        )
-    except AdapterError:
-        raise
-    except TimeoutError as exc:
-        msg = f"copilot runtime download still running after {_PROVISION_TIMEOUT:.0f}s"
-        raise AdapterError(msg) from exc
+        await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(download)), _PROVISION_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
-        # The SDK raises "Failed to download ..." for network failures (worth a retry); anything
-        # else (downloads disabled, incomplete cache, unsupported platform) won't fix itself.
-        raise AdapterError(
-            f"copilot runtime unavailable: {exc}", transient="Failed to download" in str(exc)
-        ) from exc
+        if not download.done():  # our wait bound fired; the shared download is still going
+            msg = f"copilot runtime download still running after {_PROVISION_TIMEOUT:.0f}s"
+            raise AdapterError(msg) from exc
+        # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but a
+        # stalled read escapes as a bare TimeoutError. Anything else (downloads disabled,
+        # incomplete cache, unsupported platform) won't fix itself.
+        transient = "Failed to download" in str(exc) or isinstance(exc, TimeoutError)
+        raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
 
 
 def _runtime_future() -> concurrent.futures.Future[None]:
@@ -443,8 +440,10 @@ def _runtime_future() -> concurrent.futures.Future[None]:
 
                     ensure_runtime_wrapper()
                     future.set_result(None)
-                except BaseException as exc:  # noqa: BLE001 - marshal every outcome to waiters
+                except Exception as exc:  # noqa: BLE001 - marshal every outcome to waiters
                     future.set_exception(exc)
+                except BaseException as exc:  # keep waiters' handling to Exception
+                    future.set_exception(RuntimeError(f"copilot runtime worker aborted: {exc!r}"))
 
             try:
                 threading.Thread(
