@@ -988,9 +988,12 @@ def test_sdk_call_kwargs_match_the_real_sdk():
 # --- preflight -------------------------------------------------------------------------
 
 
-def _runtime_cache(monkeypatch, tmp_path, *, files: tuple[str, ...] = ()):
-    # Point the SDK's runtime cache at tmp_path and materialize `files` (non-empty) in the pair dir;
-    # complete_bundle() is the set the SDK requires before it will run from cache.
+def _runtime_cache(
+    monkeypatch, tmp_path, *, files: tuple[str, ...] = (), empty: tuple[str, ...] = ()
+):
+    # Point the SDK's runtime cache at tmp_path and materialize `files` (non-empty) and `empty`
+    # (0-byte, e.g. a truncated download) in the pair dir; complete_bundle() is the set the SDK
+    # requires before it will run from cache.
     monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
     monkeypatch.delenv("COPILOT_SKIP_CLI_DOWNLOAD", raising=False)
     monkeypatch.setattr(_cli_download, "get_cache_dir", lambda version: tmp_path / version)
@@ -1000,6 +1003,8 @@ def _runtime_cache(monkeypatch, tmp_path, *, files: tuple[str, ...] = ()):
     pair_dir.mkdir(parents=True)
     for name in files:
         (pair_dir / name).write_text("x")
+    for name in empty:
+        (pair_dir / name).touch()
     return pair_dir / copilot._RUNTIME_WRAPPER
 
 
@@ -1026,14 +1031,26 @@ def test_preflight_uncached_runtime_warns_download(monkeypatch, tmp_path, files)
     assert "not cached yet" in pf.detail
 
 
-@pytest.mark.parametrize("files", [("copilot-runtime",), ("runtime.node",)])
-def test_preflight_half_present_runtime_fails(monkeypatch, tmp_path, files):
+@pytest.mark.parametrize(
+    ("files", "empty"),
+    [
+        (("copilot-runtime",), ()),
+        (("runtime.node",), ()),
+        (("runtime.node",), ("copilot-runtime",)),  # truncated wrapper counts as missing
+    ],
+)
+def test_preflight_half_present_runtime_fails(monkeypatch, tmp_path, files, empty):
     # The SDK raises "Incomplete Copilot runtime bundle" for a wrapper/runtime mismatch rather
     # than re-downloading, so doctor must fail rather than promise a download.
-    _runtime_cache(monkeypatch, tmp_path, files=files)
+    _runtime_cache(monkeypatch, tmp_path, files=files, empty=empty)
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "fail"
     assert "incomplete" in pf.detail
+
+
+def test_preflight_both_runtime_files_empty_is_uncached(monkeypatch, tmp_path):
+    _runtime_cache(monkeypatch, tmp_path, empty=("copilot-runtime", "runtime.node"))
+    assert "not cached yet" in copilot.CopilotAdapter().preflight().detail
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes"])
@@ -1078,6 +1095,15 @@ def test_preflight_unrecognized_sdk_layout_degrades_to_warn(monkeypatch):
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
     assert "unrecognized" in pf.detail
+
+
+def test_preflight_override_wins_over_copilot_cli_path(monkeypatch):
+    # The run path passes the override as connection.path, so the SDK never reads the env var.
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")
+    monkeypatch.setattr(copilot, "which", lambda binary: binary)
+    pf = copilot.CopilotAdapter("/opt/copilot").preflight()
+    assert "/opt/copilot" in pf.detail
+    assert "/env/copilot" not in pf.detail
 
 
 def test_preflight_override_resolves_and_warns(monkeypatch):
