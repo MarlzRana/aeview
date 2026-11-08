@@ -851,6 +851,7 @@ async def test_writes_success_log(copilot_sdk, tmp_path):
 async def test_unparseable_sdk_notification_goes_to_log_not_stderr(copilot_sdk, tmp_path, caplog):
     # Issue #37: a newer copilot CLI sends `session.shutdown` with shutdownType "destroy", which the
     # SDK's ShutdownType enum rejects in its notification callback → asyncio printed a traceback.
+    # Use a value that stays invalid even once the SDK learns "destroy".
     def _notify() -> None:
         session_event_from_dict(
             {
@@ -861,7 +862,7 @@ async def test_unparseable_sdk_notification_goes_to_log_not_stderr(copilot_sdk, 
                     "codeChanges": {"filesModified": [], "linesAdded": 0, "linesRemoved": 0},
                     "modelMetrics": {},
                     "sessionStartTime": 0,
-                    "shutdownType": "destroy",
+                    "shutdownType": "aeview-never-valid",
                     "totalApiDurationMs": 0,
                 },
             }
@@ -878,7 +879,7 @@ async def test_unparseable_sdk_notification_goes_to_log_not_stderr(copilot_sdk, 
         if ln["kind"] == "event" and ln["event"].get("type") == "aeview.sdk_callback_error"
     ]
     assert len(errors) == 1
-    assert "destroy" in errors[0]["exception"]
+    assert "aeview-never-valid" in errors[0]["exception"]
 
 
 async def test_message_only_loop_error_is_logged(copilot_sdk, tmp_path):
