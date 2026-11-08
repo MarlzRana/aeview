@@ -65,6 +65,16 @@ _RUNTIME_WRAPPER = "copilot-runtime"
 # govern — in practice reviewTimeoutSeconds is always set, so this only covers the None path.
 _UNBOUNDED_TIMEOUT = 365 * 24 * 60 * 60
 
+# Cap on waiting for the one-time runtime download (~90 MB). Generous, but bounded so a stalled
+# network can't hang the run; the SDK's own urlopen retries could otherwise take ~30 min.
+_PROVISION_TIMEOUT = 600.0
+
+# Process-wide single-flight for the runtime download: every copilot review/dedup waits on the same
+# future. A threading.Lock + concurrent Future (not asyncio primitives) because reviews run on
+# separate event loops; a failed future is replaced on the next call so retries download afresh.
+_runtime_lock = threading.Lock()
+_runtime_ready: concurrent.futures.Future[None] | None = None
+
 # Cap on the client teardown: stop() awaits a destroy RPC (which can hang on a dead connection)
 # before its own bounded terminate→kill, so we bound stop() and fall back to the SDK's force_stop().
 _TEARDOWN_GRACE = 10.0
@@ -100,8 +110,13 @@ class CopilotAdapter:
         # the first turn with a clear "not supported for model" error. "default" leaves it unset.
         effort = None if thinking in (None, "", "default") else thinking
         base_prompt = embed_schema(prompt, schema)
+        connection = self._build_connection()
+        if connection is None and not os.environ.get("COPILOT_CLI_PATH"):
+            # Outside the review timeout: the SDK downloads its runtime with blocking I/O inside
+            # CopilotClient(), which asyncio.timeout can't interrupt, and once per caller.
+            await _ensure_runtime()
         return await self._run_isolated(
-            self._build_connection(),
+            connection,
             base_prompt,
             schema,
             model,
@@ -394,6 +409,53 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
     if os.path.isfile(path) and os.access(path, os.X_OK):
         return path
     return which(path)
+
+
+async def _ensure_runtime() -> None:
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(_runtime_future())), _PROVISION_TIMEOUT
+        )
+    except AdapterError:
+        raise
+    except TimeoutError as exc:
+        msg = f"copilot runtime download still running after {_PROVISION_TIMEOUT:.0f}s"
+        raise AdapterError(msg) from exc
+    except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
+        # The SDK raises "Failed to download ..." for network failures (worth a retry); anything
+        # else (downloads disabled, incomplete cache, unsupported platform) won't fix itself.
+        raise AdapterError(
+            f"copilot runtime unavailable: {exc}", transient="Failed to download" in str(exc)
+        ) from exc
+
+
+def _runtime_future() -> concurrent.futures.Future[None]:
+    global _runtime_ready
+    with _runtime_lock:
+        if _runtime_ready is None or (_runtime_ready.done() and _runtime_ready.exception()):
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_running_or_notify_cancel()  # running: a waiter's cancel can't cancel it
+
+            def _provision() -> None:
+                try:
+                    # Private (no public equivalent); returns at once when already cached.
+                    from copilot._cli_download import ensure_runtime_wrapper
+
+                    ensure_runtime_wrapper()
+                    future.set_result(None)
+                except BaseException as exc:  # noqa: BLE001 - marshal every outcome to waiters
+                    future.set_exception(exc)
+
+            try:
+                threading.Thread(
+                    target=_provision, name="aeview-copilot-runtime", daemon=True
+                ).start()
+            except RuntimeError as exc:  # OS thread limit: nothing stored, so a retry starts over
+                raise AdapterError(
+                    f"copilot runtime worker thread failed to start: {exc}", transient=True
+                ) from exc
+            _runtime_ready = future
+        return _runtime_ready
 
 
 async def _teardown_client(client: CopilotClient, session_id: str | None) -> None:
