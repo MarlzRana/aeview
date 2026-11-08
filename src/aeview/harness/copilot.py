@@ -29,7 +29,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, cast, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from copilot import CopilotClient, RuntimeConnection
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -190,6 +190,7 @@ class CopilotAdapter:
         deferred I6b-2)."""
         collector = _UsageCollector()
         writer = EventLogWriter(log_path, harness=self.name, model=model)
+        asyncio.get_running_loop().set_exception_handler(_log_callback_error(writer))
         client: CopilotClient | None = None
         session_id: str | None = None
         try:
@@ -260,9 +261,9 @@ class CopilotAdapter:
             writer.error(msg)
             raise AdapterError(msg, transient=looks_transient(detail)) from exc
         finally:
-            writer.close()
             if client is not None:
                 await _teardown_client(client, session_id)
+            writer.close()
 
     def preflight(self) -> Preflight:
         # The SDK resolves a bundled `copilot` not necessarily on PATH, so don't gate on PATH.
@@ -347,6 +348,27 @@ def _deny_by_default_permission(
     if request.kind == "read":
         return PermissionDecisionApproveOnce()
     return PermissionDecisionReject()
+
+
+def _log_callback_error(
+    writer: EventLogWriter,
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    # The SDK dispatches every notification via loop.call_soon_threadsafe, so a payload it can't
+    # parse (e.g. a newer CLI's `shutdownType: "destroy"`, unknown to the SDK's enum) raises inside
+    # a bare callback; asyncio's default handler would print that traceback over aeview's stderr.
+    # This loop is private to one review and runs only SDK internals, and such a failure can't
+    # affect the outcome, so record it in the review's log instead.
+    def _handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        writer.append(
+            {
+                "type": "aeview.sdk_callback_error",
+                "message": context.get("message"),
+                "exception": repr(exc) if exc is not None else None,
+            }
+        )
+
+    return _handler
 
 
 def _resolve_via_sdk_rule(path: str) -> str | None:
