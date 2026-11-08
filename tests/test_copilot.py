@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
+import logging
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -10,7 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from copilot import SessionEvent, SessionEventType
+from copilot import SessionEvent, SessionEventType, _cli_download, _cli_version
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from copilot.session_events import (
     AssistantMessageData,
@@ -101,7 +104,7 @@ class _Controller:
 @pytest.fixture
 def copilot_sdk(monkeypatch):
     """Mock the copilot SDK boundary (copilot.CopilotClient) with an offline fake. The adapter
-    resolves the SDK's bundled binary, so Tier-1 tests intercept the SDK call itself. Default = a
+    resolves the SDK's pinned runtime, so Tier-1 tests intercept the SDK call itself. Default = a
     valid approve answer with usage 100/20; queue_turn sets per-turn answer/usage/exc/delay and the
     controller exposes the client + session kwargs, the send_and_wait calls, and teardown counts
     (start/stop/force_stop on the client, disconnect on the session — explicit lifecycle, no
@@ -243,7 +246,9 @@ async def test_copilot_runs_read_only_via_sdk(copilot_sdk, tmp_path):
     assert ck["working_directory"] == str(tmp_path)
     assert callable(ck["on_permission_request"])  # the read-only enforcement boundary
     assert copilot_sdk.captured["client_kwargs"]["working_directory"] == str(tmp_path)
-    assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # no override → bundled
+    assert (
+        copilot_sdk.captured["client_kwargs"]["connection"] is None
+    )  # no override → pinned runtime
     assert "PROMPT" in copilot_sdk.captured["send_calls"][0]["prompt"]  # prompt + embedded schema
     assert copilot_sdk.captured["started"] == 1  # client started
     assert (
@@ -293,16 +298,18 @@ async def test_thinking_maps_to_reasoning_effort(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["create_kwargs"]["reasoning_effort"] == "high"
 
 
-async def test_default_thinking_leaves_effort_unset(copilot_sdk, tmp_path):
-    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", "default")
+@pytest.mark.parametrize("value", [None, "", "default"])
+async def test_default_thinking_leaves_effort_unset(copilot_sdk, tmp_path, value):
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", value)
     assert copilot_sdk.captured["create_kwargs"]["reasoning_effort"] is None
 
 
-async def test_rejects_invalid_thinking(copilot_sdk, tmp_path):
-    # The SDK's effort set is low/medium/high/xhigh (no none/max); an unknown value fails fast.
-    with pytest.raises(AdapterError, match="thinking"):
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", "ultra")
-    assert copilot_sdk.captured["clients"] == 0  # fails before any SDK work
+@pytest.mark.parametrize("value", ["max", "ultra"])
+async def test_thinking_passes_through_for_the_runtime_to_validate(copilot_sdk, tmp_path, value):
+    # Supported efforts are per-model (the SDK types ReasoningEffort as plain str), so aeview passes
+    # any value through; the runtime rejects an unsupported one on the first turn (verified live).
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", value)
+    assert copilot_sdk.captured["create_kwargs"]["reasoning_effort"] == value
 
 
 # --- usage (assistant.usage events) ----------------------------------------------------
@@ -337,7 +344,7 @@ async def test_no_usage_events_yields_zero(copilot_sdk, tmp_path):
 
 async def test_binary_override_threads_to_stdio_connection(copilot_sdk, tmp_path, monkeypatch):
     # settings.overrideHarnessBinaries["copilot"] reaches RuntimeConnection.for_stdio(path=...).
-    # An absolute path which can't resolve is passed verbatim (so the SDK fails loud, not bundled).
+    # An absolute path which can't resolve is passed verbatim (so the SDK fails loud).
     monkeypatch.setattr(copilot, "which", lambda b: None)
     recorded: dict = {}
 
@@ -365,12 +372,12 @@ async def test_bare_name_override_resolves_via_which(copilot_sdk, tmp_path, monk
     assert recorded["path"] == "/resolved/copilot"
 
 
-async def test_no_override_uses_bundled(copilot_sdk, tmp_path):
+async def test_no_override_uses_pinned_runtime(copilot_sdk, tmp_path):
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # None → bundled binary
+    assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # None → pinned runtime
 
 
-def test_empty_override_is_treated_as_bundled():
+def test_empty_override_is_treated_as_unset():
     assert copilot.CopilotAdapter("")._copilot_bin is None
 
 
@@ -981,13 +988,139 @@ def test_sdk_call_kwargs_match_the_real_sdk():
 # --- preflight -------------------------------------------------------------------------
 
 
-def test_preflight_no_override_resolves_bundled_and_warns(monkeypatch):
-    # No override + no COPILOT_CLI_PATH → resolve the bundled binary (need not be on PATH). Copilot
-    # has no no-cost auth probe, so the best we can say is warn (present, auth unverifiable).
+def _runtime_cache(
+    monkeypatch, tmp_path, *, files: tuple[str, ...] = (), empty: tuple[str, ...] = ()
+):
+    # Point the SDK's runtime cache at tmp_path and materialize `files` (non-empty) and `empty`
+    # (0-byte, e.g. a truncated download) in the pair dir; complete_bundle() is the set the SDK
+    # requires before it will run from cache.
     monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.delenv("COPILOT_SKIP_CLI_DOWNLOAD", raising=False)
+    monkeypatch.setattr(_cli_download, "get_cache_dir", lambda version: tmp_path / version)
+    pair_dir = (
+        tmp_path / _cli_version.CLI_VERSION / "prebuilds" / _cli_version.get_runtime_platform()
+    )
+    pair_dir.mkdir(parents=True)
+    for name in files:
+        (pair_dir / name).write_text("x")
+    for name in empty:
+        (pair_dir / name).touch()
+    return pair_dir / copilot._RUNTIME_WRAPPER
+
+
+def complete_bundle() -> tuple[str, ...]:
+    return (copilot._RUNTIME_WRAPPER, "runtime.node", _cli_download._HOSTLESS_ASSETS_MARKER)
+
+
+def test_preflight_no_override_cached_runtime_warns_ready(monkeypatch, tmp_path):
+    # No override + no COPILOT_CLI_PATH → the SDK runs its cached runtime. Copilot has no no-cost
+    # auth probe, so the best we can say is warn (present, auth unverifiable).
+    wrapper = _runtime_cache(monkeypatch, tmp_path, files=complete_bundle())
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
+    assert str(wrapper) in pf.detail
     assert "auth not verifiable" in pf.detail
+
+
+@pytest.mark.parametrize("files", [(), ("copilot-runtime", "runtime.node")], ids=len)
+def test_preflight_uncached_runtime_warns_download(monkeypatch, tmp_path, files):
+    # Not (fully) cached → the SDK (re)downloads it on first run; doctor warns, never downloads.
+    _runtime_cache(monkeypatch, tmp_path, files=files)
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "not cached yet" in pf.detail
+
+
+@pytest.mark.parametrize(
+    ("files", "empty"),
+    [
+        (("copilot-runtime",), ()),
+        (("runtime.node",), ()),
+        (("runtime.node",), ("copilot-runtime",)),  # truncated wrapper counts as missing
+    ],
+)
+def test_preflight_half_present_runtime_fails(monkeypatch, tmp_path, files, empty):
+    # The SDK raises "Incomplete Copilot runtime bundle" for a wrapper/runtime mismatch rather
+    # than re-downloading, so doctor must fail rather than promise a download.
+    _runtime_cache(monkeypatch, tmp_path, files=files, empty=empty)
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "fail"
+    assert "incomplete" in pf.detail
+
+
+def test_preflight_both_runtime_files_empty_is_uncached(monkeypatch, tmp_path):
+    _runtime_cache(monkeypatch, tmp_path, empty=("copilot-runtime", "runtime.node"))
+    assert "not cached yet" in copilot.CopilotAdapter().preflight().detail
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes"])
+def test_preflight_uncached_runtime_with_downloads_disabled_fails(monkeypatch, tmp_path, value):
+    _runtime_cache(monkeypatch, tmp_path)
+    monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", value)
+    assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+def test_preflight_cached_runtime_with_downloads_disabled_is_ready(monkeypatch, tmp_path):
+    # The SDK only consults the skip flag when it would download; a cached runtime still runs.
+    _runtime_cache(monkeypatch, tmp_path, files=complete_bundle())
+    monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", "1")
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "ready" in pf.detail
+
+
+def test_preflight_unpinned_runtime_version_fails(monkeypatch, tmp_path):
+    # An SDK without a pinned runtime (dev/editable install) can't download one → fail.
+    _runtime_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(_cli_version, "CLI_VERSION", None)
+    assert copilot.CopilotAdapter().preflight().status == "fail"
+
+
+def test_preflight_unsupported_platform_fails_instead_of_crashing(monkeypatch, tmp_path):
+    _runtime_cache(monkeypatch, tmp_path)
+
+    def unsupported():
+        raise RuntimeError("Unsupported Copilot runtime platform: linux-s390x")
+
+    monkeypatch.setattr(_cli_version, "get_runtime_platform", unsupported)
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "fail"
+    assert "linux-s390x" in pf.detail
+
+
+def test_preflight_unrecognized_sdk_layout_degrades_to_warn(monkeypatch):
+    # A future SDK that moves its private runtime helpers must not crash doctor.
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setitem(sys.modules, "copilot._cli_download", None)  # import → ImportError
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "can't verify" in pf.detail
+
+
+def test_preflight_sdk_helper_signature_drift_degrades_to_warn(monkeypatch, tmp_path):
+    _runtime_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(_cli_download, "get_cache_dir", lambda: tmp_path)  # takes no version now
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "can't verify" in pf.detail
+
+
+def test_preflight_override_wins_over_copilot_cli_path(monkeypatch):
+    # The run path passes the override as connection.path, so the SDK never reads the env var.
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")
+    monkeypatch.setattr(copilot, "which", lambda binary: binary)
+    pf = copilot.CopilotAdapter("/opt/copilot").preflight()
+    assert "/opt/copilot" in pf.detail
+    assert "/env/copilot" not in pf.detail
+
+
+def test_unresolvable_override_fails_even_with_a_valid_copilot_cli_path(monkeypatch):
+    # The run path spawns the override (raw), never the env path, so doctor must not fall back.
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")
+    monkeypatch.setattr(copilot, "which", lambda b: b if b == "/env/copilot" else None)
+    pf = copilot.CopilotAdapter("/opt/copilot").preflight()
+    assert pf.status == "fail"
+    assert "/env/copilot" not in pf.detail
 
 
 def test_preflight_override_resolves_and_warns(monkeypatch):
@@ -1000,41 +1133,6 @@ def test_preflight_override_resolves_and_warns(monkeypatch):
 def test_preflight_non_executable_override_fails(monkeypatch):
     monkeypatch.setattr(copilot, "which", lambda binary: None)  # override doesn't resolve
     pf = copilot.CopilotAdapter("/nope").preflight()
-    assert pf.status == "fail"
-
-
-def test_preflight_fails_when_bundle_missing(monkeypatch):
-    # With no override + no COPILOT_CLI_PATH, copilot resolves ONLY its bundled binary — if that
-    # path doesn't exist, doctor must FAIL (matching what the run path would do), not silently pass.
-    import copilot.client as cc
-
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: "/no/bundle/copilot")
-    pf = copilot.CopilotAdapter().preflight()
-    assert pf.status == "fail"
-
-
-def test_preflight_fails_when_bundle_path_is_none(monkeypatch):
-    # _get_bundled_cli_path returns None on an unsupported/binary-less wheel — doctor FAILS.
-    import copilot.client as cc
-
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
-    pf = copilot.CopilotAdapter().preflight()
-    assert pf.status == "fail"
-
-
-def test_preflight_fails_when_bundle_resolution_raises(monkeypatch):
-    # If the bundled path can't be resolved at all (lookup raises), doctor FAILS rather than
-    # crashing — exercises the except branch in _resolve_copilot_bin.
-    import copilot.client as cc
-
-    def boom():
-        raise RuntimeError("resolution exploded")
-
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", boom)
-    pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "fail"
 
 
@@ -1088,11 +1186,8 @@ async def test_none_input_tokens_counted_as_zero(copilot_sdk, tmp_path):
 
 
 def test_preflight_honors_copilot_cli_path(monkeypatch, tmp_path):
-    # No aeview override: the SDK resolves COPILOT_CLI_PATH before the bundle, so preflight must too
-    # (else doctor would FAIL a run that would succeed). A valid env path → warn (resolved).
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)  # no bundle
+    # No aeview override: the SDK resolves COPILOT_CLI_PATH before its runtime, so preflight must
+    # too (else doctor would FAIL a run that would succeed). A valid env path → warn (resolved).
     binp = tmp_path / "copilot"
     binp.write_text("#!/bin/sh\n")
     binp.chmod(0o755)  # an executable file resolves; preflight predicts the spawn outcome
@@ -1103,32 +1198,36 @@ def test_preflight_honors_copilot_cli_path(monkeypatch, tmp_path):
 
 
 def test_preflight_copilot_cli_path_missing_file_fails(monkeypatch):
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
     monkeypatch.setenv("COPILOT_CLI_PATH", "/nonexistent/copilot")
     assert copilot.CopilotAdapter().preflight().status == "fail"
 
 
-def test_preflight_no_override_does_not_fall_back_to_path(monkeypatch):
-    # No override + no bundle + no COPILOT_CLI_PATH → fail, even if a copilot is on PATH: the SDK
-    # has no PATH search for the bare binary, so doctor must not either (else it'd report OK on a
-    # run that would fail). _resolve_copilot_bin's no-override path never calls which.
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
-    monkeypatch.setattr(copilot, "which", lambda b: "/usr/bin/copilot")  # a PATH copilot exists
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+def test_preflight_no_override_does_not_fall_back_to_path(monkeypatch, tmp_path):
+    # The SDK has no PATH search for an unconfigured binary — it uses its own runtime — so a copilot
+    # on PATH must not make doctor report ready.
+    _runtime_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(copilot, "which", lambda b: "/usr/bin/copilot")
+    pf = copilot.CopilotAdapter().preflight()
+    assert "/usr/bin/copilot" not in pf.detail
+    assert "not cached yet" in pf.detail
 
 
-def test_bundled_cli_path_symbol_exists_in_real_sdk():
-    # Doctor's no-override resolution imports the private copilot.client._get_bundled_cli_path (no
-    # public equivalent); pin it against the REAL SDK so an upgrade that removes it fails loudly
-    # here rather than silently degrading doctor's copilot check.
-    import copilot.client as cc
+def test_runtime_cache_layout_matches_the_real_sdk():
+    # preflight reuses the SDK's private runtime-cache helpers (no public equivalent); pin how the
+    # REAL run path uses them so an upgrade that changes the layout fails here, not in doctor.
+    assert _cli_version.CLI_VERSION
+    source = inspect.getsource(_cli_download.ensure_runtime_wrapper)
+    assert f'"{copilot._RUNTIME_WRAPPER}"' in source
+    assert 'get_cache_dir(ver) / "prebuilds" / runtime_platform' in source
+    assert "_runtime_bundle_is_complete(pair_dir, wrapper_name)" in source
+    assert "_should_skip_download()" in source
+    assert "wrapper_exists != runtime_exists" in source  # the half-present pair raises
 
-    assert callable(cc._get_bundled_cli_path)
+
+def test_sdk_logger_is_silenced():
+    # Without a handler, the SDK's WARNING+ JSON-RPC failure logs (with tracebacks) reach Python's
+    # last-resort stderr handler.
+    assert any(isinstance(h, logging.NullHandler) for h in logging.getLogger("copilot").handlers)
 
 
 # --- dogfood r2: real permission-kind pin, COPILOT_CLI_PATH which-resolution, teardown hang ---
@@ -1162,16 +1261,13 @@ def test_permission_request_kinds_match_the_real_sdk():
 
 def _call_permission(kind: str):
     request = cast("PermissionRequest", SimpleNamespace(kind=kind))
-    return copilot._deny_by_default_permission(request, {})
+    return copilot._deny_by_default_permission(request, {"session_id": "s1"})
 
 
 def test_preflight_copilot_cli_path_bare_command_on_path_resolves(monkeypatch):
     # COPILOT_CLI_PATH may be a bare command name; the SDK does `os.path.exists(p) or which(p)` at
     # spawn, so a command on PATH resolves. preflight must mirror that (else doctor would FAIL a run
     # that would start) — an existence-only check would wrongly reject the bare command.
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
     monkeypatch.setenv("COPILOT_CLI_PATH", "copilotcmd")  # a bare name, not an existing path
     monkeypatch.setattr(
         copilot, "which", lambda b: "/usr/bin/copilotcmd" if b == "copilotcmd" else None
@@ -1192,14 +1288,6 @@ async def test_teardown_hang_is_bounded_then_force_stops(copilot_sdk, tmp_path, 
     assert copilot_sdk.captured["force_stopped"] == 1  # wait_for fired → hard-kill fallback ran
 
 
-@pytest.mark.parametrize("value", ["none", "max"])
-async def test_narrowed_effort_set_rejects_none_and_max(copilot_sdk, tmp_path, value):
-    # The SDK's effort set is low/medium/high/xhigh; the old CLI also accepted none/max. Pin that
-    # those now fail-fast so a revert to the broader hardcoded set is caught.
-    with pytest.raises(AdapterError, match="thinking"):
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", value)
-
-
 async def test_unsubscribe_runs_after_the_turn(copilot_sdk, tmp_path):
     # The usage handler is unsubscribed in a finally so it can't fire after we've read the usage.
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
@@ -1209,9 +1297,6 @@ async def test_unsubscribe_runs_after_the_turn(copilot_sdk, tmp_path):
 def test_preflight_existing_non_executable_path_fails(monkeypatch, tmp_path):
     # An existing-but-non-executable COPILOT_CLI_PATH (e.g. a 0644 file) resolves for the SDK but
     # fails at Popen, so preflight must predict the spawn failure (NOT report warn/ready).
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
     nonexec = tmp_path / "copilot"
     nonexec.write_text("not executable\n")  # exists, but no +x bit
     monkeypatch.setenv("COPILOT_CLI_PATH", str(nonexec))
@@ -1256,9 +1341,6 @@ async def test_raising_force_stop_does_not_break_the_result(copilot_sdk, tmp_pat
 def test_preflight_executable_directory_path_fails(monkeypatch, tmp_path):
     # _resolve_via_sdk_rule requires an executable FILE; an executable DIRECTORY (isfile False)
     # resolves for the SDK but fails at Popen, so doctor must reject it (not report ready).
-    import copilot.client as cc
-
-    monkeypatch.setattr(cc, "_get_bundled_cli_path", lambda: None)
     d = tmp_path / "copilotdir"
     d.mkdir()  # a directory (the executable bit is set, but it is not a file)
     monkeypatch.setenv("COPILOT_CLI_PATH", str(d))

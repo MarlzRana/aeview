@@ -116,8 +116,9 @@ that's the *user-facing* `settings.json` surface. Every `schema.py` model is sna
 | `copilot` | `github-copilot-sdk` | `prompt` (schema embedded, re-prompt once) | deny-by-default permission handler (approve `read` only) |
 | `pi` | `pi` CLI + `srt` (PATH, not bundled) | `prompt` (schema embedded, re-prompt once on a persisted session) | whole-process SRT wrap (`denyWrite:["/"]`, write hole = this review's `pi-session/`) |
 
-Claude/Codex/Copilot ship a **pinned binary** (insulated from the user's own CLI upgrades; override
-via `overrideHarnessBinaries`). `pi` is PATH-gated (`pi` + `srt`); `overrideHarnessBinaries.pi` is
+Claude/Codex/Copilot run a **pinned binary** (insulated from the user's own CLI upgrades; override
+via `overrideHarnessBinaries`); Copilot's SDK (≥1.0.29) downloads its pinned runtime into a per-version
+cache on first use instead of bundling it. `pi` is PATH-gated (`pi` + `srt`); `overrideHarnessBinaries.pi` is
 its argv[0]. Every adapter normalizes *all* exceptions to `AdapterError` and tears down cleanly in
 `finally` (codex/copilot each run on an **isolated daemon thread + own event loop** to avoid pool
 starvation; copilot also `delete_session`s to avoid on-disk session leaks). Adding a harness = one

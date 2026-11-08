@@ -316,8 +316,9 @@ read-only sandboxes; Copilot uses a deny-by-default permission handler that only
 pi wraps the whole process in [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
 (`srt`), with a write hole only for that review's session file.
 
-Claude / Codex / Copilot ship a **pinned binary**, so aeview is insulated from your own CLI
-upgrades. `pi` uses whatever `pi` (and `srt`) are on PATH. To point a harness at a different
+Claude / Codex / Copilot run a **pinned binary**, so aeview is insulated from your own CLI
+upgrades (Copilot's SDK downloads its pinned runtime into a local cache on first use). `pi` uses
+whatever `pi` (and `srt`) are on PATH. To point a harness at a different
 binary, set [`overrideHarnessBinaries`](#configuration).
 
 ## Deduplication
