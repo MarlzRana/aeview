@@ -1094,7 +1094,15 @@ def test_preflight_unrecognized_sdk_layout_degrades_to_warn(monkeypatch):
     monkeypatch.setitem(sys.modules, "copilot._cli_download", None)  # import → ImportError
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
-    assert "unrecognized" in pf.detail
+    assert "can't verify" in pf.detail
+
+
+def test_preflight_sdk_helper_signature_drift_degrades_to_warn(monkeypatch, tmp_path):
+    _runtime_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(_cli_download, "get_cache_dir", lambda: tmp_path)  # takes no version now
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "warn"
+    assert "can't verify" in pf.detail
 
 
 def test_preflight_override_wins_over_copilot_cli_path(monkeypatch):
@@ -1103,6 +1111,15 @@ def test_preflight_override_wins_over_copilot_cli_path(monkeypatch):
     monkeypatch.setattr(copilot, "which", lambda binary: binary)
     pf = copilot.CopilotAdapter("/opt/copilot").preflight()
     assert "/opt/copilot" in pf.detail
+    assert "/env/copilot" not in pf.detail
+
+
+def test_unresolvable_override_fails_even_with_a_valid_copilot_cli_path(monkeypatch):
+    # The run path spawns the override (raw), never the env path, so doctor must not fall back.
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")
+    monkeypatch.setattr(copilot, "which", lambda b: b if b == "/env/copilot" else None)
+    pf = copilot.CopilotAdapter("/opt/copilot").preflight()
+    assert pf.status == "fail"
     assert "/env/copilot" not in pf.detail
 
 

@@ -279,7 +279,10 @@ class CopilotAdapter:
             if binary is None:
                 return Preflight("fail", f"copilot binary not resolvable: {configured}")
             return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
-        return _runtime_preflight()
+        try:
+            return _runtime_preflight()
+        except Exception as exc:  # noqa: BLE001 - SDK drift / unreadable cache: degrade, don't crash
+            return Preflight("warn", f"copilot runtime check failed ({exc}); can't verify")
 
     def _build_connection(self) -> RuntimeConnection | None:
         # No override → SDK resolves its pinned runtime. With an override, resolve it the
@@ -349,17 +352,15 @@ def _log_callback_error(
 
 def _runtime_preflight() -> Preflight:
     # Ask the SDK's own (private — no public equivalent) cache helpers rather than re-deriving its
-    # completeness/skip rules. Imported here, guarded, so an SDK reshuffle degrades only doctor's
-    # copilot line instead of breaking the adapter import (and with it every harness).
-    try:
-        from copilot._cli_download import (
-            _runtime_bundle_is_complete,
-            _should_skip_download,
-            get_cache_dir,
-        )
-        from copilot._cli_version import CLI_VERSION, get_runtime_platform
-    except ImportError as exc:
-        return Preflight("warn", f"copilot runtime layout unrecognized ({exc}); can't verify")
+    # completeness/skip rules. Imported here (and the caller catches everything) so an SDK
+    # reshuffle degrades only doctor's copilot line instead of breaking the adapter import.
+    from copilot._cli_download import (
+        _runtime_bundle_is_complete,
+        _should_skip_download,
+        get_cache_dir,
+    )
+    from copilot._cli_version import CLI_VERSION, get_runtime_platform
+
     if not CLI_VERSION:
         return Preflight("fail", "copilot SDK pins no runtime version; set COPILOT_CLI_PATH")
     try:
