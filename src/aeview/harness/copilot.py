@@ -1,8 +1,8 @@
 """copilot adapter: prompt-embedded schema, deny-by-default read-only, via the Copilot SDK.
 
 Runs GitHub Copilot through the `github-copilot-sdk` (`CopilotClient().create_session(...)` +
-`session.send_and_wait(...)`) instead of shelling out to the `copilot` CLI. The SDK resolves its
-own bundled `copilot` binary by default (shipped in the platform wheel); a
+`session.send_and_wait(...)`) instead of shelling out to the `copilot` CLI. By default the SDK runs
+its pinned copilot runtime, downloading it into a per-version cache on first use; a
 `settings.overrideHarnessBinaries["copilot"]` entry overrides it via `RuntimeConnection.for_stdio`.
 
 Copilot has no schema flag (`schema_support="prompt"`): the wanted JSON Schema is appended to the
@@ -23,17 +23,19 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import logging
 import os
 import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any
 
 from copilot import CopilotClient, RuntimeConnection
+from copilot._cli_download import get_cache_dir
+from copilot._cli_version import CLI_VERSION, get_runtime_platform
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
-from copilot.session import ReasoningEffort
 from copilot.session_events import AssistantMessageData, AssistantUsageData
 
 from ..schema import Usage
@@ -51,10 +53,14 @@ from .prompt_schema import MAX_ATTEMPTS, RETRY_SUFFIX, embed_schema, extract_jso
 
 if TYPE_CHECKING:
     from copilot import CopilotSession, PermissionRequest, PermissionRequestResult, SessionEvent
+    from copilot.session import PermissionInvocation
 
-# copilot reasoning-effort levels, derived from the SDK's ReasoningEffort Literal so the accepted
-# set tracks the SDK; "default"/None leaves it unset. (Narrower than the old CLI set — no none/max.)
-_EFFORT_LEVELS = frozenset(get_args(ReasoningEffort))
+# The SDK logs every failed JSON-RPC request (with traceback) at WARNING+, which Python's
+# last-resort handler prints over aeview's stderr; the failure already surfaces as an AdapterError.
+logging.getLogger("copilot").addHandler(logging.NullHandler())
+
+# Mirrors the SDK's _cli_download layout: <cache>/<version>/prebuilds/<platform>/copilot-runtime.
+_RUNTIME_WRAPPER = "copilot-runtime"
 
 # send_and_wait requires a float timeout (defaults to 60s, which would fire prematurely). When no
 # per-review timeout is set, pass an effectively-unbounded value and let the caller's bound (none)
@@ -73,8 +79,7 @@ class CopilotAdapter:
 
     def __init__(self, binary_override: str | None = None) -> None:
         # settings.overrideHarnessBinaries["copilot"], threaded to the SDK via
-        # RuntimeConnection.for_stdio. None (incl. an empty string) → the SDK's bundled
-        # copilot binary.
+        # RuntimeConnection.for_stdio. None (incl. an empty string) → the SDK's pinned runtime.
         self._copilot_bin = binary_override or None
         self.binary = binary_override or "copilot"  # protocol attr / doctor display
 
@@ -93,8 +98,9 @@ class CopilotAdapter:
         path (`run` → `run_review`): it raises on a structurally-present-but-invalid payload (wrong
         enum/type) so that case re-prompts too. The generic dedup caller omits it and one-shots — a
         deep-invalid dedup payload degrades to the raw-union path."""
-        # Resolve effort before any SDK call so an invalid value fails fast (config error, no log).
-        effort = self._resolve_effort(thinking)
+        # Supported efforts are per-model, so the runtime validates them: an unsupported one fails
+        # the first turn with a clear "not supported for model" error. "default" leaves it unset.
+        effort = None if thinking in (None, "", "default") else thinking
         base_prompt = embed_schema(prompt, schema)
         return await self._run_isolated(
             self._build_connection(),
@@ -115,7 +121,7 @@ class CopilotAdapter:
         schema: dict,
         model: str,
         cwd: str,
-        effort: ReasoningEffort | None,
+        effort: str | None,
         timeout: float | None,
         validate: Callable[[dict], object] | None,
         log_path: Path,
@@ -174,7 +180,7 @@ class CopilotAdapter:
         schema: dict,
         model: str,
         cwd: str,
-        effort: ReasoningEffort | None,
+        effort: str | None,
         timeout: float | None,
         validate: Callable[[dict], object] | None,
         log_path: Path,
@@ -266,54 +272,41 @@ class CopilotAdapter:
             writer.close()
 
     def preflight(self) -> Preflight:
-        # The SDK resolves a bundled `copilot` not necessarily on PATH, so don't gate on PATH.
-        # Resolve exactly as the run path does (override → which; else bundled-only) so doctor can't
-        # report OK while the run would fail. Copilot has no no-cost auth probe → we can only warn.
-        binary = self._resolve_copilot_bin()
-        if binary is None:
-            return Preflight("fail", "copilot binary not resolvable (bad override or no bundle)")
-        return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
+        # Predict the SDK's resolution ORDER: aeview override (our connection.path) →
+        # COPILOT_CLI_PATH → its pinned downloaded runtime. Copilot has no no-cost auth probe, so
+        # the best outcome is warn. Doctor never triggers the (large) runtime download itself.
+        configured = self._copilot_bin or os.environ.get("COPILOT_CLI_PATH")
+        if configured:
+            binary = _resolve_via_sdk_rule(configured)
+            if binary is None:
+                return Preflight("fail", f"copilot binary not resolvable: {configured}")
+            return Preflight("warn", f"copilot SDK ready ({binary}); auth not verifiable")
+        if not CLI_VERSION:
+            return Preflight("fail", "copilot SDK pins no runtime version; set COPILOT_CLI_PATH")
+        wrapper = (
+            get_cache_dir(CLI_VERSION) / "prebuilds" / get_runtime_platform() / _RUNTIME_WRAPPER
+        )
+        if wrapper.is_file() and os.access(wrapper, os.X_OK):
+            return Preflight("warn", f"copilot SDK ready ({wrapper}); auth not verifiable")
+        if os.environ.get("COPILOT_SKIP_CLI_DOWNLOAD", "").lower() in ("1", "true"):
+            return Preflight(
+                "fail", f"copilot runtime {CLI_VERSION} not cached; downloads disabled"
+            )
+        return Preflight(
+            "warn",
+            f"copilot runtime {CLI_VERSION} not cached yet (downloaded on first run); "
+            "auth not verifiable",
+        )
 
     def _build_connection(self) -> RuntimeConnection | None:
-        # No override → SDK resolves its bundled copilot binary. With an override, resolve it the
+        # No override → SDK resolves its pinned runtime. With an override, resolve it the
         # same way preflight predicts (_resolve_via_sdk_rule: exists-and-executable, else PATH);
         # pass the raw override through when that fails so the SDK fails loud (spawn error) rather
-        # than silently falling back to the bundled binary.
+        # than silently falling back to the pinned runtime.
         if self._copilot_bin is None:
             return None
         resolved = _resolve_via_sdk_rule(self._copilot_bin) or self._copilot_bin
         return RuntimeConnection.for_stdio(path=resolved)
-
-    def _resolve_copilot_bin(self) -> str | None:
-        # Predict the SDK's resolution so doctor can't report OK while the run would fail. The SDK's
-        # ORDER is: aeview override (our connection.path) → COPILOT_CLI_PATH env → bundled binary;
-        # it then resolves whichever wins with `os.path.exists(p) or shutil.which(p)` at spawn (so a
-        # bare command on PATH works), and FAILS if neither hits. We mirror that per-candidate rule
-        # via `_resolve_via_sdk_rule`. There is no `which("copilot")` fallback for an unconfigured
-        # bare binary, so an empty (no override / no env / no bundle) case stays unresolved → fail.
-        if self._copilot_bin:
-            return _resolve_via_sdk_rule(self._copilot_bin)
-        env_path = os.environ.get("COPILOT_CLI_PATH")
-        if env_path:
-            return _resolve_via_sdk_rule(env_path)
-        try:
-            from copilot.client import _get_bundled_cli_path
-
-            bundled = _get_bundled_cli_path()
-        except Exception:  # noqa: BLE001 - bundle missing/renamed → unresolved (doctor fails)
-            return None
-        return _resolve_via_sdk_rule(bundled) if bundled else None
-
-    def _resolve_effort(self, thinking: str | None) -> ReasoningEffort | None:
-        # thinking maps to copilot's reasoning effort; "default"/None leaves it unset. Validate
-        # against the SDK's level set so the accepted values track the SDK.
-        if not thinking or thinking == "default":
-            return None
-        if thinking not in _EFFORT_LEVELS:
-            raise AdapterError(
-                f"copilot thinking '{thinking}' invalid; use one of {sorted(_EFFORT_LEVELS)}"
-            )
-        return cast(ReasoningEffort, thinking)
 
 
 class _UsageCollector:
@@ -338,7 +331,7 @@ class _UsageCollector:
 
 
 def _deny_by_default_permission(
-    request: PermissionRequest, _invocation: dict[str, str]
+    request: PermissionRequest, _invocation: PermissionInvocation
 ) -> PermissionRequestResult:
     # Read-anywhere / write-nowhere, deny-by-default: approve ONLY file reads (any path — fencing is
     # deferred to the operator/MDM, per the project's read-scope decision); deny every other kind
