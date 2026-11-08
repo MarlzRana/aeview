@@ -881,6 +881,21 @@ async def test_unparseable_sdk_notification_goes_to_log_not_stderr(copilot_sdk, 
     assert "destroy" in errors[0]["exception"]
 
 
+async def test_message_only_loop_error_is_logged(copilot_sdk, tmp_path):
+    def _notify() -> None:
+        asyncio.get_running_loop().call_exception_handler({"message": "sdk hiccup"})
+
+    copilot_sdk.set_teardown_notification(_notify)
+    log = tmp_path / "review.log"
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, log)
+    logged = [json.loads(ln)["event"] for ln in log.read_text().splitlines()]
+    assert {
+        "type": "aeview.sdk_callback_error",
+        "message": "sdk hiccup",
+        "exception": None,
+    } in logged
+
+
 async def test_writes_error_log_on_failure(copilot_sdk, tmp_path):
     copilot_sdk.queue_turn(None, exc=RuntimeError("boom"))
     log = tmp_path / "review.log"
