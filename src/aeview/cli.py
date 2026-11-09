@@ -413,7 +413,16 @@ def _finish_pr_post(
         pr.review_attempted = True
         store.write_manifest(manifest)
         try:
-            posted = post_review(pr.target, report, store.run_id, diff, pr.head_sha, cwd)
+            posted = post_review(
+                pr.target,
+                report,
+                store.run_id,
+                diff,
+                pr.head_sha,
+                cwd,
+                roster=manifest.roster,
+                reviews={r.id: r for r in store.read_reviews()},
+            )
         except GitHubError as exc:
             typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
             if not isinstance(exc, AmbiguousPostError):

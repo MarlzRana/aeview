@@ -629,3 +629,58 @@ async def test_progress_records_first_edit_failure(tmp_path, monkeypatch):
     progress.record(_review(_ROSTER[0], "running"))
     await progress.drain()
     assert progress.error == "gh: boom (HTTP 500)"
+
+
+# --- reviewers table in the final review -------------------------------------------------
+
+
+def test_review_summary_shows_the_reviewers_table_with_final_statuses():
+    # The review replaces the progress comment, so it carries the same roster table — with final
+    # statuses: a review still `running` at post time was cut off, not in flight.
+    reviews = {
+        _ROSTER[0].id: _review(_ROSTER[0], "done"),
+        _ROSTER[1].id: _review(_ROSTER[1], "failed"),
+    }
+    built = build_review(
+        _report([_finding(line=2)], failed=1), "run1", _DIFF, "sha", roster=_ROSTER, reviews=reviews
+    )
+    body = _payload(built)["body"]
+    assert "#### Reviewers" in body
+    assert "| Reviewer | Harness | Model | Status |" in body
+    assert "| a | claude-code | opus | ✅ done · 0 findings |" in body
+    assert "| b | codex | gpt (high) | ❌ failed |" in body
+    assert body.index("#### Reviewers") < body.index("<!-- aeview:review")
+
+
+def test_review_summary_marks_a_still_running_review_interrupted():
+    reviews = {_ROSTER[0].id: _review(_ROSTER[0], "running")}
+    body = _payload(
+        build_review(_report([]), "run1", _DIFF, "sha", roster=_ROSTER, reviews=reviews)
+    )["body"]
+    assert "| a | claude-code | opus | ⚠️ interrupted |" in body
+    assert "| b | codex | gpt (high) | ⏸️ pending |" in body  # never started
+
+
+def test_review_summary_without_a_roster_has_no_table():
+    assert "#### Reviewers" not in _payload(build_review(_report([]), "run1", _DIFF, "sha"))["body"]
+
+
+def test_fallback_comment_also_shows_the_reviewers_table(tmp_path, stub_gh, monkeypatch):
+    monkeypatch.setenv("AEVIEW_GH_API_FAIL", "reviews")  # the reviews POST 422s
+    cap = tmp_path / "comment.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE_COMMENT", str(cap))
+    reviews = {e.id: _review(e, "done") for e in _ROSTER}
+    target = PrTarget(number=7, url="https://github.com/o/r/pull/7")
+    post_review(
+        target,
+        _report([_finding(line=2)]),
+        "run1",
+        _DIFF,
+        "sha9",
+        tmp_path,
+        roster=_ROSTER,
+        reviews=reviews,
+    )
+    body = json.loads(cap.read_text())["body"]
+    assert "could not attach inline comments" in body
+    assert "| b | codex | gpt (high) | ✅ done · 0 findings |" in body

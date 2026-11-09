@@ -604,6 +604,10 @@ def test_post_comments_posts_review_to_pr(
     assert posted["commit_id"] == "deadbeefcafe"  # the stub PR head sha, anchoring the review
     assert "comments" not in posted  # the unanchored finding is summarised, not inline
     assert "<!-- aeview:review run=" in posted["body"]
+    # The reviewers table from the progress comment carries over with the final status.
+    assert "#### Reviewers" in posted["body"]
+    assert "| default | claude-code |" in posted["body"]
+    assert "✅ done · 1 finding |" in posted["body"]
 
 
 def test_post_comments_skips_post_when_no_reviews_contributed(
@@ -809,9 +813,9 @@ def test_post_comments_posts_while_the_run_still_reads_live(
     seen: list[str] = []
     real_post = cli.post_review
 
-    def spy(target, report, run_id, *rest):
+    def spy(target, report, run_id, *rest, **kwargs):
         seen.append(RunStore(run_id).read_manifest().overall)
-        return real_post(target, report, run_id, *rest)
+        return real_post(target, report, run_id, *rest, **kwargs)
 
     monkeypatch.setattr(cli, "post_review", spy)
     monkeypatch.chdir(git_repo)
@@ -895,11 +899,11 @@ def test_definite_post_failure_lets_resume_retry(
     reject = [True]
     overall_at_post: list[str] = []
 
-    def post(target, report, run_id, *rest):
+    def post(target, report, run_id, *rest, **kwargs):
         if reject[0]:
             raise GitHubError("HTTP 422 and the fallback comment also failed")
         overall_at_post.append(RunStore(run_id).read_manifest().overall)
-        return real_post(target, report, run_id, *rest)
+        return real_post(target, report, run_id, *rest, **kwargs)
 
     monkeypatch.setattr(cli, "post_review", post)
     monkeypatch.chdir(git_repo)

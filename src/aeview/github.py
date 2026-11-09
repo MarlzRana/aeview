@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -289,10 +289,17 @@ def _finding_md(f: MergedFinding, run_id: str, *, show_location: bool) -> str:
 
 
 def _review_body(
-    report: Report, run_id: str, listed: list[MergedFinding], *, note: str | None = None
+    report: Report,
+    run_id: str,
+    listed: list[MergedFinding],
+    roster: Sequence[RosterEntry],
+    reviews: Mapping[str, ReviewResult] | None,
+    *,
+    note: str | None = None,
 ) -> str:
     """The review's top-level summary. `listed` findings are rendered in full here — the unanchored
-    ones for a normal review, or every finding on the fallback path (where `note` explains why)."""
+    ones for a normal review, or every finding on the fallback path (where `note` explains why).
+    The roster table mirrors the progress comment this review replaces, with final statuses."""
     label = report_verdict_label(report)
     parts = [
         f"{_SUMMARY_BADGE} — **{label}**",
@@ -301,6 +308,8 @@ def _review_body(
     cov = report.coverage
     if cov.failed:
         parts.append(f"Coverage: {cov.contributed} review(s) contributed, {cov.failed} failed.")
+    if roster:
+        parts.append("#### Reviewers\n\n" + _roster_table(roster, reviews or {}, live=False))
     if note:
         parts.append(note)
     if listed:
@@ -310,7 +319,15 @@ def _review_body(
     return "\n\n".join(parts)
 
 
-def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -> BuiltReview:
+def build_review(
+    report: Report,
+    run_id: str,
+    diff: str,
+    head_sha: str | None,
+    *,
+    roster: Sequence[RosterEntry] = (),
+    reviews: Mapping[str, ReviewResult] | None = None,
+) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped).
 
@@ -348,7 +365,7 @@ def build_review(report: Report, run_id: str, diff: str, head_sha: str | None) -
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
-        "body": _review_body(report, run_id, unanchored, note=note),
+        "body": _review_body(report, run_id, unanchored, roster, reviews, note=note),
     }
     # Same `is None` test as the anchoring branch above, so the two decisions can't drift: a known
     # head means we both anchored inline and pin commit_id; None means neither.
@@ -392,12 +409,20 @@ def _html_url(stdout: str, fallback: str) -> str:
 
 
 def post_review(
-    target: PrTarget, report: Report, run_id: str, diff: str, head_sha: str | None, cwd: Path
+    target: PrTarget,
+    report: Report,
+    run_id: str,
+    diff: str,
+    head_sha: str | None,
+    cwd: Path,
+    *,
+    roster: Sequence[RosterEntry] = (),
+    reviews: Mapping[str, ReviewResult] | None = None,
 ) -> PostResult:
     """Post the merged report as one PR review. `head_sha` is the commit the reviewed diff was taken
     against — comments anchor to it. On API rejection, fall back to a single top-level comment with
     every finding so nothing is lost. Raises GitHubError only if both posts fail."""
-    built = build_review(report, run_id, diff, head_sha)
+    built = build_review(report, run_id, diff, head_sha, roster=roster, reviews=reviews)
     res = _gh_api(
         "POST",
         f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
@@ -426,7 +451,7 @@ def post_review(
         "_aeview could not attach inline comments to the diff "
         f"({reason}); all findings are listed below._"
     )
-    body = _review_body(report, run_id, report.findings, note=note)
+    body = _review_body(report, run_id, report.findings, roster, reviews, note=note)
     cres = _gh_api(
         "POST",
         f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
@@ -481,16 +506,29 @@ def _cell(text: str) -> str:
     return _sanitize(text).replace("|", "\\|").replace("\n", " ")
 
 
-def _status_cell(r: ReviewResult | None, phase: ProgressPhase) -> str:
+def _status_cell(r: ReviewResult | None, *, live: bool) -> str:
     if r is None or r.status == "pending":
         return "⏸️ pending"
     if r.status == "running":
         # Once the run is over, nothing is still running — it was cut off mid-review.
-        return "🔄 running" if phase in ("reviewing", "merging") else "⚠️ interrupted"
+        return "🔄 running" if live else "⚠️ interrupted"
     if r.status == "failed":
         return "❌ failed"
     n = len(r.findings)
     return f"✅ done · {n} finding{'' if n == 1 else 's'}"
+
+
+def _roster_table(
+    roster: Sequence[RosterEntry], reviews: Mapping[str, ReviewResult], *, live: bool
+) -> str:
+    rows = ["| Reviewer | Harness | Model | Status |", "|---|---|---|---|"]
+    for e in roster:
+        model = f"{e.model} ({e.thinking})" if e.thinking else e.model
+        rows.append(
+            f"| {_cell(e.reviewer)} | {_cell(e.harness)} | {_cell(model)} "
+            f"| {_status_cell(reviews.get(e.id), live=live)} |"
+        )
+    return "\n".join(rows)
 
 
 def render_progress(
@@ -507,13 +545,7 @@ def render_progress(
     )
     filled = round(_BAR_WIDTH * finished / total) if total else _BAR_WIDTH
     bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
-    rows = ["| Reviewer | Harness | Model | Status |", "|---|---|---|---|"]
-    for e in roster:
-        model = f"{e.model} ({e.thinking})" if e.thinking else e.model
-        rows.append(
-            f"| {_cell(e.reviewer)} | {_cell(e.harness)} | {_cell(model)} "
-            f"| {_status_cell(reviews.get(e.id), phase)} |"
-        )
+    table = _roster_table(roster, reviews, live=phase in ("reviewing", "merging"))
     if phase == "interrupted" and note is None:
         note = f"Resume with `aeview resume {run_id}`."
     meta = [f"run `{run_id}`"]
@@ -524,7 +556,7 @@ def render_progress(
     parts = [
         f"{_SUMMARY_BADGE} — {_PHASE_HEADLINE[phase]}",
         f"`{bar}` {finished}/{total} reviews finished",
-        "\n".join(rows),
+        table,
         note,
         "<sub>" + " · ".join(meta) + "</sub>",
         _PROGRESS_MARKER.format(run_id=run_id),
