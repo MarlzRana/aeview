@@ -527,7 +527,8 @@ async def test_thread_start_failure_is_transient_adapter_error(copilot_sdk, tmp_
             raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(copilot.threading, "Thread", _BoomThread)
-    with pytest.raises(AdapterError) as ei:
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")  # skip provisioning: reach _run_isolated
+    with pytest.raises(AdapterError, match="^copilot worker thread failed to start") as ei:
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is True
 
@@ -1252,6 +1253,8 @@ def test_runtime_cache_layout_matches_the_real_sdk():
     assert "_runtime_bundle_is_complete(pair_dir, wrapper_name)" in source
     assert "_should_skip_download()" in source
     assert "wrapper_exists != runtime_exists" in source  # the half-present pair raises
+    # Network-failure classification keys off the SDK's wording for a failed download.
+    assert f'"{copilot._DOWNLOAD_FAILURE_MARKER} from {{url}}' in inspect.getsource(_cli_download)
 
 
 def test_sdk_logger_is_silenced():
@@ -1480,18 +1483,25 @@ async def test_non_download_provisioning_failure_is_not_transient(copilot_sdk, t
     assert ei.value.transient is False
 
 
-async def test_provisioning_wait_is_bounded_without_cancelling_the_download(
-    copilot_sdk, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(copilot, "_PROVISION_TIMEOUT", 0.05)
-    copilot_sdk.set_provision(delay=0.3)
-    with pytest.raises(AdapterError, match="still running") as ei:
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
-    assert ei.value.transient is False  # a retry would only wait out another stall
-    # The shared download kept going; once it lands, a later call reuses it (no second download).
-    monkeypatch.setattr(copilot, "_PROVISION_TIMEOUT", 5.0)
-    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+async def test_cancelled_waiter_does_not_disturb_the_shared_download(copilot_sdk, tmp_path):
+    release = threading.Event()
+    copilot_sdk.set_provision(gate=release)
+    runs = [
+        asyncio.create_task(
+            copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / f"log{i}")
+        )
+        for i in range(2)
+    ]
+    await asyncio.sleep(0.1)  # both parked on the one download
+    runs[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runs[0]
+    release.set()
+    out = await runs[1]
+    assert out.review.verdict == "approve"
     assert copilot_sdk.captured["provisions"] == 1
+    assert copilot._runtime_ready is not None
+    assert copilot._runtime_ready.exception() is None  # the download itself was never cancelled
 
 
 async def test_provisioning_thread_start_failure_is_transient(copilot_sdk, tmp_path, monkeypatch):
@@ -1514,10 +1524,14 @@ async def test_provisioning_thread_start_failure_is_transient(copilot_sdk, tmp_p
     assert copilot_sdk.captured["provisions"] == 1  # the retry provisioned afresh
 
 
-async def test_stalled_download_read_is_a_transient_download_failure(copilot_sdk, tmp_path):
-    # A stalled response.read() escapes the SDK's retry/wrap as a bare TimeoutError; it is a
-    # network failure, not our wait bound.
-    copilot_sdk.set_provision(exc=TimeoutError("The read operation timed out"))
+@pytest.mark.parametrize(
+    "exc",
+    [TimeoutError("The read operation timed out"), ConnectionResetError("reset by peer")],
+    ids=type,
+)
+async def test_unwrapped_network_error_is_a_transient_download_failure(copilot_sdk, tmp_path, exc):
+    # Errors from response.read() can escape the SDK's retry/wrap as a bare OSError.
+    copilot_sdk.set_provision(exc=exc)
     with pytest.raises(AdapterError, match="runtime unavailable") as ei:
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is True

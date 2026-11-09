@@ -65,15 +65,16 @@ _RUNTIME_WRAPPER = "copilot-runtime"
 # govern — in practice reviewTimeoutSeconds is always set, so this only covers the None path.
 _UNBOUNDED_TIMEOUT = 365 * 24 * 60 * 60
 
-# Cap on waiting for the one-time runtime download (~90 MB). Generous, but bounded so a stalled
-# network can't hang the run; the SDK's own urlopen retries could otherwise take ~30 min.
-_PROVISION_TIMEOUT = 600.0
-
 # Process-wide single-flight for the runtime download: every copilot review/dedup waits on the same
 # future. A threading.Lock + concurrent Future (not asyncio primitives) because reviews run on
 # separate event loops; a failed future is replaced on the next call so retries download afresh.
+# Deliberately uncapped: the SDK bounds the download itself (urlopen timeouts × retries), and it
+# only installs the bundle at the very end, so abandoning a slow download would never cache it.
 _runtime_lock = threading.Lock()
 _runtime_ready: concurrent.futures.Future[None] | None = None
+
+# The SDK's wording for a failed (retried) download — pinned against its source in the tests.
+_DOWNLOAD_FAILURE_MARKER = "Failed to download"
 
 # Cap on the client teardown: stop() awaits a destroy RPC (which can hang on a dead connection)
 # before its own bounded terminate→kill, so we bound stop() and fall back to the SDK's force_stop().
@@ -110,13 +111,12 @@ class CopilotAdapter:
         # the first turn with a clear "not supported for model" error. "default" leaves it unset.
         effort = None if thinking in (None, "", "default") else thinking
         base_prompt = embed_schema(prompt, schema)
-        connection = self._build_connection()
-        if connection is None and not os.environ.get("COPILOT_CLI_PATH"):
+        if self._configured_binary() is None:
             # Outside the review timeout: the SDK downloads its runtime with blocking I/O inside
             # CopilotClient(), which asyncio.timeout can't interrupt, and once per caller.
             await _ensure_runtime()
         return await self._run_isolated(
-            connection,
+            self._build_connection(),
             base_prompt,
             schema,
             model,
@@ -288,7 +288,7 @@ class CopilotAdapter:
         # Predict the SDK's resolution ORDER: aeview override (our connection.path) →
         # COPILOT_CLI_PATH → its pinned downloaded runtime. Copilot has no no-cost auth probe, so
         # the best outcome is warn. Doctor never triggers the (large) runtime download itself.
-        configured = self._copilot_bin or os.environ.get("COPILOT_CLI_PATH")
+        configured = self._configured_binary()
         if configured:
             binary = _resolve_via_sdk_rule(configured)
             if binary is None:
@@ -298,6 +298,11 @@ class CopilotAdapter:
             return _runtime_preflight()
         except Exception as exc:  # noqa: BLE001 - SDK drift / unreadable cache: degrade, don't crash
             return Preflight("warn", f"copilot runtime check failed ({exc}); can't verify")
+
+    def _configured_binary(self) -> str | None:
+        # The SDK's resolution order before its own downloaded runtime: our override (passed as
+        # connection.path), then COPILOT_CLI_PATH. None → the SDK uses (may download) its runtime.
+        return self._copilot_bin or os.environ.get("COPILOT_CLI_PATH") or None
 
     def _build_connection(self) -> RuntimeConnection | None:
         # No override → SDK resolves its pinned runtime. With an override, resolve it the
@@ -413,17 +418,18 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
 
 async def _ensure_runtime() -> None:
     download = _runtime_future()
-    try:
-        await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(download)), _PROVISION_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
-        if not download.done():  # our wait bound fired; the shared download is still going
-            msg = f"copilot runtime download still running after {_PROVISION_TIMEOUT:.0f}s"
-            raise AdapterError(msg) from exc
-        # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but a
-        # stalled read escapes as a bare TimeoutError. Anything else (downloads disabled,
-        # incomplete cache, unsupported platform) won't fix itself.
-        transient = "Failed to download" in str(exc) or isinstance(exc, TimeoutError)
-        raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
+    # shield: one waiter being cancelled (Ctrl-C, teardown) must not disturb the siblings' download.
+    # The outcome is read off the future itself below, so the await's own exception is redundant.
+    with contextlib.suppress(Exception):
+        await asyncio.shield(asyncio.wrap_future(download))
+    exc = download.exception()
+    if exc is None:
+        return
+    # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but some
+    # (a stalled read, a connection reset, an SSL error) escape its wrap as a bare OSError. Anything
+    # else (downloads disabled, incomplete cache, unsupported platform) won't fix itself.
+    transient = isinstance(exc, OSError) or _DOWNLOAD_FAILURE_MARKER in str(exc)
+    raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
 
 
 def _runtime_future() -> concurrent.futures.Future[None]:
