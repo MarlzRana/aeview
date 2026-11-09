@@ -174,7 +174,9 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
 def _anchor_span(loc: Location, index: dict[str, list[range]]) -> tuple[int, int] | None:
     """The (first, last) new-file lines an inline comment covers (always RIGHT side): the part of
     the finding's range inside the first hunk it overlaps, or None if it touches no hunk — then it
-    falls to the summary. GitHub rejects a line outside every hunk, and a range whose ends sit in
+    falls to the summary. Deliberately, a range that starts outside the diff still anchors on the
+    part of it a hunk covers (e.g. a whole-function finding on the changed tail of that function).
+    GitHub rejects a line outside every hunk, and a range whose ends sit in
     different hunks 422s the *entire* review batch (dumping every inline comment to the fallback),
     so the span never leaves that one hunk; the full range stays in the comment (`_provenance`)."""
     last = max(loc.line_start, loc.line_end)  # a reversed range degrades to its start line

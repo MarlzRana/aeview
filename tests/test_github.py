@@ -328,6 +328,15 @@ def test_build_review_keeps_spans_sharing_a_start_line_apart():
     assert sorted((c["start_line"], c["line"]) for c in comments) == [(10, 11), (10, 13)]
 
 
+def test_build_review_keeps_equal_spans_in_different_files_apart():
+    findings = [
+        _finding(file="pr_file.py", line=1, fid="f1"),
+        _finding(file="old.py", line=1, fid="f2"),
+    ]
+    comments = _payload(build_review(_report(findings), "run1", _DIFF, "sha"))["comments"]
+    assert sorted((c["path"], c["line"]) for c in comments) == [("old.py", 1), ("pr_file.py", 1)]
+
+
 def test_build_review_keeps_spans_sharing_an_end_line_apart():
     # GitHub keys a comment on `line` (the last line); a group key dropping `first` would merge.
     findings = [
