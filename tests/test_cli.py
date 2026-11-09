@@ -604,6 +604,10 @@ def test_post_comments_posts_review_to_pr(
     assert posted["commit_id"] == "deadbeefcafe"  # the stub PR head sha, anchoring the review
     assert "comments" not in posted  # the unanchored finding is summarised, not inline
     assert "<!-- aeview:review run=" in posted["body"]
+    # The reviewers table from the progress comment carries over with the final status.
+    assert "#### Reviewers" in posted["body"]
+    assert "| default | claude-code |" in posted["body"]
+    assert "✅ done · 1 finding |" in posted["body"]
 
 
 def test_post_comments_skips_post_when_no_reviews_contributed(
@@ -621,6 +625,38 @@ def test_post_comments_skips_post_when_no_reviews_contributed(
     assert result.exit_code == 2  # error verdict (no reviews contributed)
     assert "not posting to the PR" in result.stderr
     assert not cap.exists()  # nothing was posted to GitHub
+
+
+def test_posted_review_table_shows_each_reviews_final_status(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # A mixed run: one instance contributes, the other fails — the posted table says which.
+    from aeview.harness import claude_code
+
+    real_query = claude_code.query
+
+    async def query(*, prompt, options, transport=None):
+        if options.model == "broken":
+            raise RuntimeError("model unavailable")
+        async for message in real_query(prompt=prompt, options=options, transport=transport):
+            yield message
+
+    monkeypatch.setattr(claude_code, "query", query)
+    make_reviewer(
+        git_repo,
+        "mix",
+        harnesses=[
+            {"harness": "claude-code", "model": "opus"},
+            {"harness": "claude-code", "model": "broken"},
+        ],
+    )
+    cap = tmp_path / "review.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "mix", "--post-comments"])
+    body = json.loads(cap.read_text())["body"]
+    assert "| mix | claude-code | opus | ✅ done · 1 finding |" in body
+    assert "| mix | claude-code | broken | ❌ failed |" in body
 
 
 def _gh_calls(log: Path) -> list[tuple[str, str]]:
@@ -809,9 +845,9 @@ def test_post_comments_posts_while_the_run_still_reads_live(
     seen: list[str] = []
     real_post = cli.post_review
 
-    def spy(target, report, run_id, *rest):
+    def spy(target, report, run_id, *rest, **kwargs):
         seen.append(RunStore(run_id).read_manifest().overall)
-        return real_post(target, report, run_id, *rest)
+        return real_post(target, report, run_id, *rest, **kwargs)
 
     monkeypatch.setattr(cli, "post_review", spy)
     monkeypatch.chdir(git_repo)
@@ -895,11 +931,11 @@ def test_definite_post_failure_lets_resume_retry(
     reject = [True]
     overall_at_post: list[str] = []
 
-    def post(target, report, run_id, *rest):
+    def post(target, report, run_id, *rest, **kwargs):
         if reject[0]:
             raise GitHubError("HTTP 422 and the fallback comment also failed")
         overall_at_post.append(RunStore(run_id).read_manifest().overall)
-        return real_post(target, report, run_id, *rest)
+        return real_post(target, report, run_id, *rest, **kwargs)
 
     monkeypatch.setattr(cli, "post_review", post)
     monkeypatch.chdir(git_repo)
