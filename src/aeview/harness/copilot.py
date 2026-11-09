@@ -418,18 +418,16 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
 
 async def _ensure_runtime() -> None:
     download = _runtime_future()
-    # shield: one waiter being cancelled (Ctrl-C, teardown) must not disturb the siblings' download.
-    # The outcome is read off the future itself below, so the await's own exception is redundant.
-    with contextlib.suppress(Exception):
+    try:
+        # shield: one waiter being cancelled (Ctrl-C, teardown) must not disturb the siblings'
+        # download (CancelledError is a BaseException, so it propagates past the handler below).
         await asyncio.shield(asyncio.wrap_future(download))
-    exc = download.exception()
-    if exc is None:
-        return
-    # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but some
-    # (a stalled read, a connection reset, an SSL error) escape its wrap as a bare OSError. Anything
-    # else (downloads disabled, incomplete cache, unsupported platform) won't fix itself.
-    transient = isinstance(exc, OSError) or _DOWNLOAD_FAILURE_MARKER in str(exc)
-    raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
+    except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
+        # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but
+        # some (a stalled read, a connection reset, an SSL error) escape its wrap as a bare OSError.
+        # Anything else (downloads disabled, incomplete cache, unsupported platform) is permanent.
+        transient = isinstance(exc, OSError) or _DOWNLOAD_FAILURE_MARKER in str(exc)
+        raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
 
 
 def _runtime_future() -> concurrent.futures.Future[None]:

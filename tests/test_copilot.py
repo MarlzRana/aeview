@@ -1461,6 +1461,14 @@ async def test_provisioning_does_not_count_against_the_review_timeout(copilot_sd
     copilot_sdk.set_provision(delay=0.3)
     out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log", None, 0.1)
     assert out.review.verdict == "approve"
+    assert copilot_sdk.captured["provisions"] == 1  # a timed review still provisions first
+
+
+async def test_empty_copilot_cli_path_still_provisions(copilot_sdk, tmp_path, monkeypatch):
+    # An exported-but-empty COPILOT_CLI_PATH is unset to the SDK, which then downloads its runtime.
+    monkeypatch.setenv("COPILOT_CLI_PATH", "")
+    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert copilot_sdk.captured["provisions"] == 1
 
 
 async def test_download_failure_is_transient_and_retried_afresh(copilot_sdk, tmp_path):
@@ -1514,7 +1522,7 @@ async def test_provisioning_thread_start_failure_is_transient(copilot_sdk, tmp_p
 
     real_thread = threading.Thread
     monkeypatch.setattr(copilot.threading, "Thread", _NoThread)
-    with pytest.raises(AdapterError, match="worker thread failed to start") as ei:
+    with pytest.raises(AdapterError, match="^copilot runtime worker thread failed to start") as ei:
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is True
 
