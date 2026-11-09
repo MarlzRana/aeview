@@ -230,6 +230,8 @@ def run(
         typer.echo(_render_dry_run(plan, pr_target))
         raise typer.Exit(EXIT_APPROVE)
 
+    if plan.notice:
+        typer.echo(f"aeview: {plan.notice}", err=True)
     if plan.ignored:  # surface what .aeviewignore dropped — never silently
         typer.echo(f"aeview: excluded {len(plan.ignored)} file(s) via .aeviewignore", err=True)
     if plan.auto_activated:  # surface which reviewers the changed paths pulled in — never silently
@@ -486,6 +488,7 @@ class _Plan:
     # read error surfaces as a clean ResolveError (caught by `run`), and so `--dry-run` previews the
     # same file a real run freezes.
     dedup: _PlannedDedup | None
+    notice: str | None = None  # the scope's heads-up about what was (not) reviewed
 
 
 def _plan_run(
@@ -542,6 +545,7 @@ def _plan_run(
         ignored=ignored,
         auto_activated=auto_activated,
         dedup=dedup,
+        notice=resolved.notice,
     )
 
 

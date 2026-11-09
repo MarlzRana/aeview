@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from aeview.bundle import INLINE_MAX_BYTES, build_bundle
@@ -421,3 +423,89 @@ def test_patch_is_always_inline_even_if_large(git_repo):
     big_patch = "+x\n" * 200000  # > 256 KB
     resolved = resolve_scope("patch", "-", git_repo, patch_text=big_patch)
     assert build_bundle(resolved).mode == "inline"
+
+
+# --- pr: waiting for GitHub to catch up with a just-pushed head -------------------------
+
+
+@pytest.fixture
+def pushed_pr(git_repo, tmp_path, monkeypatch):
+    """`feature` checked out, tracking a bare remote it was pushed to, with GitHub faked: the PR's
+    headRefOid starts at `old` and becomes the pushed HEAD after `lag` more reads."""
+    from aeview import scope
+
+    remote = tmp_path / "remote.git"
+    git(git_repo, "init", "-q", "--bare", str(remote))
+    git(git_repo, "remote", "add", "origin", str(remote))
+    git(git_repo, "checkout", "-q", "-b", "feature")
+    old = commit(git_repo, "f.py", "v = 1\n", "first")
+    local = commit(git_repo, "f.py", "v = 2\n", "second")
+    git(git_repo, "push", "-q", "-u", "origin", "feature")
+
+    state = {"lag": 0, "reads": 0, "pr": {"headRefName": "feature", "isCrossRepository": False}}
+
+    def head(cwd, value):
+        state["reads"] += 1
+        return old if state["reads"] <= state["lag"] else local
+
+    def fields(cwd, value, names):
+        data = {**state["pr"], "baseRefName": "main"}
+        if "headRefOid" in names:
+            data["headRefOid"] = head(cwd, value)
+        return data
+
+    monkeypatch.setattr(scope, "_pr_head", head)
+    monkeypatch.setattr(scope, "_pr_view_fields", fields)
+    monkeypatch.setattr(scope, "_PUSH_SETTLE_INTERVAL", 0.01)
+    monkeypatch.setattr(scope, "_PUSH_SETTLE_TIMEOUT", 0.3)
+    return SimpleNamespace(repo=git_repo, old=old, local=local, state=state)
+
+
+def test_pr_scope_waits_for_github_to_catch_up_with_the_push(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 3  # GitHub still reports the previous head for a few reads
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local  # pinned to the pushed commit, not summary-only/stale
+    assert r.notice is None
+
+
+def test_pr_scope_lagging_past_the_wait_says_so(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 10_000  # never catches up within the (shortened) wait
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.old  # consistent with the diff GitHub served
+    assert r.notice is not None
+    assert "hasn't caught up" in r.notice
+
+
+def test_pr_scope_with_unpushed_commits_warns_without_waiting(pushed_pr, stub_gh):
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is not None
+    assert "1 commit(s) not pushed" in r.notice
+    assert pushed_pr.state["reads"] == 3  # settle read + the two bracket reads; no polling
+
+
+@pytest.mark.parametrize(
+    "pr", [{"headRefName": "other"}, {"headRefName": "feature", "isCrossRepository": True}]
+)
+def test_pr_scope_not_on_the_prs_branch_skips_the_wait(pushed_pr, stub_gh, pr):
+    # Another PR (--scope pr:<n> for a branch not checked out), or a fork: no wait, no notice.
+    pushed_pr.state["pr"] = pr
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_without_upstream_skips_the_wait(pushed_pr, stub_gh):
+    git(pushed_pr.repo, "branch", "--unset-upstream")
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_without_capture_never_waits(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 10_000
+    _resolve(pushed_pr.repo, "pr")
+    assert pushed_pr.state["reads"] == 0
