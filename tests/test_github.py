@@ -335,6 +335,7 @@ def test_build_review_range_clipped_to_one_line_has_no_start_line():
     c = _payload(build_review(_report([finding]), "run1", _TWO_HUNKS, "sha"))["comments"][0]
     assert c["line"] == 13
     assert "start_line" not in c  # GitHub rejects start_line == line
+    assert "lines 13–31" in c["body"]  # the full range survives the one-line anchor
 
 
 def test_build_review_groups_by_the_clipped_span_not_the_original_range():
@@ -356,6 +357,21 @@ def test_build_review_keeps_spans_sharing_a_start_line_apart():
     ]
     comments = _payload(build_review(_report(findings), "run1", _TWO_HUNKS, "sha"))["comments"]
     assert sorted((c["start_line"], c["line"]) for c in comments) == [(10, 11), (10, 13)]
+
+
+def test_build_review_keeps_spans_sharing_an_end_line_apart():
+    # GitHub keys a comment on `line` (the last line); a group key dropping `first` would merge.
+    findings = [
+        _finding(file="m.py", line=10, line_end=13, fid="f1"),
+        _finding(file="m.py", line=12, line_end=13, fid="f2"),
+    ]
+    comments = _payload(build_review(_report(findings), "run1", _TWO_HUNKS, "sha"))["comments"]
+    assert sorted((c["start_line"], c["line"]) for c in comments) == [(10, 13), (12, 13)]
+
+
+def test_diff_index_reads_an_omitted_hunk_count_as_one_line():
+    diff = "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -5 +5 @@\n-old\n+new\n"
+    assert _diff_anchorable_lines(diff) == {"s.py": [range(5, 6)]}
 
 
 def test_diff_index_unparseable_hunk_header_ends_the_hunk():

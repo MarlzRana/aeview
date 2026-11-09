@@ -134,59 +134,40 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
 
 # --- diff line index (which lines can carry an inline comment) ------------------------
 
-_HUNK = re.compile(r"^@@ -(?:\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_HUNK = re.compile(r"^@@ -(?:\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
 def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
     """Map each changed file to its hunks, each as the range of new-file line numbers a comment can
-    anchor to (additions + context). Within a hunk those lines are contiguous — deletions have no
-    new-file number and don't advance it — so a range per hunk is exact. Findings cite post-change
-    lines, so anchoring is RIGHT-side only: an old-file line (a deletion) is never anchorable.
+    anchor to (additions + context). The header states that range exactly: `@@ -a,b +c,d @@` covers
+    new lines c..c+d-1 (d defaults to 1; d=0 is a deletion-only hunk with nothing to anchor to).
+    Findings cite post-change lines, so anchoring is RIGHT-side only: a deletion never anchors.
 
     Header lines (`+++ `) and hunk-body content are told apart by hunk state, not prefix alone: an
     added line whose own text starts with `++ ` reads `+++ ...` in the diff — inside a hunk that's
-    content, and treating it as a header would reset the counter and corrupt every later line."""
+    content, and treating it as a file header would misfile every later hunk."""
     index: dict[str, list[range]] = {}
     current: list[range] | None = None
     in_hunk = False
-    hunk_start = new_no = 0
-
-    def close_hunk(dest: list[range] | None, start: int, stop: int) -> None:
-        if dest is not None and stop > start:  # skip deletion-only hunks (no new-file lines)
-            dest.append(range(start, stop))
-
-    # Split on "\n" only, NOT str.splitlines(): the latter also breaks on \v \f \x1c-\x1e
-    # \x85 U+2028 U+2029, so one of those inside a content line would split it in two, adding a
-    # phantom iteration that bumps new_no and mis-anchors every later line in the hunk.
     for line in diff.split("\n"):
-        line = line.rstrip("\r")  # keep CRLF diffs parsing as splitlines() did (drop the diff CR)
-        if not line:
-            continue  # split()'s trailing ""; a real diff line is " " or "+", never empty
+        line = line.rstrip("\r")  # tolerate CRLF diffs
         if line.startswith("diff --git"):
-            close_hunk(current if in_hunk else None, hunk_start, new_no)
-            current, in_hunk = None, False  # next file; its +++ header + counts come before @@
-            continue
-        if line.startswith("@@"):
-            close_hunk(current if in_hunk else None, hunk_start, new_no)
-            # An unparseable header (e.g. a combined diff's `@@@`) ends the hunk rather than
-            # leaving the previous one open to be recorded twice.
+            current, in_hunk = None, False  # next file; its +++ header comes before any @@
+        elif line.startswith("@@"):
+            # An unparseable header (e.g. a combined diff's `@@@`) ends the hunk: nothing in it is
+            # anchorable, and its body must not be read as a file header.
             m = _HUNK.match(line)
             in_hunk = m is not None
-            if m:
-                hunk_start = new_no = int(m.group(1))  # the +new hunk start (RIGHT numbering)
-            continue
-        if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
-            if line.startswith("+++ "):
-                raw = line[4:].split("\t", 1)[0]
-                if raw.startswith('"') and raw.endswith('"'):
-                    raw = raw[1:-1]  # git C-quotes paths with spaces/specials; unwrap the quotes
-                path = raw.removeprefix("b/")
-                current = None if path == "/dev/null" else index.setdefault(path, [])
-            continue
-        if current is None or line.startswith(("-", "\\")):
-            continue  # a deletion (old-file only) or the "\ No newline" marker: no new-file line
-        new_no += 1  # an added or context line: present in the new file
-    close_hunk(current if in_hunk else None, hunk_start, new_no)
+            if m and current is not None:
+                start, count = int(m.group(1)), int(m.group(2) or 1)
+                if count:
+                    current.append(range(start, start + count))
+        elif not in_hunk and line.startswith("+++ "):  # the file header, before its first @@
+            raw = line[4:].split("\t", 1)[0]
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = raw[1:-1]  # git C-quotes paths with spaces/specials; unwrap the quotes
+            path = raw.removeprefix("b/")
+            current = None if path == "/dev/null" else index.setdefault(path, [])
     return index
 
 
@@ -198,7 +179,8 @@ def _anchor_span(loc: Location, index: dict[str, list[range]]) -> tuple[int, int
     so the span never leaves that one hunk; the full range stays in the comment (`_provenance`)."""
     last = max(loc.line_start, loc.line_end)  # a reversed range degrades to its start line
     for hunk in index.get(loc.file, ()):  # hunks are in file order: the first overlap wins
-        first, end = max(loc.line_start, hunk.start), min(last, hunk.stop - 1)
+        first = max(loc.line_start, hunk.start)
+        end = min(last, hunk.stop - 1)
         if first <= end:
             return first, end
     return None
