@@ -25,6 +25,7 @@ import concurrent.futures
 import contextlib
 import logging
 import os
+import ssl
 import threading
 import uuid
 from collections.abc import Callable
@@ -75,6 +76,7 @@ _runtime_ready: concurrent.futures.Future[None] | None = None
 
 # The SDK's wording for a failed (retried) download — pinned against its source in the tests.
 _DOWNLOAD_FAILURE_MARKER = "Failed to download"
+_NETWORK_ERRORS = (TimeoutError, ConnectionError, ssl.SSLError)
 
 # Cap on the client teardown: stop() awaits a destroy RPC (which can hang on a dead connection)
 # before its own bounded terminate→kill, so we bound stop() and fall back to the SDK's force_stop().
@@ -424,9 +426,10 @@ async def _ensure_runtime() -> None:
         await asyncio.shield(asyncio.wrap_future(download))
     except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
         # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but
-        # some (a stalled read, a connection reset, an SSL error) escape its wrap as a bare OSError.
-        # Anything else (downloads disabled, incomplete cache, unsupported platform) is permanent.
-        transient = isinstance(exc, OSError) or _DOWNLOAD_FAILURE_MARKER in str(exc)
+        # a stalled read, connection reset or SSL error can escape its wrap bare. Anything else
+        # (downloads disabled, incomplete cache, a read-only or full disk) won't fix itself, and a
+        # retry would re-download the whole package just to fail the same way.
+        transient = isinstance(exc, _NETWORK_ERRORS) or _DOWNLOAD_FAILURE_MARKER in str(exc)
         raise AdapterError(f"copilot runtime unavailable: {exc!r}", transient=transient) from exc
 
 

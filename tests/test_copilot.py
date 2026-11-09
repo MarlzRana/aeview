@@ -246,6 +246,7 @@ def copilot_sdk(monkeypatch):
 
     def fake_ensure_runtime_wrapper() -> str:
         captured["provisions"] += 1
+        captured["provision_started"].set()
         if state["provision_gate"] is not None:
             state["provision_gate"].wait(5)
         time.sleep(state["provision_delay"])  # blocking, like the SDK's urlopen download
@@ -254,6 +255,7 @@ def copilot_sdk(monkeypatch):
         return "/cache/copilot-runtime"
 
     captured["provisions"] = 0
+    captured["provision_started"] = threading.Event()
     monkeypatch.setattr(copilot, "CopilotClient", FakeClient)
     monkeypatch.setattr(_cli_download, "ensure_runtime_wrapper", fake_ensure_runtime_wrapper)
     monkeypatch.setattr(copilot, "_runtime_ready", None)  # process-wide guard: fresh per test
@@ -1434,7 +1436,8 @@ async def test_concurrent_reviews_share_one_runtime_download(copilot_sdk, tmp_pa
         )
         for i in range(3)
     ]
-    await asyncio.sleep(0.1)
+    assert await asyncio.to_thread(copilot_sdk.captured["provision_started"].wait, 2)
+    await asyncio.sleep(0)  # let the sibling tasks reach the guard too
     assert copilot_sdk.captured["provisions"] == 1
     assert not any(run.done() for run in runs)  # all three parked on the one download
     release.set()
@@ -1500,7 +1503,8 @@ async def test_cancelled_waiter_does_not_disturb_the_shared_download(copilot_sdk
         )
         for i in range(2)
     ]
-    await asyncio.sleep(0.1)  # both parked on the one download
+    assert await asyncio.to_thread(copilot_sdk.captured["provision_started"].wait, 2)
+    await asyncio.sleep(0)  # both parked on the one download
     runs[0].cancel()
     with pytest.raises(asyncio.CancelledError):
         await runs[0]
@@ -1547,5 +1551,16 @@ async def test_unwrapped_network_error_is_a_transient_download_failure(copilot_s
 
 async def test_non_exception_from_the_download_thread_is_normalized(copilot_sdk, tmp_path):
     copilot_sdk.set_provision(exc=SystemExit(3))
-    with pytest.raises(AdapterError, match="worker aborted"):
+    with pytest.raises(AdapterError, match="worker aborted") as ei:
         await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError("read-only cache"), OSError(28, "No space left on device")], ids=str
+)
+async def test_local_disk_error_is_not_transient(copilot_sdk, tmp_path, exc):
+    copilot_sdk.set_provision(exc=exc)
+    with pytest.raises(AdapterError, match="runtime unavailable") as ei:
+        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    assert ei.value.transient is False
