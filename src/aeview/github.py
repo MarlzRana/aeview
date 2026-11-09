@@ -151,9 +151,9 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
     in_hunk = False
     hunk_start = new_no = 0
 
-    def close_hunk() -> None:
-        if current is not None and in_hunk and new_no > hunk_start:  # skip deletion-only hunks
-            current.append(range(hunk_start, new_no))
+    def close_hunk(dest: list[range] | None, start: int, stop: int) -> None:
+        if dest is not None and stop > start:  # skip deletion-only hunks (no new-file lines)
+            dest.append(range(start, stop))
 
     # Split on "\n" only, NOT str.splitlines(): the latter also breaks on \v \f \x1c-\x1e
     # \x85 U+2028 U+2029, so one of those inside a content line would split it in two, adding a
@@ -163,11 +163,11 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
         if not line:
             continue  # split()'s trailing ""; a real diff line is " " or "+", never empty
         if line.startswith("diff --git"):
-            close_hunk()
+            close_hunk(current if in_hunk else None, hunk_start, new_no)
             current, in_hunk = None, False  # next file; its +++ header + counts come before @@
             continue
         if line.startswith("@@"):
-            close_hunk()
+            close_hunk(current if in_hunk else None, hunk_start, new_no)
             if m := _HUNK.match(line):
                 hunk_start = new_no = int(m.group(1))  # the +new hunk start (RIGHT numbering)
                 in_hunk = True
@@ -183,7 +183,7 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
         if current is None or line.startswith(("-", "\\")):
             continue  # a deletion (old-file only) or the "\ No newline" marker: no new-file line
         new_no += 1  # an added or context line: present in the new file
-    close_hunk()
+    close_hunk(current if in_hunk else None, hunk_start, new_no)
     return index
 
 
@@ -243,7 +243,8 @@ def _provenance(f: MergedFinding) -> str:
     reviewers = ", ".join(s.review for s in f.sources) or "—"
     bits = [f"reviewers: {reviewers}", f"confidence {f.confidence:.2f}"]
     loc = f.location
-    if loc.line_end != loc.line_start:  # anchor is single-line; convey the full span here
+    # The anchor may be clipped to one hunk (or absent, in the summary): always show the full span.
+    if loc.line_end != loc.line_start:
         bits.append(f"lines {loc.line_start}–{loc.line_end}")
     if f.agreement > 1:
         bits.append(f"agreement ×{f.agreement}")

@@ -202,9 +202,8 @@ def test_diff_anchorable_lines_counts_blank_context_line():
         " z = 3\n"
     )
     idx = _diff_anchorable_lines(diff)
-    assert _lines(idx) == {
-        "blank.py": {1, 2, 3, 4}
-    }  # the blank context line (2) is counted, not skipped
+    # The blank context line (2) is counted, not skipped.
+    assert _lines(idx) == {"blank.py": {1, 2, 3, 4}}
     # The addition after the blank anchors at 3 and the context after it at 4 — not shifted down.
     assert _anchor_span(Location(file="blank.py", line_start=3, line_end=3), idx) == (3, 3)
     assert _anchor_span(Location(file="blank.py", line_start=4, line_end=4), idx) == (4, 4)
@@ -320,6 +319,22 @@ def test_anchor_span_touching_no_hunk_is_unanchored():
 
 def test_anchor_span_reversed_range_degrades_to_its_start_line():
     assert _span(12, 3) == (12, 12)
+
+
+def test_build_review_posts_the_clipped_span_not_the_findings_range():
+    # The payload must carry the one-hunk span, not the finding's cross-hunk range (which 422s the
+    # whole review); the full range stays in the comment text.
+    finding = _finding(file="m.py", line=12, line_end=31)
+    c = _payload(build_review(_report([finding]), "run1", _TWO_HUNKS, "sha"))["comments"][0]
+    assert (c["start_line"], c["start_side"], c["line"], c["side"]) == (12, "RIGHT", 13, "RIGHT")
+    assert "lines 12–31" in c["body"]
+
+
+def test_build_review_range_clipped_to_one_line_has_no_start_line():
+    finding = _finding(file="m.py", line=13, line_end=31)
+    c = _payload(build_review(_report([finding]), "run1", _TWO_HUNKS, "sha"))["comments"][0]
+    assert c["line"] == 13
+    assert "start_line" not in c  # GitHub rejects start_line == line
 
 
 def test_build_review_findings_with_the_same_span_share_one_comment():
