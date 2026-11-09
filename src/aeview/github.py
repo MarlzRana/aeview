@@ -154,10 +154,10 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
         if line.startswith("diff --git"):
             current, in_hunk = None, False  # next file; its +++ header comes before any @@
         elif line.startswith("@@"):
-            # An unparseable header (e.g. a combined diff's `@@@`) ends the hunk: nothing in it is
-            # anchorable, and its body must not be read as a file header.
+            # Any `@@` line opens a hunk body (so its `+++ `-looking content isn't read as a file
+            # header), but only a parseable header (not e.g. a combined diff's `@@@`) is anchorable.
+            in_hunk = True
             m = _HUNK.match(line)
-            in_hunk = m is not None
             if m and current is not None:
                 start, count = int(m.group(1)), int(m.group(2) or 1)
                 if count:

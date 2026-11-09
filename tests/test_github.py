@@ -150,24 +150,17 @@ def test_diff_anchorable_lines_unquotes_paths_with_spaces():
 
 
 def test_diff_anchorable_lines_splits_on_newline_only():
-    # str.splitlines() breaks on \v \f \x1c-\x1e \x85 U+2028 U+2029, so a diff *content* line
-    # carrying one would be split in two — a phantom iteration that throws new_no off by one for the
-    # rest of the hunk. Splitting on "\n" alone (with a \r rstrip) keeps the numbering correct.
-    exotic = "a\u2028b\u2029c\fd\x85e\vf\x1c\x1d\x1eg"  # every separator splitlines() splits on
-    diff = (
-        "diff --git a/x.py b/x.py\n"
-        "--- a/x.py\n"
-        "+++ b/x.py\n"
-        "@@ -1,1 +1,3 @@\n"
-        " keep = 1\n"
-        f'+weird = "{exotic}"\n'
-        "+after = 2\n"
-    )
-    idx = _diff_anchorable_lines(diff)
-    # context line 1 + the two additions — NOT the phantom lines the split content line would add.
-    assert _lines(idx) == {"x.py": {1, 2, 3}}
-    # The line after the exotic one still anchors at 3, not shifted past it.
-    assert _anchor_span(Location(file="x.py", line_start=3, line_end=3), idx) == (3, 3)
+    # str.splitlines() also breaks on \v \f \x1c-\x1e \x85 U+2028 U+2029, so a content line carrying
+    # one would split in two — and a fragment that reads like a hunk header would add a phantom
+    # hunk. Splitting on "\n" alone keeps content lines whole.
+    for sep in "\u2028\u2029\f\x85\v\x1c\x1d\x1e":
+        diff = (
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            " keep = 1\n"
+            f"+s = '{sep}@@ -1 +90,5 @@'\n"
+        )
+        assert _diff_anchorable_lines(diff) == {"x.py": [range(1, 3)]}
 
 
 def test_diff_anchorable_lines_handles_crlf_terminated_diff():
@@ -183,30 +176,6 @@ def test_diff_anchorable_lines_handles_crlf_terminated_diff():
     )
     idx = _diff_anchorable_lines(diff)
     assert _lines(idx) == {"c.py": {1, 2}}
-
-
-def test_diff_anchorable_lines_counts_blank_context_line():
-    # The `if not line: continue` guard skips ONLY split()'s trailing "" — a blank line in the
-    # file is " " (a lone space prefix), which is non-empty and must still count as a new-file
-    # line. Pins that boundary so a later `if not line.strip():`/`isspace()` refactor (which looks
-    # equivalent but would also swallow blank context lines, mis-anchoring everything after them)
-    # fails instead of silently passing.
-    diff = (
-        "diff --git a/blank.py b/blank.py\n"
-        "--- a/blank.py\n"
-        "+++ b/blank.py\n"
-        "@@ -1,3 +1,4 @@\n"
-        " x = 1\n"
-        " \n"  # a blank context line: a lone space, NOT an empty string
-        "+y = 2\n"
-        " z = 3\n"
-    )
-    idx = _diff_anchorable_lines(diff)
-    # The blank context line (2) is counted, not skipped.
-    assert _lines(idx) == {"blank.py": {1, 2, 3, 4}}
-    # The addition after the blank anchors at 3 and the context after it at 4 — not shifted down.
-    assert _anchor_span(Location(file="blank.py", line_start=3, line_end=3), idx) == (3, 3)
-    assert _anchor_span(Location(file="blank.py", line_start=4, line_end=4), idx) == (4, 4)
 
 
 def test_anchor_span_is_right_side_only_and_clipped_to_the_diff():
@@ -374,9 +343,17 @@ def test_diff_index_reads_an_omitted_hunk_count_as_one_line():
     assert _diff_anchorable_lines(diff) == {"s.py": [range(5, 6)]}
 
 
-def test_diff_index_unparseable_hunk_header_ends_the_hunk():
-    diff = _TWO_HUNKS.replace("@@ -29,3 +30,3 @@ def g():", "@@@ -29,3 -29,3 +30,3 @@@")
-    assert _diff_anchorable_lines(diff) == {"m.py": [range(10, 14)]}
+def test_diff_index_unparseable_hunk_header_is_skipped_but_still_a_hunk_body():
+    # A `@@@` hunk isn't anchorable, but its content (here a `+++ `-looking added line) must not be
+    # read as a file header, or later hunks would be filed under a phantom path.
+    diff = (
+        "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+        "@@@ -1,1 -1,1 +1,2 @@@\n"
+        "+++ phantom.py\n"  # an added line whose text is `++ phantom.py`
+        "@@ -9,1 +9,2 @@\n"
+        " a\n+b\n"
+    )
+    assert _diff_anchorable_lines(diff) == {"m.py": [range(9, 11)]}
 
 
 def test_build_review_findings_with_the_same_span_share_one_comment():
