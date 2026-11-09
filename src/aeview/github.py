@@ -137,18 +137,24 @@ def resolve_pr_target(cwd: Path, value: str | None) -> PrTarget:
 _HUNK = re.compile(r"^@@ -(?:\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
-    """Map each changed file to the new-file line numbers a comment can anchor to (additions +
-    context). Findings cite post-change lines, so anchoring is RIGHT-side only — an old-file line
-    (a deletion) has no new-file number and can't be anchored, so it isn't tracked.
+def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
+    """Map each changed file to its hunks, each as the range of new-file line numbers a comment can
+    anchor to (additions + context). Within a hunk those lines are contiguous — deletions have no
+    new-file number and don't advance it — so a range per hunk is exact. Findings cite post-change
+    lines, so anchoring is RIGHT-side only: an old-file line (a deletion) is never anchorable.
 
     Header lines (`+++ `) and hunk-body content are told apart by hunk state, not prefix alone: an
     added line whose own text starts with `++ ` reads `+++ ...` in the diff — inside a hunk that's
     content, and treating it as a header would reset the counter and corrupt every later line."""
-    index: dict[str, set[int]] = {}
-    current: set[int] | None = None
+    index: dict[str, list[range]] = {}
+    current: list[range] | None = None
     in_hunk = False
-    new_no = 0
+    hunk_start = new_no = 0
+
+    def close_hunk() -> None:
+        if current is not None and in_hunk and new_no > hunk_start:  # skip deletion-only hunks
+            current.append(range(hunk_start, new_no))
+
     # Split on "\n" only, NOT str.splitlines(): the latter also breaks on \v \f \x1c-\x1e
     # \x85 U+2028 U+2029, so one of those inside a content line would split it in two, adding a
     # phantom iteration that bumps new_no and mis-anchors every later line in the hunk.
@@ -157,11 +163,13 @@ def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
         if not line:
             continue  # split()'s trailing ""; a real diff line is " " or "+", never empty
         if line.startswith("diff --git"):
+            close_hunk()
             current, in_hunk = None, False  # next file; its +++ header + counts come before @@
             continue
         if line.startswith("@@"):
+            close_hunk()
             if m := _HUNK.match(line):
-                new_no = int(m.group(1))  # the +new hunk start (RIGHT/new-file numbering)
+                hunk_start = new_no = int(m.group(1))  # the +new hunk start (RIGHT numbering)
                 in_hunk = True
             continue
         if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
@@ -170,34 +178,27 @@ def _diff_anchorable_lines(diff: str) -> dict[str, set[int]]:
                 if raw.startswith('"') and raw.endswith('"'):
                     raw = raw[1:-1]  # git C-quotes paths with spaces/specials; unwrap the quotes
                 path = raw.removeprefix("b/")
-                current = None if path == "/dev/null" else index.setdefault(path, set())
+                current = None if path == "/dev/null" else index.setdefault(path, [])
             continue
-        if current is None:
-            continue
-        if line.startswith("+"):  # an added line: a new-file line a comment can anchor to
-            current.add(new_no)
-            new_no += 1
-        elif line.startswith(("-", "\\")):
+        if current is None or line.startswith(("-", "\\")):
             continue  # a deletion (old-file only) or the "\ No newline" marker: no new-file line
-        else:  # context line: present in the new file too
-            current.add(new_no)
-            new_no += 1
+        new_no += 1  # an added or context line: present in the new file
+    close_hunk()
     return index
 
 
-def _anchor_line(loc: Location, index: dict[str, set[int]]) -> int | None:
-    """The new-file line an inline comment anchors to (always RIGHT side), or None if the finding's
-    start line isn't in the diff — then it falls to the summary. RIGHT-side only: findings cite
-    post-change lines, so a coincidental match against an old-file line would mis-place the comment.
-
-    Single-line by design: GitHub requires a multi-line range's two ends to sit in the *same* hunk,
-    and a cross-hunk range 422s the *entire* review batch (dumping every inline comment to the
-    fallback). Not worth that fragility — we anchor the start line and put the full range in the
-    comment body instead (see `_provenance`)."""
-    lines = index.get(loc.file)
-    if lines is None or loc.line_start not in lines:
-        return None
-    return loc.line_start
+def _anchor_span(loc: Location, index: dict[str, list[range]]) -> tuple[int, int] | None:
+    """The (first, last) new-file lines an inline comment covers (always RIGHT side): the part of
+    the finding's range inside the first hunk it overlaps, or None if it touches no hunk — then it
+    falls to the summary. GitHub rejects a line outside every hunk, and a range whose ends sit in
+    different hunks 422s the *entire* review batch (dumping every inline comment to the fallback),
+    so the span never leaves that one hunk; the full range stays in the comment (`_provenance`)."""
+    last = max(loc.line_start, loc.line_end)  # a reversed range degrades to its start line
+    for hunk in index.get(loc.file, ()):  # hunks are in file order: the first overlap wins
+        first, end = max(loc.line_start, hunk.start), min(last, hunk.stop - 1)
+        if first <= end:
+            return first, end
+    return None
 
 
 # --- review payload -------------------------------------------------------------------
@@ -321,6 +322,19 @@ def _review_body(
     return "\n\n".join(parts)
 
 
+def _inline_comment(
+    path: str, first: int, last: int, findings: list[MergedFinding], run_id: str
+) -> dict[str, object]:
+    # Findings cite post-change lines, so both ends anchor on the new file (RIGHT side).
+    comment: dict[str, object] = {"path": path, "line": last, "side": "RIGHT"}
+    if first < last:
+        comment |= {"start_line": first, "start_side": "RIGHT"}
+    comment["body"] = "\n\n---\n\n".join(
+        _finding_md(f, run_id, show_location=False) for f in findings
+    )
+    return comment
+
+
 def build_review(
     report: Report,
     run_id: str,
@@ -337,7 +351,7 @@ def build_review(
     captured or moved mid-fetch — we can't anchor safely: inline comments would bind to GitHub's
     *latest* commit, whose diff may differ. So we then post NO inline comments and route every
     finding into the summary body instead."""
-    groups: dict[tuple[str, int], list[MergedFinding]] = {}
+    groups: dict[tuple[str, int, int], list[MergedFinding]] = {}
     unanchored: list[MergedFinding] = []
     note: str | None = None
     if head_sha is None:
@@ -349,20 +363,14 @@ def build_review(
     else:
         index = _diff_anchorable_lines(diff)
         for f in report.findings:
-            line = _anchor_line(f.location, index)
-            if line is None:
+            span = _anchor_span(f.location, index)
+            if span is None:
                 unanchored.append(f)
             else:
-                # Same-line findings share one comment/thread (the API can't thread siblings).
-                groups.setdefault((f.location.file, line), []).append(f)
+                # Same-span findings share one comment/thread (the API can't thread siblings).
+                groups.setdefault((f.location.file, *span), []).append(f)
     comments = [
-        {
-            "path": path,
-            "line": line,
-            "side": "RIGHT",  # findings cite post-change lines; we only anchor on the new file
-            "body": "\n\n---\n\n".join(_finding_md(f, run_id, show_location=False) for f in fs),
-        }
-        for (path, line), fs in groups.items()
+        _inline_comment(path, first, last, fs, run_id) for (path, first, last), fs in groups.items()
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",

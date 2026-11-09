@@ -11,7 +11,7 @@ from aeview.github import (
     BuiltReview,
     GitHubError,
     PrTarget,
-    _anchor_line,
+    _anchor_span,
     _diff_anchorable_lines,
     _finding_md,
     build_review,
@@ -105,12 +105,16 @@ def _payload(built: BuiltReview) -> Any:
 # --- diff line index ------------------------------------------------------------------
 
 
+def _lines(idx: dict[str, list[range]]) -> dict[str, set[int]]:
+    return {path: {n for hunk in hunks for n in hunk} for path, hunks in idx.items()}
+
+
 def test_diff_anchorable_lines_tracks_new_file_lines_only():
     idx = _diff_anchorable_lines(_DIFF)
-    assert idx["pr_file.py"] == {1, 2, 3}  # context line 1 + the two additions
+    assert _lines(idx)["pr_file.py"] == {1, 2, 3}  # context line 1 + the two additions
     # old.py's only change is a deletion (old-file side); the surviving context line is its sole
     # new-file line — deletions have no new-file number, so they aren't anchorable.
-    assert idx["old.py"] == {1}
+    assert _lines(idx)["old.py"] == {1}
 
 
 def test_diff_anchorable_lines_handles_content_lines_that_look_like_headers():
@@ -127,7 +131,7 @@ def test_diff_anchorable_lines_handles_content_lines_that_look_like_headers():
     )
     idx = _diff_anchorable_lines(diff)
     assert set(idx) == {"x.md"}  # the '+++ a bullet...' content line was NOT taken as a header
-    assert idx["x.md"] == {1, 2, 3}  # context line + the two real additions
+    assert _lines(idx)["x.md"] == {1, 2, 3}  # context line + the two real additions
 
 
 def test_diff_anchorable_lines_unquotes_paths_with_spaces():
@@ -142,7 +146,7 @@ def test_diff_anchorable_lines_unquotes_paths_with_spaces():
         "+y = 2\n"
     )
     idx = _diff_anchorable_lines(diff)
-    assert idx == {"weird name.py": {1, 2}}
+    assert _lines(idx) == {"weird name.py": {1, 2}}
 
 
 def test_diff_anchorable_lines_splits_on_newline_only():
@@ -161,9 +165,9 @@ def test_diff_anchorable_lines_splits_on_newline_only():
     )
     idx = _diff_anchorable_lines(diff)
     # context line 1 + the two additions — NOT the phantom lines the split content line would add.
-    assert idx == {"x.py": {1, 2, 3}}
+    assert _lines(idx) == {"x.py": {1, 2, 3}}
     # The line after the exotic one still anchors at 3, not shifted past it.
-    assert _anchor_line(Location(file="x.py", line_start=3, line_end=3), idx) == 3
+    assert _anchor_span(Location(file="x.py", line_start=3, line_end=3), idx) == (3, 3)
 
 
 def test_diff_anchorable_lines_handles_crlf_terminated_diff():
@@ -178,7 +182,7 @@ def test_diff_anchorable_lines_handles_crlf_terminated_diff():
         "+y = 2\r\n"
     )
     idx = _diff_anchorable_lines(diff)
-    assert idx == {"c.py": {1, 2}}
+    assert _lines(idx) == {"c.py": {1, 2}}
 
 
 def test_diff_anchorable_lines_counts_blank_context_line():
@@ -198,23 +202,25 @@ def test_diff_anchorable_lines_counts_blank_context_line():
         " z = 3\n"
     )
     idx = _diff_anchorable_lines(diff)
-    assert idx == {"blank.py": {1, 2, 3, 4}}  # the blank context line (2) is counted, not skipped
+    assert _lines(idx) == {
+        "blank.py": {1, 2, 3, 4}
+    }  # the blank context line (2) is counted, not skipped
     # The addition after the blank anchors at 3 and the context after it at 4 — not shifted down.
-    assert _anchor_line(Location(file="blank.py", line_start=3, line_end=3), idx) == 3
-    assert _anchor_line(Location(file="blank.py", line_start=4, line_end=4), idx) == 4
+    assert _anchor_span(Location(file="blank.py", line_start=3, line_end=3), idx) == (3, 3)
+    assert _anchor_span(Location(file="blank.py", line_start=4, line_end=4), idx) == (4, 4)
 
 
-def test_anchor_line_is_right_side_only_and_single_line():
+def test_anchor_span_is_right_side_only_and_clipped_to_the_diff():
     idx = _diff_anchorable_lines(_DIFF)
-    assert _anchor_line(Location(file="pr_file.py", line_start=2, line_end=2), idx) == 2
-    # A multi-line finding still anchors at its (single) start line — no cross-hunk range anchor.
-    assert _anchor_line(Location(file="pr_file.py", line_start=1, line_end=3), idx) == 1
+    assert _anchor_span(Location(file="pr_file.py", line_start=2, line_end=2), idx) == (2, 2)
+    # A multi-line finding inside one hunk anchors as a range.
+    assert _anchor_span(Location(file="pr_file.py", line_start=1, line_end=3), idx) == (1, 3)
     # old.py line 2 is a deletion (old-file numbering); findings cite post-change lines, so it
     # never anchors there and falls through to the summary.
-    assert _anchor_line(Location(file="old.py", line_start=2, line_end=2), idx) is None
+    assert _anchor_span(Location(file="old.py", line_start=2, line_end=2), idx) is None
     # A line not in the diff, and an unknown file, are both unanchorable.
-    assert _anchor_line(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
-    assert _anchor_line(Location(file="nope.py", line_start=1, line_end=1), idx) is None
+    assert _anchor_span(Location(file="pr_file.py", line_start=99, line_end=99), idx) is None
+    assert _anchor_span(Location(file="nope.py", line_start=1, line_end=1), idx) is None
 
 
 # --- build_review ---------------------------------------------------------------------
@@ -252,13 +258,75 @@ def test_build_review_pins_commit_id_to_reviewed_head_or_omits_when_unknown():
     assert "not anchored to the diff" not in unknown["body"]
 
 
-def test_build_review_multiline_finding_anchors_start_and_shows_range_in_body():
-    # Single-line anchor at the start (no fragile cross-hunk range); the full span is in the body.
+def test_build_review_multiline_finding_in_one_hunk_is_a_range_comment():
     built = build_review(_report([_finding(line=1, line_end=3)]), "run1", _DIFF, "sha")
     c = _payload(built)["comments"][0]
-    assert c["line"] == 1 and c["side"] == "RIGHT"
-    assert "start_line" not in c  # no native multi-line range anchor
-    assert "lines 1–3" in c["body"]  # the span is conveyed in the comment text instead
+    assert (c["start_line"], c["start_side"], c["line"], c["side"]) == (1, "RIGHT", 3, "RIGHT")
+    assert "lines 1–3" in c["body"]
+
+
+def test_build_review_single_line_finding_has_no_start_line():
+    c = _payload(build_review(_report([_finding(line=2)]), "run1", _DIFF, "sha"))["comments"][0]
+    assert c["line"] == 2
+    assert "start_line" not in c
+
+
+# Two hunks in one file (new lines 10-13 and 30-32), plus a deletion-only hunk (no new lines).
+_TWO_HUNKS = (
+    "diff --git a/m.py b/m.py\n"
+    "--- a/m.py\n"
+    "+++ b/m.py\n"
+    "@@ -10,3 +10,4 @@ def f():\n"
+    " a = 1\n"
+    "+b = 2\n"
+    " c = 3\n"
+    " d = 4\n"
+    "@@ -29,3 +30,3 @@ def g():\n"
+    " e = 5\n"
+    "-f = 6\n"
+    "+f = 7\n"
+    " g = 8\n"
+    "@@ -50,2 +50,0 @@\n"
+    "-gone = 1\n"
+    "-gone = 2\n"
+)
+
+
+def test_diff_index_keeps_each_hunk_as_a_contiguous_range():
+    assert _diff_anchorable_lines(_TWO_HUNKS) == {"m.py": [range(10, 14), range(30, 33)]}
+
+
+def _span(start: int, end: int) -> tuple[int, int] | None:
+    loc = Location(file="m.py", line_start=start, line_end=end)
+    return _anchor_span(loc, _diff_anchorable_lines(_TWO_HUNKS))
+
+
+def test_anchor_span_starting_outside_the_diff_begins_at_its_first_line_in_a_hunk():
+    # e.g. a finding citing a whole function when the PR only changed its tail.
+    assert _span(1, 12) == (10, 12)
+
+
+def test_anchor_span_crossing_hunks_is_clipped_to_the_first_hunk():
+    # A range spanning two hunks 422s the whole review, so it must stay within one.
+    assert _span(12, 31) == (12, 13)
+    assert _span(20, 40) == (30, 32)  # starts between hunks -> the next hunk it overlaps
+
+
+def test_anchor_span_touching_no_hunk_is_unanchored():
+    assert _span(1, 9) is None
+    assert _span(14, 29) is None  # the gap between the hunks
+    assert _span(50, 51) is None  # deletion-only hunk: no new-file lines
+
+
+def test_anchor_span_reversed_range_degrades_to_its_start_line():
+    assert _span(12, 3) == (12, 12)
+
+
+def test_build_review_findings_with_the_same_span_share_one_comment():
+    findings = [_finding(line=1, line_end=3, fid="f1"), _finding(line=1, line_end=3, fid="f2")]
+    comments = _payload(build_review(_report(findings), "run1", _DIFF, "sha"))["comments"]
+    assert len(comments) == 1
+    assert "id=f1" in comments[0]["body"] and "id=f2" in comments[0]["body"]
 
 
 def test_build_review_routes_unanchored_finding_to_body():
