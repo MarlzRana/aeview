@@ -213,14 +213,16 @@ def _in_progress_conflict(cwd: Path) -> str | None:
 # --- base resolution ------------------------------------------------------------------
 
 
-def _pr_view_fields(cwd: Path, value: str | None, fields: list[str]) -> dict | None:
+def _pr_view_fields(
+    cwd: Path, value: str | None, fields: list[str], timeout: float = _GH_VIEW_TIMEOUT
+) -> dict[str, object] | None:
     """Fields from `gh pr view` (bare = current branch's PR, else the given number). Bounded by a
     timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
     args = ["gh", "pr", "view"]
     if value:
         args.append(value)
     args += ["--json", ",".join(fields)]
-    res = run_sync(args, cwd=cwd, timeout=_GH_VIEW_TIMEOUT)
+    res = run_sync(args, cwd=cwd, timeout=timeout)
     if res.returncode != 0:
         return None
     try:
@@ -230,18 +232,21 @@ def _pr_view_fields(cwd: Path, value: str | None, fields: list[str]) -> dict | N
     return data if isinstance(data, dict) else None
 
 
-def _pr_view_field(cwd: Path, value: str | None, field_name: str) -> str | None:
-    data = _pr_view_fields(cwd, value, [field_name])
-    return (data.get(field_name) or None) if data else None
+def _pr_view_field(
+    cwd: Path, value: str | None, field_name: str, timeout: float = _GH_VIEW_TIMEOUT
+) -> str | None:
+    data = _pr_view_fields(cwd, value, [field_name], timeout)
+    found = data.get(field_name) if data else None
+    return found if isinstance(found, str) and found else None
 
 
 def _pr_base(cwd: Path) -> str | None:
     return _pr_view_field(cwd, None, "baseRefName")
 
 
-def _pr_head(cwd: Path, value: str | None) -> str | None:
+def _pr_head(cwd: Path, value: str | None, timeout: float = _GH_VIEW_TIMEOUT) -> str | None:
     """The PR's current head commit SHA (headRefOid)."""
-    return _pr_view_field(cwd, value, "headRefOid")
+    return _pr_view_field(cwd, value, "headRefOid", timeout)
 
 
 def _origin_head(cwd: Path) -> str | None:
@@ -380,6 +385,7 @@ def _result(
     inspect: list[str],
     commits: str = "",
     head_sha: str | None = None,
+    notice: str | None = None,
 ) -> ResolvedScope:
     return ResolvedScope(
         spec=ScopeSpec(type=stype, base=base),
@@ -388,6 +394,7 @@ def _result(
         inspect=inspect,
         commits=commits,
         head_sha=head_sha,
+        notice=notice,
     )
 
 
@@ -446,9 +453,7 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
-    resolved = _result("pr", base, diff, [], head_sha=head_sha)
-    resolved.notice = notice
-    return resolved
+    return _result("pr", base, diff, [], head_sha=head_sha, notice=notice)
 
 
 def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
@@ -457,37 +462,44 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     and the review drops to summary-only — or both reads agree on the old head and pin a stale diff.
 
     `git push` updates the upstream tracking ref synchronously, so upstream == HEAD means the push
-    has landed even while GitHub lags. Unpushed local commits mean the PR is reviewed as it stands
-    on GitHub; returns a notice saying so. Another PR, a fork, or no upstream: no wait, no notice.
+    has landed even while GitHub lags. Returns a notice when what's reviewed (the PR as it stands
+    on GitHub) isn't the local branch. Another PR's branch or no upstream: no wait, no notice.
     """
-    pr = _pr_view_fields(cwd, value, ["headRefName", "headRefOid", "isCrossRepository"])
-    if pr is None or pr.get("isCrossRepository"):
-        return None
-    if _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd) != pr.get("headRefName"):
+    pr = _pr_view_fields(cwd, value, ["headRefName", "headRefOid"])
+    if pr is None or _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd) != pr.get("headRefName"):
         return None
     local = _git_out(["rev-parse", "HEAD"], cwd)
     upstream = _git_out(["rev-parse", "@{upstream}"], cwd)
-    if local is None or upstream is None:
+    head = pr.get("headRefOid")
+    if local is None or upstream is None or not isinstance(head, str) or head == local:
         return None
     if local != upstream:
         ahead = _git_out(["rev-list", "--count", f"{upstream}..{local}"], cwd)
-        if ahead and ahead != "0":
-            return (
-                f"local HEAD has {ahead} commit(s) not pushed to the PR; "
-                "reviewing the PR as it is on GitHub"
-            )
-        return None
-    head = pr.get("headRefOid")
-    deadline = time.monotonic() + _PUSH_SETTLE_TIMEOUT
-    while head != local and time.monotonic() < deadline:
-        time.sleep(_PUSH_SETTLE_INTERVAL)
-        head = _pr_head(cwd, value)
-    if head != local:
+        if ahead is None or int(ahead) == 0:
+            return None  # behind or diverged from upstream: nothing of ours is unpushed
         return (
-            f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s; "
+            f"local HEAD has {ahead} commit(s) not pushed to the PR; "
             "reviewing the PR as it is on GitHub"
         )
-    return None
+    # A lagging head is a commit we pushed before (an ancestor, or the pre-amend commit of a
+    # force-push), so our clone has it. A head we don't have, or one ahead of HEAD, was pushed
+    # elsewhere (a collaborator, GitHub's "Update branch"): it never becomes HEAD, so don't wait.
+    if not _git_ok(["cat-file", "-e", f"{head}^{{commit}}"], cwd) or _git_ok(
+        ["merge-base", "--is-ancestor", local, head], cwd
+    ):
+        return "the PR has commits your local branch doesn't; reviewing the PR as it is on GitHub"
+    deadline = time.monotonic() + _PUSH_SETTLE_TIMEOUT
+    while (remaining := deadline - time.monotonic()) > 0:
+        time.sleep(min(_PUSH_SETTLE_INTERVAL, remaining))
+        if (remaining := deadline - time.monotonic()) <= 0:
+            break
+        # Each read gets only the time left, so a stalled `gh` can't outlast the wait.
+        if _pr_head(cwd, value, timeout=remaining) == local:
+            return None
+    return (
+        f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s; "
+        "reviewing the PR as it is on GitHub"
+    )
 
 
 def _git_out(args: list[str], cwd: Path) -> str | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -431,7 +432,7 @@ def test_patch_is_always_inline_even_if_large(git_repo):
 @pytest.fixture
 def pushed_pr(git_repo, tmp_path, monkeypatch):
     """`feature` checked out, tracking a bare remote it was pushed to, with GitHub faked: the PR's
-    headRefOid starts at `old` and becomes the pushed HEAD after `lag` more reads."""
+    headRefOid reports `state["stale"]` (default: the previous push) for `lag` reads, then HEAD."""
     from aeview import scope
 
     remote = tmp_path / "remote.git"
@@ -442,16 +443,23 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
     local = commit(git_repo, "f.py", "v = 2\n", "second")
     git(git_repo, "push", "-q", "-u", "origin", "feature")
 
-    state = {"lag": 0, "reads": 0, "pr": {"headRefName": "feature", "isCrossRepository": False}}
+    state = {"lag": 0, "reads": 0, "stale": old, "pr": {"headRefName": "feature"}, "gh_ok": True}
 
-    def head(cwd, value):
+    def head(cwd, value, timeout=30.0):
         state["reads"] += 1
-        return old if state["reads"] <= state["lag"] else local
+        if state.get("stall"):
+            time.sleep(timeout)  # a stalled gh, bounded by the timeout it was given
+        return state["stale"] if state["reads"] <= state["lag"] else local_head()
 
-    def fields(cwd, value, names):
-        data = {**state["pr"], "baseRefName": "main"}
+    def local_head():
+        return git(git_repo, "rev-parse", "HEAD").strip()
+
+    def fields(cwd, value, names, timeout=30.0):
+        if not state["gh_ok"]:
+            return None
+        data: dict[str, object] = {**state["pr"], "baseRefName": "main"}
         if "headRefOid" in names:
-            data["headRefOid"] = head(cwd, value)
+            data["headRefOid"] = head(cwd, value, timeout)
         return data
 
     monkeypatch.setattr(scope, "_pr_head", head)
@@ -468,12 +476,49 @@ def test_pr_scope_waits_for_github_to_catch_up_with_the_push(pushed_pr, stub_gh)
     assert r.notice is None
 
 
+def test_pr_scope_from_a_fork_also_waits(pushed_pr, stub_gh):
+    # A fork PR's head branch lives in the fork; on that branch, a just-pushed head lags the same.
+    pushed_pr.state["pr"] = {"headRefName": "feature", "isCrossRepository": True}
+    pushed_pr.state["lag"] = 3
+    assert _resolve(pushed_pr.repo, "pr", capture_head=True).head_sha == pushed_pr.local
+
+
+def test_pr_scope_waits_after_an_amend_and_force_push(pushed_pr, stub_gh):
+    # The pre-amend head isn't an ancestor of the new HEAD, but our clone has it: still a lag.
+    git(pushed_pr.repo, "commit", "-q", "--amend", "-m", "second, amended")
+    git(pushed_pr.repo, "push", "-q", "--force", "origin", "feature")
+    pushed_pr.state["stale"] = pushed_pr.local
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == git(pushed_pr.repo, "rev-parse", "HEAD").strip()
+    assert r.notice is None
+
+
 def test_pr_scope_lagging_past_the_wait_says_so(pushed_pr, stub_gh):
     pushed_pr.state["lag"] = 10_000  # never catches up within the (shortened) wait
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.head_sha == pushed_pr.old  # consistent with the diff GitHub served
     assert r.notice is not None
     assert "hasn't caught up" in r.notice
+
+
+def test_pr_scope_stalled_gh_cannot_outlast_the_wait(pushed_pr, stub_gh, monkeypatch):
+    from aeview import scope
+
+    pushed_pr.state["lag"] = 10_000
+    calls = {"n": 0}
+    real_head = scope._pr_head
+
+    def stall_after_first(cwd, value, timeout=30.0):
+        calls["n"] += 1
+        pushed_pr.state["stall"] = calls["n"] == 2  # the first poll stalls for its whole budget
+        return real_head(cwd, value, timeout)
+
+    monkeypatch.setattr(scope, "_pr_head", stall_after_first)
+    started = time.monotonic()
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert time.monotonic() - started < 1.0  # bounded by the 0.3s wait, not gh's 30s timeout
+    assert r.notice is not None
 
 
 def test_pr_scope_with_unpushed_commits_warns_without_waiting(pushed_pr, stub_gh):
@@ -485,12 +530,33 @@ def test_pr_scope_with_unpushed_commits_warns_without_waiting(pushed_pr, stub_gh
     assert pushed_pr.state["reads"] == 3  # settle read + the two bracket reads; no polling
 
 
-@pytest.mark.parametrize(
-    "pr", [{"headRefName": "other"}, {"headRefName": "feature", "isCrossRepository": True}]
-)
-def test_pr_scope_not_on_the_prs_branch_skips_the_wait(pushed_pr, stub_gh, pr):
-    # Another PR (--scope pr:<n> for a branch not checked out), or a fork: no wait, no notice.
-    pushed_pr.state["pr"] = pr
+def test_pr_scope_local_behind_upstream_neither_waits_nor_warns(pushed_pr, stub_gh):
+    git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")  # upstream (the PR) is ahead of us
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert pushed_pr.state["reads"] == 3
+
+
+@pytest.mark.parametrize("stale", ["0" * 40, "ahead"], ids=["unknown-head", "github-ahead"])
+def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh, stale):
+    # A collaborator's push / GitHub's "Update branch" (not in our clone), or a head ahead of HEAD:
+    # it never becomes our HEAD, so don't wait the full timeout — say what's being reviewed.
+    if stale == "ahead":
+        stale = commit(pushed_pr.repo, "f.py", "v = 9\n", "pushed elsewhere")
+        git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")
+        git(pushed_pr.repo, "update-ref", "refs/remotes/origin/feature", "HEAD")
+    pushed_pr.state["stale"] = stale
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is not None
+    assert "the PR has commits your local branch doesn't" in r.notice
+    assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_not_on_the_prs_branch_skips_the_wait(pushed_pr, stub_gh):
+    # Another PR (--scope pr:<n> for a branch not checked out): no wait, no notice.
+    pushed_pr.state["pr"] = {"headRefName": "other"}
     pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
@@ -503,6 +569,12 @@ def test_pr_scope_without_upstream_skips_the_wait(pushed_pr, stub_gh):
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
     assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_gh_view_failure_skips_the_wait(pushed_pr, stub_gh):
+    pushed_pr.state["gh_ok"] = False
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
 
 
 def test_pr_scope_without_capture_never_waits(pushed_pr, stub_gh):
