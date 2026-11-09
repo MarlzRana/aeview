@@ -431,8 +431,9 @@ def test_patch_is_always_inline_even_if_large(git_repo):
 
 @pytest.fixture
 def pushed_pr(git_repo, tmp_path, monkeypatch):
-    """`feature` checked out, tracking a bare remote it was pushed to, with GitHub faked: the PR's
-    headRefOid reports `state["stale"]` (default: the previous push) for `lag` reads, then HEAD."""
+    """`feature` checked out, tracking a bare remote it was pushed to, as PR #7 with GitHub faked:
+    headRefOid reports `state["stale"]` (default: the previous push) for `lag` reads, then the
+    pushed tip (`@{upstream}`)."""
     from aeview import scope
 
     remote = tmp_path / "remote.git"
@@ -443,21 +444,22 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
     local = commit(git_repo, "f.py", "v = 2\n", "second")
     git(git_repo, "push", "-q", "-u", "origin", "feature")
 
-    state = {"lag": 0, "reads": 0, "stale": old, "pr": {"headRefName": "feature"}, "gh_ok": True}
+    state: dict = {"lag": 0, "reads": 0, "stale": old, "number": 7, "current": 7, "gh_ok": True}
 
     def head(cwd, value, timeout=30.0):
         state["reads"] += 1
         if state.get("stall"):
             time.sleep(timeout)  # a stalled gh, bounded by the timeout it was given
-        return state["stale"] if state["reads"] <= state["lag"] else local_head()
-
-    def local_head():
-        return git(git_repo, "rev-parse", "HEAD").strip()
+        if state["reads"] <= state["lag"]:
+            return state["stale"]
+        return git(git_repo, "rev-parse", "@{upstream}").strip()
 
     def fields(cwd, value, names, timeout=30.0):
         if not state["gh_ok"]:
             return None
-        data: dict[str, object] = {**state["pr"], "baseRefName": "main"}
+        if names == ["number"]:  # the checked-out branch's PR
+            return {"number": state["current"]}
+        data: dict[str, object] = {"number": state["number"], "baseRefName": "main"}
         if "headRefOid" in names:
             data["headRefOid"] = head(cwd, value, timeout)
         return data
@@ -469,6 +471,10 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
     return SimpleNamespace(repo=git_repo, old=old, local=local, state=state)
 
 
+def _head(repo) -> str:
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
 def test_pr_scope_waits_for_github_to_catch_up_with_the_push(pushed_pr, stub_gh):
     pushed_pr.state["lag"] = 3  # GitHub still reports the previous head for a few reads
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
@@ -476,21 +482,26 @@ def test_pr_scope_waits_for_github_to_catch_up_with_the_push(pushed_pr, stub_gh)
     assert r.notice is None
 
 
-def test_pr_scope_from_a_fork_also_waits(pushed_pr, stub_gh):
-    # A fork PR's head branch lives in the fork; on that branch, a just-pushed head lags the same.
-    pushed_pr.state["pr"] = {"headRefName": "feature", "isCrossRepository": True}
-    pushed_pr.state["lag"] = 3
-    assert _resolve(pushed_pr.repo, "pr", capture_head=True).head_sha == pushed_pr.local
+def test_pr_scope_already_caught_up_pins_without_polling(pushed_pr, stub_gh):
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local
+    assert r.notice is None
+    assert pushed_pr.state["reads"] == 3  # settle read + the two bracket reads
 
 
-def test_pr_scope_waits_after_an_amend_and_force_push(pushed_pr, stub_gh):
-    # The pre-amend head isn't an ancestor of the new HEAD, but our clone has it: still a lag.
-    git(pushed_pr.repo, "commit", "-q", "--amend", "-m", "second, amended")
+@pytest.mark.parametrize("rewrite", ["amend", "rollback"])
+def test_pr_scope_waits_after_a_force_push(pushed_pr, stub_gh, rewrite):
+    # The stale head isn't an ancestor of the new tip (amend) or is ahead of it (rollback), but our
+    # clone has it either way: it's our own lagging push.
+    if rewrite == "amend":
+        git(pushed_pr.repo, "commit", "-q", "--amend", "-m", "second, amended")
+    else:
+        git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")
     git(pushed_pr.repo, "push", "-q", "--force", "origin", "feature")
     pushed_pr.state["stale"] = pushed_pr.local
     pushed_pr.state["lag"] = 3
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
-    assert r.head_sha == git(pushed_pr.repo, "rev-parse", "HEAD").strip()
+    assert r.head_sha == _head(pushed_pr.repo)
     assert r.notice is None
 
 
@@ -506,47 +517,50 @@ def test_pr_scope_stalled_gh_cannot_outlast_the_wait(pushed_pr, stub_gh, monkeyp
     from aeview import scope
 
     pushed_pr.state["lag"] = 10_000
-    calls = {"n": 0}
     real_head = scope._pr_head
+    calls = {"n": 0}
 
-    def stall_after_first(cwd, value, timeout=30.0):
+    def stall_on_first_poll(cwd, value, timeout=30.0):
         calls["n"] += 1
-        pushed_pr.state["stall"] = calls["n"] == 2  # the first poll stalls for its whole budget
+        pushed_pr.state["stall"] = calls["n"] == 1  # this poll stalls for its whole budget
         return real_head(cwd, value, timeout)
 
-    monkeypatch.setattr(scope, "_pr_head", stall_after_first)
+    monkeypatch.setattr(scope, "_pr_head", stall_on_first_poll)
     started = time.monotonic()
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert time.monotonic() - started < 1.0  # bounded by the 0.3s wait, not gh's 30s timeout
     assert r.notice is not None
 
 
-def test_pr_scope_with_unpushed_commits_warns_without_waiting(pushed_pr, stub_gh):
+def test_pr_scope_unpushed_wip_still_waits_for_the_push(pushed_pr, stub_gh):
+    # Push, then commit more locally: GitHub converges on the pushed tip, not HEAD.
     commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
-    pushed_pr.state["lag"] = 10_000
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local  # the pushed tip
+    assert r.notice is not None
+    assert "1 commit(s) not pushed" in r.notice
+
+
+def test_pr_scope_unpushed_commits_warn_without_waiting(pushed_pr, stub_gh):
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is not None
     assert "1 commit(s) not pushed" in r.notice
-    assert pushed_pr.state["reads"] == 3  # settle read + the two bracket reads; no polling
+    assert pushed_pr.state["reads"] == 3  # GitHub already at the pushed tip: no polling
 
 
 def test_pr_scope_local_behind_upstream_neither_waits_nor_warns(pushed_pr, stub_gh):
     git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")  # upstream (the PR) is ahead of us
-    pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
     assert pushed_pr.state["reads"] == 3
 
 
-@pytest.mark.parametrize("stale", ["0" * 40, "ahead"], ids=["unknown-head", "github-ahead"])
-def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh, stale):
-    # A collaborator's push / GitHub's "Update branch" (not in our clone), or a head ahead of HEAD:
-    # it never becomes our HEAD, so don't wait the full timeout — say what's being reviewed.
-    if stale == "ahead":
-        stale = commit(pushed_pr.repo, "f.py", "v = 9\n", "pushed elsewhere")
-        git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")
-        git(pushed_pr.repo, "update-ref", "refs/remotes/origin/feature", "HEAD")
-    pushed_pr.state["stale"] = stale
+def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh):
+    # A collaborator's push / GitHub's "Update branch" isn't in our clone and will never become our
+    # upstream: don't wait the full timeout; say what's being reviewed.
+    pushed_pr.state["stale"] = "0" * 40
     pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is not None
@@ -554,13 +568,18 @@ def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh, stale
     assert pushed_pr.state["reads"] == 3
 
 
-def test_pr_scope_not_on_the_prs_branch_skips_the_wait(pushed_pr, stub_gh):
-    # Another PR (--scope pr:<n> for a branch not checked out): no wait, no notice.
-    pushed_pr.state["pr"] = {"headRefName": "other"}
+def test_pr_scope_other_pr_with_a_same_named_branch_skips_the_wait(pushed_pr, stub_gh):
+    # `--scope pr:<n>` for a PR that isn't the checked-out branch's (e.g. a fork's `feature`).
+    pushed_pr.state["number"] = 99
     pushed_pr.state["lag"] = 10_000
-    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    r = _resolve(pushed_pr.repo, "pr", "99", capture_head=True)
     assert r.notice is None
     assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_explicit_number_of_the_current_branch_waits(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 3
+    assert _resolve(pushed_pr.repo, "pr", "7", capture_head=True).head_sha == pushed_pr.local
 
 
 def test_pr_scope_without_upstream_skips_the_wait(pushed_pr, stub_gh):
@@ -573,11 +592,34 @@ def test_pr_scope_without_upstream_skips_the_wait(pushed_pr, stub_gh):
 
 def test_pr_scope_gh_view_failure_skips_the_wait(pushed_pr, stub_gh):
     pushed_pr.state["gh_ok"] = False
-    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
-    assert r.notice is None
+    assert _resolve(pushed_pr.repo, "pr", capture_head=True).notice is None
 
 
 def test_pr_scope_without_capture_never_waits(pushed_pr, stub_gh):
     pushed_pr.state["lag"] = 10_000
     _resolve(pushed_pr.repo, "pr")
     assert pushed_pr.state["reads"] == 0
+
+
+def test_pr_head_forwards_its_timeout_to_gh(monkeypatch, tmp_path):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    seen: list[float | None] = []
+
+    def fake_run_sync(args, cwd=None, timeout=None):
+        seen.append(timeout)
+        return ProcResult(0, '{"headRefOid": "abc"}', "")
+
+    monkeypatch.setattr(scope, "run_sync", fake_run_sync)
+    assert scope._pr_head(tmp_path, None, timeout=1.5) == "abc"
+    assert seen == [1.5]
+
+
+@pytest.mark.parametrize("stdout", ["[]", '{"headRefOid": 5}', "not json"])
+def test_pr_head_rejects_malformed_gh_output(monkeypatch, tmp_path, stdout):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    monkeypatch.setattr(scope, "run_sync", lambda *a, **k: ProcResult(0, stdout, ""))
+    assert scope._pr_head(tmp_path, None) is None

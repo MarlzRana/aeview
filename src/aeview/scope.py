@@ -457,49 +457,54 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
 
 
 def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
-    """When the checked-out branch is the PR's head and was just pushed, wait (bounded) for GitHub's
-    headRefOid to catch up; otherwise the head bracket below reads the old head, then the new one,
-    and the review drops to summary-only — or both reads agree on the old head and pin a stale diff.
-
-    `git push` updates the upstream tracking ref synchronously, so upstream == HEAD means the push
-    has landed even while GitHub lags. Returns a notice when what's reviewed (the PR as it stands
-    on GitHub) isn't the local branch. Another PR's branch or no upstream: no wait, no notice.
+    """If the checked-out branch's PR was just pushed, wait (bounded) for GitHub's headRefOid to
+    catch up with the pushed tip; otherwise the head bracket below reads the old head, then the new
+    one, and the review drops to summary-only — or both reads agree on the old head and pin a stale
+    diff. `git push` updates the upstream tracking ref synchronously, so `@{upstream}` is the tip
+    GitHub is converging on. Returns a notice when what's reviewed (the PR as it stands on GitHub)
+    isn't the local branch; None (no wait) for another PR or a branch without an upstream.
     """
-    pr = _pr_view_fields(cwd, value, ["headRefName", "headRefOid"])
-    if pr is None or _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd) != pr.get("headRefName"):
+    pr = _pr_view_fields(cwd, value, ["number", "headRefOid"])
+    if pr is None or (value and not _is_current_branch_pr(cwd, pr.get("number"))):
         return None
-    local = _git_out(["rev-parse", "HEAD"], cwd)
     upstream = _git_out(["rev-parse", "@{upstream}"], cwd)
     head = pr.get("headRefOid")
-    if local is None or upstream is None or not isinstance(head, str) or head == local:
+    if upstream is None or not isinstance(head, str):
         return None
-    if local != upstream:
-        ahead = _git_out(["rev-list", "--count", f"{upstream}..{local}"], cwd)
-        if ahead is None or int(ahead) == 0:
-            return None  # behind or diverged from upstream: nothing of ours is unpushed
-        return (
-            f"local HEAD has {ahead} commit(s) not pushed to the PR; "
-            "reviewing the PR as it is on GitHub"
-        )
-    # A lagging head is a commit we pushed before (an ancestor, or the pre-amend commit of a
-    # force-push), so our clone has it. A head we don't have, or one ahead of HEAD, was pushed
-    # elsewhere (a collaborator, GitHub's "Update branch"): it never becomes HEAD, so don't wait.
-    if not _git_ok(["cat-file", "-e", f"{head}^{{commit}}"], cwd) or _git_ok(
-        ["merge-base", "--is-ancestor", local, head], cwd
-    ):
-        return "the PR has commits your local branch doesn't; reviewing the PR as it is on GitHub"
+    notices: list[str] = []
+    if head != upstream:
+        # A lagging head is one of our earlier pushes, so the clone has it (also across an amend
+        # or rollback force-push). A head we don't have was pushed elsewhere (a collaborator,
+        # GitHub's "Update branch") and will never become our upstream: don't wait for it.
+        if not _git_ok(["cat-file", "-e", f"{head}^{{commit}}"], cwd):
+            notices.append("the PR has commits your local branch doesn't")
+        elif not _await_pr_head(cwd, value, upstream):
+            notices.append(
+                f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s"
+            )
+    unpushed = _git_out(["rev-list", "--count", "@{upstream}..HEAD"], cwd)
+    if unpushed is not None and int(unpushed) > 0:
+        notices.append(f"local HEAD has {unpushed} commit(s) not pushed to the PR")
+    return "; ".join(notices) + "; reviewing the PR as it is on GitHub" if notices else None
+
+
+def _is_current_branch_pr(cwd: Path, number: object) -> bool:
+    # `--scope pr:<n>` may name any PR, including a fork's whose head branch shares our branch's
+    # name; only wait when <n> is the PR gh resolves for the checked-out branch.
+    current = _pr_view_fields(cwd, None, ["number"])
+    return current is not None and current.get("number") == number
+
+
+def _await_pr_head(cwd: Path, value: str | None, target: str) -> bool:
     deadline = time.monotonic() + _PUSH_SETTLE_TIMEOUT
-    while (remaining := deadline - time.monotonic()) > 0:
-        time.sleep(min(_PUSH_SETTLE_INTERVAL, remaining))
-        if (remaining := deadline - time.monotonic()) <= 0:
-            break
+    while True:
+        time.sleep(max(0.0, min(_PUSH_SETTLE_INTERVAL, deadline - time.monotonic())))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         # Each read gets only the time left, so a stalled `gh` can't outlast the wait.
-        if _pr_head(cwd, value, timeout=remaining) == local:
-            return None
-    return (
-        f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s; "
-        "reviewing the PR as it is on GitHub"
-    )
+        if _pr_head(cwd, value, timeout=remaining) == target:
+            return True
 
 
 def _git_out(args: list[str], cwd: Path) -> str | None:
