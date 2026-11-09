@@ -337,6 +337,32 @@ def test_build_review_range_clipped_to_one_line_has_no_start_line():
     assert "start_line" not in c  # GitHub rejects start_line == line
 
 
+def test_build_review_groups_by_the_clipped_span_not_the_original_range():
+    # 1-12 starts outside the diff and 10-12 doesn't, but both clip to 10-12: one thread.
+    same = [
+        _finding(file="m.py", line=1, line_end=12, fid="f1"),
+        _finding(file="m.py", line=10, line_end=12, fid="f2"),
+    ]
+    comments = _payload(build_review(_report(same), "run1", _TWO_HUNKS, "sha"))["comments"]
+    assert len(comments) == 1
+    assert (comments[0]["start_line"], comments[0]["line"]) == (10, 12)
+
+
+def test_build_review_keeps_spans_sharing_a_start_line_apart():
+    # Same start, different end within one hunk: two threads (a key dropping `last` would merge).
+    findings = [
+        _finding(file="m.py", line=10, line_end=11, fid="f1"),
+        _finding(file="m.py", line=10, line_end=13, fid="f2"),
+    ]
+    comments = _payload(build_review(_report(findings), "run1", _TWO_HUNKS, "sha"))["comments"]
+    assert sorted((c["start_line"], c["line"]) for c in comments) == [(10, 11), (10, 13)]
+
+
+def test_diff_index_unparseable_hunk_header_ends_the_hunk():
+    diff = _TWO_HUNKS.replace("@@ -29,3 +30,3 @@ def g():", "@@@ -29,3 -29,3 +30,3 @@@")
+    assert _diff_anchorable_lines(diff) == {"m.py": [range(10, 14)]}
+
+
 def test_build_review_findings_with_the_same_span_share_one_comment():
     findings = [_finding(line=1, line_end=3, fid="f1"), _finding(line=1, line_end=3, fid="f2")]
     comments = _payload(build_review(_report(findings), "run1", _DIFF, "sha"))["comments"]

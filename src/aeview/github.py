@@ -168,9 +168,12 @@ def _diff_anchorable_lines(diff: str) -> dict[str, list[range]]:
             continue
         if line.startswith("@@"):
             close_hunk(current if in_hunk else None, hunk_start, new_no)
-            if m := _HUNK.match(line):
+            # An unparseable header (e.g. a combined diff's `@@@`) ends the hunk rather than
+            # leaving the previous one open to be recorded twice.
+            m = _HUNK.match(line)
+            in_hunk = m is not None
+            if m:
                 hunk_start = new_no = int(m.group(1))  # the +new hunk start (RIGHT numbering)
-                in_hunk = True
             continue
         if not in_hunk:  # pre-hunk preamble: the index/mode/+++/--- header lines
             if line.startswith("+++ "):
