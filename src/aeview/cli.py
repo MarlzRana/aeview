@@ -413,6 +413,7 @@ def _finish_pr_post(
             return
         pr.review_attempted = True
         store.write_manifest(manifest)
+        reviews = {r.id: r for r in store.read_reviews()}
         try:
             posted = post_review(
                 pr.target,
@@ -421,7 +422,7 @@ def _finish_pr_post(
                 diff,
                 pr.head_sha,
                 cwd,
-                roster=roster_status(manifest.roster, {r.id: r for r in store.read_reviews()}),
+                roster=roster_status(manifest.roster, reviews),
             )
         except GitHubError as exc:
             typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)
