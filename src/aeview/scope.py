@@ -441,7 +441,7 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     # outdated, never re-anchored). If a push lands mid-fetch (head moved), leave head_sha None so
     # posting drops to a summary-only comment. This closes the diff/SHA race. When not posting we
     # skip both head reads — a plain `--scope pr` review shouldn't pay for a SHA it won't use.
-    notice = _settle_pushed_head(cwd, value) if capture_head else None
+    notice = _await_push_and_notice(cwd, value) if capture_head else None
     head_before = _pr_head(cwd, value) if capture_head else None
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
@@ -456,7 +456,7 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     return _result("pr", base, diff, [], head_sha=head_sha, notice=notice)
 
 
-def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
+def _await_push_and_notice(cwd: Path, value: str | None) -> str | None:
     """If the checked-out branch's PR was just pushed, wait (bounded) for GitHub's headRefOid to
     catch up with the pushed tip; otherwise the head bracket below reads the old head, then the new
     one, and the review drops to summary-only — or both reads agree on the old head and pin a stale
@@ -464,13 +464,12 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     our push last moved that ref, it's the tip GitHub is converging on. Returns a notice when what's
     reviewed (the PR as it stands on GitHub) isn't the local branch; None (no wait) otherwise.
     """
-    pr = _pr_view_fields(cwd, value, ["number", "headRefName", "headRefOid"])
-    if pr is None:
-        return None
-    if value and not _is_current_branch_pr(cwd, pr.get("number")):
-        return None
-    head, branch = pr.get("headRefOid"), pr.get("headRefName")
-    if not isinstance(head, str) or not isinstance(branch, str):
+    match _pr_view_fields(cwd, value, ["number", "headRefName", "headRefOid"]):
+        case {"number": int(number), "headRefName": str(branch), "headRefOid": str(head)}:
+            pass
+        case _:  # gh failed, or returned something unexpected
+            return None
+    if value and not _is_current_branch_pr(cwd, number):
         return None
     tracking = _pushed_tip_ref(cwd, branch)
     if tracking is None:
@@ -481,7 +480,9 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     if _git_out(["reflog", "show", tracking, "-1", "--format=%gs"], cwd) != "update by push":
         return None
     pushed = _git_out(["rev-parse", tracking], cwd)
-    if pushed is None:
+    # ...and it must be our branch's history (a same-named leftover ref we once pushed, after
+    # `gh pr checkout` of an unrelated fork branch, isn't): HEAD is the pushed tip or builds on it.
+    if pushed is None or not _git_ok(["merge-base", "--is-ancestor", pushed, "HEAD"], cwd):
         return None
     notices: list[str] = []
     if head != pushed:
@@ -512,7 +513,7 @@ def _pushed_tip_ref(cwd: Path, branch: str) -> str | None:
     return refs[0] if len(refs) == 1 else None
 
 
-def _is_current_branch_pr(cwd: Path, number: object) -> bool:
+def _is_current_branch_pr(cwd: Path, number: int) -> bool:
     # `--scope pr:<n>` may name any PR, including a fork's whose head branch shares our branch's
     # name; only wait when <n> is the PR gh resolves for the checked-out branch.
     current = _pr_view_fields(cwd, None, ["number"])

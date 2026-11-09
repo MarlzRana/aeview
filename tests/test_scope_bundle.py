@@ -623,6 +623,37 @@ def test_pr_scope_tracking_ref_last_moved_by_a_fetch_skips_everything(pushed_pr,
     assert not pushed_pr.state.get("polled")
 
 
+def test_pr_scope_unrelated_leftover_tracking_ref_skips_everything(pushed_pr, stub_gh):
+    # `gh pr checkout` of a fork PR whose head branch is also `feature`: our old pushed
+    # origin/feature isn't in this checkout's history, so it isn't the tip GitHub converges on.
+    git(pushed_pr.repo, "checkout", "-q", "--orphan", "fork-feature")
+    git(pushed_pr.repo, "rm", "-rqf", ".")
+    fork_head = commit(pushed_pr.repo, "fork.py", "x = 1\n", "fork work")
+    pushed_pr.state["stale"] = fork_head
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_head_moving_mid_fetch_still_drops_the_pin(pushed_pr, stub_gh, monkeypatch):
+    # The wait converges, but a push lands between the bracket's two reads: the bracket is still
+    # the safety net and must leave head_sha None (summary-only), not trust the settled head.
+    from aeview import scope
+
+    pushed_pr.state["lag"] = 2  # settle read + first poll stale; the poll after that converges
+    real_head = scope._pr_head
+    calls = {"n": 0}
+
+    def moves_during_the_bracket(cwd, value, timeout=30.0):
+        calls["n"] += 1
+        return "f" * 40 if calls["n"] == 3 else real_head(cwd, value, timeout)
+
+    monkeypatch.setattr(scope, "_pr_head", moves_during_the_bracket)
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha is None
+
+
 def test_pr_scope_head_branch_without_a_tracking_ref_skips_the_wait(pushed_pr, stub_gh):
     pushed_pr.state["branch"] = "never-fetched"
     pushed_pr.state["lag"] = 10_000
