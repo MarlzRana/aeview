@@ -460,32 +460,49 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     """If the checked-out branch's PR was just pushed, wait (bounded) for GitHub's headRefOid to
     catch up with the pushed tip; otherwise the head bracket below reads the old head, then the new
     one, and the review drops to summary-only — or both reads agree on the old head and pin a stale
-    diff. `git push` updates the upstream tracking ref synchronously, so `@{upstream}` is the tip
-    GitHub is converging on. Returns a notice when what's reviewed (the PR as it stands on GitHub)
-    isn't the local branch; None (no wait) for another PR or a branch without an upstream.
+    diff. `git push` updates the remote-tracking ref for the PR's head branch synchronously, so that
+    ref is the tip GitHub is converging on. Returns a notice when what's reviewed (the PR as it
+    stands on GitHub) isn't the local branch; None (no wait) for another PR or an untracked head.
     """
-    pr = _pr_view_fields(cwd, value, ["number", "headRefOid"])
-    if pr is None or (value and not _is_current_branch_pr(cwd, pr.get("number"))):
+    pr = _pr_view_fields(cwd, value, ["number", "headRefName", "headRefOid"])
+    if pr is None:
         return None
-    upstream = _git_out(["rev-parse", "@{upstream}"], cwd)
-    head = pr.get("headRefOid")
-    if upstream is None or not isinstance(head, str):
+    if value and not _is_current_branch_pr(cwd, pr.get("number")):
+        return None
+    head, branch = pr.get("headRefOid"), pr.get("headRefName")
+    if not isinstance(head, str) or not isinstance(branch, str):
+        return None
+    tracking = _pushed_tip_ref(cwd, branch)
+    pushed = _git_out(["rev-parse", tracking], cwd) if tracking else None
+    if tracking is None or pushed is None:
         return None
     notices: list[str] = []
-    if head != upstream:
+    if head != pushed:
         # A lagging head is one of our earlier pushes, so the clone has it (also across an amend
         # or rollback force-push). A head we don't have was pushed elsewhere (a collaborator,
-        # GitHub's "Update branch") and will never become our upstream: don't wait for it.
+        # GitHub's "Update branch") and will never become our pushed tip: don't wait for it.
         if not _git_ok(["cat-file", "-e", f"{head}^{{commit}}"], cwd):
             notices.append("the PR has commits your local branch doesn't")
-        elif not _await_pr_head(cwd, value, upstream):
+        elif not _await_pr_head(cwd, value, pushed):
             notices.append(
                 f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s"
             )
-    unpushed = _git_out(["rev-list", "--count", "@{upstream}..HEAD"], cwd)
+    unpushed = _git_out(["rev-list", "--count", f"{tracking}..HEAD"], cwd)
     if unpushed is not None and int(unpushed) > 0:
         notices.append(f"local HEAD has {unpushed} commit(s) not pushed to the PR")
-    return "; ".join(notices) + "; reviewing the PR as it is on GitHub" if notices else None
+    if not notices:
+        return None
+    notices.append("reviewing the PR as it is on GitHub")
+    return "; ".join(notices)
+
+
+def _pushed_tip_ref(cwd: Path, branch: str) -> str | None:
+    # The remote-tracking ref for the PR's head branch, whatever the local branch tracks (it may
+    # track origin/main after `checkout -b feat origin/main` + `push origin feat`). Exactly one
+    # remote must carry it (e.g. the fork remote, not upstream); otherwise we can't tell which.
+    out = _git_out(["for-each-ref", "--format=%(refname)", f"refs/remotes/*/{branch}"], cwd)
+    refs = out.splitlines() if out else []
+    return refs[0] if len(refs) == 1 else None
 
 
 def _is_current_branch_pr(cwd: Path, number: object) -> bool:

@@ -445,6 +445,7 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
     git(git_repo, "push", "-q", "-u", "origin", "feature")
 
     state: dict = {"lag": 0, "reads": 0, "stale": old, "number": 7, "current": 7, "gh_ok": True}
+    state["branch"] = "feature"
 
     def head(cwd, value, timeout=30.0):
         state["reads"] += 1
@@ -452,14 +453,18 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
             time.sleep(timeout)  # a stalled gh, bounded by the timeout it was given
         if state["reads"] <= state["lag"]:
             return state["stale"]
-        return git(git_repo, "rev-parse", "@{upstream}").strip()
+        return git(git_repo, "rev-parse", "refs/remotes/origin/feature").strip()
 
     def fields(cwd, value, names, timeout=30.0):
         if not state["gh_ok"]:
             return None
         if names == ["number"]:  # the checked-out branch's PR
             return {"number": state["current"]}
-        data: dict[str, object] = {"number": state["number"], "baseRefName": "main"}
+        data: dict[str, object] = {
+            "number": state["number"],
+            "headRefName": state["branch"],
+            "baseRefName": "main",
+        }
         if "headRefOid" in names:
             data["headRefOid"] = head(cwd, value, timeout)
         return data
@@ -566,6 +571,7 @@ def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh):
     assert r.notice is not None
     assert "the PR has commits your local branch doesn't" in r.notice
     assert pushed_pr.state["reads"] == 3
+    assert r.head_sha == pushed_pr.state["stale"]  # the head GitHub's diff was computed against
 
 
 def test_pr_scope_other_pr_with_a_same_named_branch_skips_the_wait(pushed_pr, stub_gh):
@@ -582,12 +588,46 @@ def test_pr_scope_explicit_number_of_the_current_branch_waits(pushed_pr, stub_gh
     assert _resolve(pushed_pr.repo, "pr", "7", capture_head=True).head_sha == pushed_pr.local
 
 
-def test_pr_scope_without_upstream_skips_the_wait(pushed_pr, stub_gh):
-    git(pushed_pr.repo, "branch", "--unset-upstream")
+def test_pr_scope_head_branch_without_a_tracking_ref_skips_the_wait(pushed_pr, stub_gh):
+    pushed_pr.state["branch"] = "never-fetched"
     pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
     assert pushed_pr.state["reads"] == 3
+
+
+def test_pr_scope_branch_tracking_another_ref_still_waits_on_the_pr_branch(pushed_pr, stub_gh):
+    # `checkout -b feat origin/main` + `push origin feat`: the local branch tracks origin/main, but
+    # the push still updated origin/feature — that's the tip to wait for, and nothing is unpushed.
+    git(pushed_pr.repo, "push", "-q", "origin", "main")
+    git(pushed_pr.repo, "branch", "--set-upstream-to=origin/main")
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local
+    assert r.notice is None
+
+
+def test_pr_scope_never_caught_up_with_unpushed_wip_reports_both(pushed_pr, stub_gh):
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice == (
+        "GitHub hasn't caught up with your push after 0s; "
+        "local HEAD has 1 commit(s) not pushed to the PR; "
+        "reviewing the PR as it is on GitHub"
+    )
+
+
+def test_pushed_tip_ref_finds_the_one_remote_carrying_the_branch(git_repo):
+    from aeview import scope
+
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "update-ref", "refs/remotes/fork/fix/thing", head)
+    git(git_repo, "update-ref", "refs/remotes/upstream/main", head)
+    assert scope._pushed_tip_ref(git_repo, "fix/thing") == "refs/remotes/fork/fix/thing"
+    assert scope._pushed_tip_ref(git_repo, "thing") is None  # no partial-segment match
+    git(git_repo, "update-ref", "refs/remotes/origin/fix/thing", head)
+    assert scope._pushed_tip_ref(git_repo, "fix/thing") is None  # ambiguous: two remotes
 
 
 def test_pr_scope_gh_view_failure_skips_the_wait(pushed_pr, stub_gh):
@@ -614,6 +654,22 @@ def test_pr_head_forwards_its_timeout_to_gh(monkeypatch, tmp_path):
     monkeypatch.setattr(scope, "run_sync", fake_run_sync)
     assert scope._pr_head(tmp_path, None, timeout=1.5) == "abc"
     assert seen == [1.5]
+
+
+def test_pr_view_fields_requests_and_parses_every_field(monkeypatch, tmp_path):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    seen: list[list[str]] = []
+
+    def fake_run_sync(args, cwd=None, timeout=None):
+        seen.append(args)
+        return ProcResult(0, '{"number": 7, "headRefOid": "abc"}', "")
+
+    monkeypatch.setattr(scope, "run_sync", fake_run_sync)
+    data = scope._pr_view_fields(tmp_path, "7", ["number", "headRefOid"])
+    assert data == {"number": 7, "headRefOid": "abc"}
+    assert seen == [["gh", "pr", "view", "7", "--json", "number,headRefOid"]]
 
 
 @pytest.mark.parametrize("stdout", ["[]", '{"headRefOid": 5}', "not json"])
