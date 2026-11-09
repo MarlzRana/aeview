@@ -335,6 +335,29 @@ def test_run_json_stdout_unpolluted_by_auto_activated_notice(
     assert "auto-activated 1 reviewer(s): py" in result.stderr
 
 
+def test_run_surfaces_the_scope_notice_on_stderr_only(
+    aeview_home, git_repo, stub_claude, monkeypatch
+):
+    # The scope's heads-up (e.g. "local HEAD has commits not pushed to the PR") reaches the user on
+    # stderr, never polluting --json stdout.
+    from aeview import cli
+
+    real_resolve = cli.resolve_scope
+
+    def resolve_with_notice(*args, **kwargs):
+        resolved = real_resolve(*args, **kwargs)
+        resolved.notice = "local HEAD has 1 commit(s) not pushed to the PR"
+        return resolved
+
+    monkeypatch.setattr(cli, "resolve_scope", resolve_with_notice)
+    (git_repo / "app.py").write_text("def add(a, b):\n    return a - b\n")
+    monkeypatch.chdir(git_repo)
+    result = CliRunner().invoke(app, ["run", "--scope", "working-tree", "--json"])
+    json.loads(result.stdout)
+    assert "not pushed" not in result.stdout
+    assert "aeview: local HEAD has 1 commit(s) not pushed to the PR" in result.stderr
+
+
 def test_run_json_is_the_gate_while_result_stays_full(
     aeview_home, git_repo, stub_claude, monkeypatch
 ):

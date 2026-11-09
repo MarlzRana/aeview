@@ -12,6 +12,7 @@ cleanly; only an in-progress, unresolved merge/rebase in the working tree is ref
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,10 @@ from .schema import ScopeSpec
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's well-known empty tree object
 UNTRACKED_FILE_CAP = 24 * 1024  # bytes of diff emitted per untracked file
 _GH_VIEW_TIMEOUT = 30  # bound `gh pr view` so a stalled network call can't hang the run
+# After a push, GitHub updates the PR's headRefOid asynchronously; how long to wait for it to catch
+# up to the pushed commit before falling back to the (then summary-only) head bracket.
+_PUSH_SETTLE_TIMEOUT = 10.0
+_PUSH_SETTLE_INTERVAL = 1.0
 
 # Scopes that require an explicit :value (no sensible default).
 _VALUE_REQUIRED = {"range", "patch"}
@@ -61,6 +66,8 @@ class ResolvedScope:
     # For pr scope: the head commit the diff was taken against, captured with the diff so a review
     # posted later anchors its comments to the *reviewed* commit — not a commit pushed afterwards.
     head_sha: str | None = None
+    # A user-facing heads-up about what was (not) reviewed, surfaced on stderr by the caller.
+    notice: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -206,29 +213,40 @@ def _in_progress_conflict(cwd: Path) -> str | None:
 # --- base resolution ------------------------------------------------------------------
 
 
-def _pr_view_field(cwd: Path, value: str | None, field_name: str) -> str | None:
-    """One scalar field from `gh pr view` (bare = current branch's PR, else the given number).
-    Bounded by a timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
+def _pr_view_fields(
+    cwd: Path, value: str | None, fields: list[str], timeout: float = _GH_VIEW_TIMEOUT
+) -> dict[str, object] | None:
+    """Fields from `gh pr view` (bare = current branch's PR, else the given number). Bounded by a
+    timeout so a stalled `gh` can't hang the run. Returns None on any failure."""
     args = ["gh", "pr", "view"]
     if value:
         args.append(value)
-    args += ["--json", field_name]
-    res = run_sync(args, cwd=cwd, timeout=_GH_VIEW_TIMEOUT)
+    args += ["--json", ",".join(fields)]
+    res = run_sync(args, cwd=cwd, timeout=timeout)
     if res.returncode != 0:
         return None
     try:
-        return json.loads(res.stdout).get(field_name) or None
+        data = json.loads(res.stdout)
     except json.JSONDecodeError:
         return None
+    return data if isinstance(data, dict) else None
+
+
+def _pr_view_field(
+    cwd: Path, value: str | None, field_name: str, timeout: float = _GH_VIEW_TIMEOUT
+) -> str | None:
+    data = _pr_view_fields(cwd, value, [field_name], timeout)
+    found = data.get(field_name) if data else None
+    return found if isinstance(found, str) and found else None
 
 
 def _pr_base(cwd: Path) -> str | None:
     return _pr_view_field(cwd, None, "baseRefName")
 
 
-def _pr_head(cwd: Path, value: str | None) -> str | None:
+def _pr_head(cwd: Path, value: str | None, timeout: float = _GH_VIEW_TIMEOUT) -> str | None:
     """The PR's current head commit SHA (headRefOid)."""
-    return _pr_view_field(cwd, value, "headRefOid")
+    return _pr_view_field(cwd, value, "headRefOid", timeout)
 
 
 def _origin_head(cwd: Path) -> str | None:
@@ -367,6 +385,7 @@ def _result(
     inspect: list[str],
     commits: str = "",
     head_sha: str | None = None,
+    notice: str | None = None,
 ) -> ResolvedScope:
     return ResolvedScope(
         spec=ScopeSpec(type=stype, base=base),
@@ -375,6 +394,7 @@ def _result(
         inspect=inspect,
         commits=commits,
         head_sha=head_sha,
+        notice=notice,
     )
 
 
@@ -421,6 +441,7 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     # outdated, never re-anchored). If a push lands mid-fetch (head moved), leave head_sha None so
     # posting drops to a summary-only comment. This closes the diff/SHA race. When not posting we
     # skip both head reads — a plain `--scope pr` review shouldn't pay for a SHA it won't use.
+    notice = _await_push_and_notice(cwd, value) if capture_head else None
     head_before = _pr_head(cwd, value) if capture_head else None
     args = ["pr", "diff"] + ([value] if value else [])
     diff = _gh(args, cwd)
@@ -432,7 +453,90 @@ def _resolve_pr(cwd: Path, value: str | None, capture_head: bool) -> ResolvedSco
     base = _pr_base(cwd) if not value else None
     # PR diff is fetched over the network; the read-only sandbox blocks re-fetching, so
     # self-collect must read the frozen diff file rather than re-run gh -> no inspect cmd.
-    return _result("pr", base, diff, [], head_sha=head_sha)
+    return _result("pr", base, diff, [], head_sha=head_sha, notice=notice)
+
+
+def _await_push_and_notice(cwd: Path, value: str | None) -> str | None:
+    """If the checked-out branch's PR was just pushed, wait (bounded) for GitHub's headRefOid to
+    catch up with the pushed tip; otherwise the head bracket below reads the old head, then the new
+    one, and the review drops to summary-only — or both reads agree on the old head and pin a stale
+    diff. `git push` updates the remote-tracking ref for the PR's head branch synchronously, so when
+    our push last moved that ref, it's the tip GitHub is converging on. Returns a notice when what's
+    reviewed (the PR as it stands on GitHub) isn't the local branch; None (no wait) otherwise.
+    """
+    match _pr_view_fields(cwd, value, ["number", "headRefName", "headRefOid"]):
+        case {"number": int(number), "headRefName": str(branch), "headRefOid": str(head)}:
+            pass
+        case _:  # gh failed, or returned something unexpected
+            return None
+    if value and not _is_current_branch_pr(cwd, number):
+        return None
+    tracking = _pushed_tip_ref(cwd, branch)
+    if tracking is None:
+        return None
+    # Only a ref our own `git push` last moved is a tip GitHub is converging on. After a fetch
+    # (e.g. `gh pr checkout` of a fork PR whose head branch shares a name with ours) or someone
+    # else's force-push, it says nothing about this PR's head. (No reflog → no wait, as before.)
+    if _git_out(["reflog", "show", tracking, "-1", "--format=%gs"], cwd) != "update by push":
+        return None
+    pushed = _git_out(["rev-parse", tracking], cwd)
+    # ...and it must be our branch's history (a same-named leftover ref we once pushed, after
+    # `gh pr checkout` of an unrelated fork branch, isn't): HEAD is the pushed tip or builds on it.
+    if pushed is None or not _git_ok(["merge-base", "--is-ancestor", pushed, "HEAD"], cwd):
+        return None
+    notices: list[str] = []
+    if head != pushed:
+        # A lagging head is one of our earlier pushes, so the clone has it (also across an amend
+        # or rollback force-push). A head we don't have was pushed elsewhere (a collaborator,
+        # GitHub's "Update branch") and will never become our pushed tip: don't wait for it.
+        if not _git_ok(["cat-file", "-e", f"{head}^{{commit}}"], cwd):
+            notices.append("the PR has commits your local branch doesn't")
+        elif not _await_pr_head(cwd, value, pushed):
+            notices.append(
+                f"GitHub hasn't caught up with your push after {_PUSH_SETTLE_TIMEOUT:.0f}s"
+            )
+    unpushed = _git_out(["rev-list", "--count", f"{tracking}..HEAD"], cwd)
+    if unpushed is not None and int(unpushed) > 0:
+        notices.append(f"local HEAD has {unpushed} commit(s) not pushed to the PR")
+    if not notices:
+        return None
+    notices.append("reviewing the PR as it is on GitHub")
+    return "; ".join(notices)
+
+
+def _pushed_tip_ref(cwd: Path, branch: str) -> str | None:
+    # The remote-tracking ref for the PR's head branch, whatever the local branch tracks (it may
+    # track origin/main after `checkout -b feat origin/main` + `push origin feat`). Exactly one
+    # remote must carry it (e.g. the fork remote, not upstream); otherwise we can't tell which.
+    out = _git_out(["for-each-ref", "--format=%(refname)", f"refs/remotes/*/{branch}"], cwd)
+    refs = out.splitlines() if out else []
+    return refs[0] if len(refs) == 1 else None
+
+
+def _is_current_branch_pr(cwd: Path, number: int) -> bool:
+    # `--scope pr:<n>` may name any PR, including a fork's whose head branch shares our branch's
+    # name; only wait when <n> is the PR gh resolves for the checked-out branch.
+    current = _pr_view_fields(cwd, None, ["number"])
+    return current is not None and current.get("number") == number
+
+
+def _await_pr_head(cwd: Path, value: str | None, target: str) -> bool:
+    deadline = time.monotonic() + _PUSH_SETTLE_TIMEOUT
+    while True:
+        time.sleep(max(0.0, min(_PUSH_SETTLE_INTERVAL, deadline - time.monotonic())))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        # Each read gets only the time left, so a stalled `gh` can't outlast the wait.
+        if _pr_head(cwd, value, timeout=remaining) == target:
+            return True
+
+
+def _git_out(args: list[str], cwd: Path) -> str | None:
+    res = run_sync(["git", *args], cwd=cwd)
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
 
 
 def _parse_commit_refs(value: str | None) -> list[str]:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import pytest
 
 from aeview.bundle import INLINE_MAX_BYTES, build_bundle
@@ -421,3 +424,324 @@ def test_patch_is_always_inline_even_if_large(git_repo):
     big_patch = "+x\n" * 200000  # > 256 KB
     resolved = resolve_scope("patch", "-", git_repo, patch_text=big_patch)
     assert build_bundle(resolved).mode == "inline"
+
+
+# --- pr: waiting for GitHub to catch up with a just-pushed head -------------------------
+
+
+@pytest.fixture
+def pushed_pr(git_repo, tmp_path, monkeypatch):
+    """`feature` checked out, tracking a bare remote it was pushed to, as PR #7 with GitHub faked:
+    headRefOid reports `state["stale"]` (default: the previous push) for `lag` reads, then the
+    pushed tip (`@{upstream}`)."""
+    from aeview import scope
+
+    remote = tmp_path / "remote.git"
+    git(git_repo, "init", "-q", "--bare", str(remote))
+    git(git_repo, "remote", "add", "origin", str(remote))
+    git(git_repo, "checkout", "-q", "-b", "feature")
+    old = commit(git_repo, "f.py", "v = 1\n", "first")
+    local = commit(git_repo, "f.py", "v = 2\n", "second")
+    git(git_repo, "push", "-q", "-u", "origin", "feature")
+
+    state: dict = {"lag": 0, "reads": 0, "stale": old, "number": 7, "current": 7, "gh_ok": True}
+    state["branch"] = "feature"
+
+    def head(cwd, value, timeout=30.0):
+        state["reads"] += 1
+        if state.get("stall"):
+            time.sleep(timeout)  # a stalled gh, bounded by the timeout it was given
+        if state["reads"] <= state["lag"]:
+            return state["stale"]
+        return git(git_repo, "rev-parse", "refs/remotes/origin/feature").strip()
+
+    def fields(cwd, value, names, timeout=30.0):
+        # Like real `gh pr view --json`: only the requested fields come back.
+        if not state["gh_ok"]:
+            return None
+        pr: dict[str, object] = {
+            "number": state["current"]
+            if value is None and names == ["number"]
+            else state["number"],
+            "headRefName": state["branch"],
+            "baseRefName": "main",
+        }
+        if "headRefOid" in names:
+            pr["headRefOid"] = state.get("head_override", head(cwd, value, timeout))
+        return {name: pr[name] for name in names}
+
+    real_await = scope._await_pr_head
+
+    def counting_await(cwd, value, target):
+        state["polled"] = True
+        return real_await(cwd, value, target)
+
+    monkeypatch.setattr(scope, "_pr_head", head)
+    monkeypatch.setattr(scope, "_pr_view_fields", fields)
+    monkeypatch.setattr(scope, "_await_pr_head", counting_await)
+    monkeypatch.setattr(scope, "_PUSH_SETTLE_INTERVAL", 0.01)
+    monkeypatch.setattr(scope, "_PUSH_SETTLE_TIMEOUT", 0.3)
+    return SimpleNamespace(repo=git_repo, old=old, local=local, state=state)
+
+
+def _head(repo) -> str:
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_pr_scope_waits_for_github_to_catch_up_with_the_push(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 3  # GitHub still reports the previous head for a few reads
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local  # pinned to the pushed commit, not summary-only/stale
+    assert r.notice is None
+
+
+def test_pr_scope_already_caught_up_pins_without_polling(pushed_pr, stub_gh):
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+@pytest.mark.parametrize("rewrite", ["amend", "rollback"])
+def test_pr_scope_waits_after_a_force_push(pushed_pr, stub_gh, rewrite):
+    # The stale head isn't an ancestor of the new tip (amend) or is ahead of it (rollback), but our
+    # clone has it either way: it's our own lagging push.
+    if rewrite == "amend":
+        git(pushed_pr.repo, "commit", "-q", "--amend", "-m", "second, amended")
+    else:
+        git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")
+    git(pushed_pr.repo, "push", "-q", "--force", "origin", "feature")
+    pushed_pr.state["stale"] = pushed_pr.local
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == _head(pushed_pr.repo)
+    assert r.notice is None
+
+
+def test_pr_scope_lagging_past_the_wait_says_so(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 10_000  # never catches up within the (shortened) wait
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.old  # consistent with the diff GitHub served
+    assert r.notice is not None
+    assert "hasn't caught up" in r.notice
+
+
+def test_pr_scope_stalled_gh_cannot_outlast_the_wait(pushed_pr, stub_gh, monkeypatch):
+    from aeview import scope
+
+    pushed_pr.state["lag"] = 10_000
+    real_head = scope._pr_head
+    calls = {"n": 0}
+
+    def stall_on_first_poll(cwd, value, timeout=30.0):
+        calls["n"] += 1
+        pushed_pr.state["stall"] = calls["n"] == 1  # this poll stalls for its whole budget
+        return real_head(cwd, value, timeout)
+
+    monkeypatch.setattr(scope, "_pr_head", stall_on_first_poll)
+    started = time.monotonic()
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert time.monotonic() - started < 1.0  # bounded by the 0.3s wait, not gh's 30s timeout
+    assert r.notice is not None
+
+
+def test_pr_scope_unpushed_wip_still_waits_for_the_push(pushed_pr, stub_gh):
+    # Push, then commit more locally: GitHub converges on the pushed tip, not HEAD.
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local  # the pushed tip
+    assert r.notice is not None
+    assert "1 commit(s) not pushed" in r.notice
+
+
+def test_pr_scope_unpushed_commits_warn_without_waiting(pushed_pr, stub_gh):
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is not None
+    assert "1 commit(s) not pushed" in r.notice
+    assert not pushed_pr.state.get("polled")  # GitHub already at the pushed tip
+
+
+def test_pr_scope_local_behind_upstream_neither_waits_nor_warns(pushed_pr, stub_gh):
+    git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")  # upstream (the PR) is ahead of us
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh):
+    # A collaborator's push / GitHub's "Update branch" isn't in our clone and will never become our
+    # upstream: don't wait the full timeout; say what's being reviewed.
+    pushed_pr.state["stale"] = "0" * 40
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is not None
+    assert "the PR has commits your local branch doesn't" in r.notice
+    assert not pushed_pr.state.get("polled")
+    assert r.head_sha == pushed_pr.state["stale"]  # the head GitHub's diff was computed against
+
+
+def test_pr_scope_other_pr_with_a_same_named_branch_skips_the_wait(pushed_pr, stub_gh):
+    # `--scope pr:<n>` for a PR that isn't the checked-out branch's (e.g. a fork's `feature`).
+    pushed_pr.state["number"] = 99
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", "99", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_explicit_number_of_the_current_branch_waits(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 3
+    assert _resolve(pushed_pr.repo, "pr", "7", capture_head=True).head_sha == pushed_pr.local
+
+
+@pytest.mark.parametrize("head", [None, 5])
+def test_pr_scope_malformed_gh_head_skips_the_wait(pushed_pr, stub_gh, head):
+    pushed_pr.state["head_override"] = head
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_tracking_ref_last_moved_by_a_fetch_skips_everything(pushed_pr, stub_gh):
+    # e.g. `gh pr checkout` of a fork PR whose head branch shares a name with an upstream branch,
+    # or someone else's force-push we fetched: that ref isn't our push, so neither wait nor warn.
+    git(
+        pushed_pr.repo,
+        "update-ref",
+        "-m",
+        "fetch: forced-update",
+        "refs/remotes/origin/feature",
+        pushed_pr.old,
+    )
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "local")
+    pushed_pr.state["stale"] = pushed_pr.local
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_unrelated_leftover_tracking_ref_skips_everything(pushed_pr, stub_gh):
+    # `gh pr checkout` of a fork PR whose head branch is also `feature`: our old pushed
+    # origin/feature isn't in this checkout's history, so it isn't the tip GitHub converges on.
+    git(pushed_pr.repo, "checkout", "-q", "--orphan", "fork-feature")
+    git(pushed_pr.repo, "rm", "-rqf", ".")
+    fork_head = commit(pushed_pr.repo, "fork.py", "x = 1\n", "fork work")
+    pushed_pr.state["stale"] = fork_head
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_head_moving_mid_fetch_still_drops_the_pin(pushed_pr, stub_gh, monkeypatch):
+    # The wait converges, but a push lands between the bracket's two reads: the bracket is still
+    # the safety net and must leave head_sha None (summary-only), not trust the settled head.
+    from aeview import scope
+
+    pushed_pr.state["lag"] = 2  # settle read + first poll stale; the poll after that converges
+    real_head = scope._pr_head
+    calls = {"n": 0}
+
+    def moves_during_the_bracket(cwd, value, timeout=30.0):
+        calls["n"] += 1
+        return "f" * 40 if calls["n"] == 3 else real_head(cwd, value, timeout)
+
+    monkeypatch.setattr(scope, "_pr_head", moves_during_the_bracket)
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha is None
+
+
+def test_pr_scope_head_branch_without_a_tracking_ref_skips_the_wait(pushed_pr, stub_gh):
+    pushed_pr.state["branch"] = "never-fetched"
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_branch_tracking_another_ref_still_waits_on_the_pr_branch(pushed_pr, stub_gh):
+    # `checkout -b feat origin/main` + `push origin feat`: the local branch tracks origin/main, but
+    # the push still updated origin/feature — that's the tip to wait for, and nothing is unpushed.
+    git(pushed_pr.repo, "push", "-q", "origin", "main")
+    git(pushed_pr.repo, "branch", "--set-upstream-to=origin/main")
+    pushed_pr.state["lag"] = 3
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.head_sha == pushed_pr.local
+    assert r.notice is None
+
+
+def test_pr_scope_never_caught_up_with_unpushed_wip_reports_both(pushed_pr, stub_gh):
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "unpushed")
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice == (
+        "GitHub hasn't caught up with your push after 0s; "
+        "local HEAD has 1 commit(s) not pushed to the PR; "
+        "reviewing the PR as it is on GitHub"
+    )
+
+
+def test_pushed_tip_ref_finds_the_one_remote_carrying_the_branch(git_repo):
+    from aeview import scope
+
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "update-ref", "refs/remotes/fork/fix/thing", head)
+    git(git_repo, "update-ref", "refs/remotes/upstream/main", head)
+    assert scope._pushed_tip_ref(git_repo, "fix/thing") == "refs/remotes/fork/fix/thing"
+    assert scope._pushed_tip_ref(git_repo, "thing") is None  # no partial-segment match
+    git(git_repo, "update-ref", "refs/remotes/origin/fix/thing", head)
+    assert scope._pushed_tip_ref(git_repo, "fix/thing") is None  # ambiguous: two remotes
+
+
+def test_pr_scope_gh_view_failure_skips_the_wait(pushed_pr, stub_gh):
+    pushed_pr.state["gh_ok"] = False
+    assert _resolve(pushed_pr.repo, "pr", capture_head=True).notice is None
+
+
+def test_pr_scope_without_capture_never_waits(pushed_pr, stub_gh):
+    pushed_pr.state["lag"] = 10_000
+    _resolve(pushed_pr.repo, "pr")
+    assert pushed_pr.state["reads"] == 0
+
+
+def test_pr_head_forwards_its_timeout_to_gh(monkeypatch, tmp_path):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    seen: list[float | None] = []
+
+    def fake_run_sync(args, cwd=None, timeout=None):
+        seen.append(timeout)
+        return ProcResult(0, '{"headRefOid": "abc"}', "")
+
+    monkeypatch.setattr(scope, "run_sync", fake_run_sync)
+    assert scope._pr_head(tmp_path, None, timeout=1.5) == "abc"
+    assert seen == [1.5]
+
+
+def test_pr_view_fields_requests_and_parses_every_field(monkeypatch, tmp_path):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    seen: list[list[str]] = []
+
+    def fake_run_sync(args, cwd=None, timeout=None):
+        seen.append(args)
+        return ProcResult(0, '{"number": 7, "headRefOid": "abc"}', "")
+
+    monkeypatch.setattr(scope, "run_sync", fake_run_sync)
+    data = scope._pr_view_fields(tmp_path, "7", ["number", "headRefOid"])
+    assert data == {"number": 7, "headRefOid": "abc"}
+    assert seen == [["gh", "pr", "view", "7", "--json", "number,headRefOid"]]
+
+
+@pytest.mark.parametrize("stdout", ["[]", '{"headRefOid": 5}', "not json"])
+def test_pr_head_rejects_malformed_gh_output(monkeypatch, tmp_path, stdout):
+    from aeview import scope
+    from aeview.process import ProcResult
+
+    monkeypatch.setattr(scope, "run_sync", lambda *a, **k: ProcResult(0, stdout, ""))
+    assert scope._pr_head(tmp_path, None) is None
