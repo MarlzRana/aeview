@@ -69,8 +69,8 @@ _UNBOUNDED_TIMEOUT = 365 * 24 * 60 * 60
 # Process-wide single-flight for the runtime download: every copilot review/dedup waits on the same
 # future. A threading.Lock + concurrent Future (not asyncio primitives) because reviews run on
 # separate event loops; a failed future is replaced on the next call so retries download afresh.
-# Deliberately uncapped: the SDK bounds the download itself (urlopen timeouts × retries), and it
-# only installs the bundle at the very end, so abandoning a slow download would never cache it.
+# Deliberately uncapped: the SDK only installs the bundle at the very end, so abandoning a slow
+# download would never cache it. Its socket timeouts bound a stalled connection, not a slow one.
 _runtime_lock = threading.Lock()
 _runtime_ready: concurrent.futures.Future[None] | None = None
 
@@ -421,9 +421,9 @@ def _resolve_via_sdk_rule(path: str) -> str | None:
 async def _ensure_runtime() -> None:
     download = _runtime_future()
     try:
-        # shield: one waiter being cancelled (Ctrl-C, teardown) must not disturb the siblings'
-        # download (CancelledError is a BaseException, so it propagates past the handler below).
-        await asyncio.shield(asyncio.wrap_future(download))
+        # A cancelled waiter (Ctrl-C, teardown) can't cancel the shared download: it is already
+        # RUNNING (see _runtime_future). CancelledError propagates past the handler below.
+        await asyncio.wrap_future(download)
     except Exception as exc:  # noqa: BLE001 - normalize every provisioning failure to AdapterError
         # Network failures are worth a retry: the SDK wraps most as "Failed to download ...", but
         # a stalled read, connection reset or SSL error can escape its wrap bare. Anything else
@@ -438,7 +438,7 @@ def _runtime_future() -> concurrent.futures.Future[None]:
     with _runtime_lock:
         if _runtime_ready is None or (_runtime_ready.done() and _runtime_ready.exception()):
             future: concurrent.futures.Future[None] = concurrent.futures.Future()
-            future.set_running_or_notify_cancel()  # running: a waiter's cancel can't cancel it
+            future.set_running_or_notify_cancel()  # RUNNING futures ignore cancel()
 
             def _provision() -> None:
                 try:

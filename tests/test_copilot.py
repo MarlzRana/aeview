@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import json
 import logging
+import ssl
 import sys
 import threading
 import time
@@ -1538,7 +1539,11 @@ async def test_provisioning_thread_start_failure_is_transient(copilot_sdk, tmp_p
 
 @pytest.mark.parametrize(
     "exc",
-    [TimeoutError("The read operation timed out"), ConnectionResetError("reset by peer")],
+    [
+        TimeoutError("The read operation timed out"),
+        ConnectionResetError("reset by peer"),
+        ssl.SSLError("record layer failure"),
+    ],
     ids=type,
 )
 async def test_unwrapped_network_error_is_a_transient_download_failure(copilot_sdk, tmp_path, exc):
