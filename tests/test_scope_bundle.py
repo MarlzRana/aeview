@@ -456,21 +456,29 @@ def pushed_pr(git_repo, tmp_path, monkeypatch):
         return git(git_repo, "rev-parse", "refs/remotes/origin/feature").strip()
 
     def fields(cwd, value, names, timeout=30.0):
+        # Like real `gh pr view --json`: only the requested fields come back.
         if not state["gh_ok"]:
             return None
-        if names == ["number"]:  # the checked-out branch's PR
-            return {"number": state["current"]}
-        data: dict[str, object] = {
-            "number": state["number"],
+        pr: dict[str, object] = {
+            "number": state["current"]
+            if value is None and names == ["number"]
+            else state["number"],
             "headRefName": state["branch"],
             "baseRefName": "main",
         }
         if "headRefOid" in names:
-            data["headRefOid"] = head(cwd, value, timeout)
-        return data
+            pr["headRefOid"] = state.get("head_override", head(cwd, value, timeout))
+        return {name: pr[name] for name in names}
+
+    real_await = scope._await_pr_head
+
+    def counting_await(cwd, value, target):
+        state["polled"] = True
+        return real_await(cwd, value, target)
 
     monkeypatch.setattr(scope, "_pr_head", head)
     monkeypatch.setattr(scope, "_pr_view_fields", fields)
+    monkeypatch.setattr(scope, "_await_pr_head", counting_await)
     monkeypatch.setattr(scope, "_PUSH_SETTLE_INTERVAL", 0.01)
     monkeypatch.setattr(scope, "_PUSH_SETTLE_TIMEOUT", 0.3)
     return SimpleNamespace(repo=git_repo, old=old, local=local, state=state)
@@ -491,7 +499,7 @@ def test_pr_scope_already_caught_up_pins_without_polling(pushed_pr, stub_gh):
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.head_sha == pushed_pr.local
     assert r.notice is None
-    assert pushed_pr.state["reads"] == 3  # settle read + the two bracket reads
+    assert not pushed_pr.state.get("polled")
 
 
 @pytest.mark.parametrize("rewrite", ["amend", "rollback"])
@@ -552,14 +560,14 @@ def test_pr_scope_unpushed_commits_warn_without_waiting(pushed_pr, stub_gh):
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is not None
     assert "1 commit(s) not pushed" in r.notice
-    assert pushed_pr.state["reads"] == 3  # GitHub already at the pushed tip: no polling
+    assert not pushed_pr.state.get("polled")  # GitHub already at the pushed tip
 
 
 def test_pr_scope_local_behind_upstream_neither_waits_nor_warns(pushed_pr, stub_gh):
     git(pushed_pr.repo, "reset", "-q", "--hard", "HEAD~1")  # upstream (the PR) is ahead of us
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
-    assert pushed_pr.state["reads"] == 3
+    assert not pushed_pr.state.get("polled")
 
 
 def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh):
@@ -570,7 +578,7 @@ def test_pr_scope_head_pushed_elsewhere_skips_the_wait(pushed_pr, stub_gh):
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is not None
     assert "the PR has commits your local branch doesn't" in r.notice
-    assert pushed_pr.state["reads"] == 3
+    assert not pushed_pr.state.get("polled")
     assert r.head_sha == pushed_pr.state["stale"]  # the head GitHub's diff was computed against
 
 
@@ -580,7 +588,7 @@ def test_pr_scope_other_pr_with_a_same_named_branch_skips_the_wait(pushed_pr, st
     pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", "99", capture_head=True)
     assert r.notice is None
-    assert pushed_pr.state["reads"] == 3
+    assert not pushed_pr.state.get("polled")
 
 
 def test_pr_scope_explicit_number_of_the_current_branch_waits(pushed_pr, stub_gh):
@@ -588,12 +596,39 @@ def test_pr_scope_explicit_number_of_the_current_branch_waits(pushed_pr, stub_gh
     assert _resolve(pushed_pr.repo, "pr", "7", capture_head=True).head_sha == pushed_pr.local
 
 
+@pytest.mark.parametrize("head", [None, 5])
+def test_pr_scope_malformed_gh_head_skips_the_wait(pushed_pr, stub_gh, head):
+    pushed_pr.state["head_override"] = head
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
+def test_pr_scope_tracking_ref_last_moved_by_a_fetch_skips_everything(pushed_pr, stub_gh):
+    # e.g. `gh pr checkout` of a fork PR whose head branch shares a name with an upstream branch,
+    # or someone else's force-push we fetched: that ref isn't our push, so neither wait nor warn.
+    git(
+        pushed_pr.repo,
+        "update-ref",
+        "-m",
+        "fetch: forced-update",
+        "refs/remotes/origin/feature",
+        pushed_pr.old,
+    )
+    commit(pushed_pr.repo, "f.py", "v = 3\n", "local")
+    pushed_pr.state["stale"] = pushed_pr.local
+    pushed_pr.state["lag"] = 10_000
+    r = _resolve(pushed_pr.repo, "pr", capture_head=True)
+    assert r.notice is None
+    assert not pushed_pr.state.get("polled")
+
+
 def test_pr_scope_head_branch_without_a_tracking_ref_skips_the_wait(pushed_pr, stub_gh):
     pushed_pr.state["branch"] = "never-fetched"
     pushed_pr.state["lag"] = 10_000
     r = _resolve(pushed_pr.repo, "pr", capture_head=True)
     assert r.notice is None
-    assert pushed_pr.state["reads"] == 3
+    assert not pushed_pr.state.get("polled")
 
 
 def test_pr_scope_branch_tracking_another_ref_still_waits_on_the_pr_branch(pushed_pr, stub_gh):

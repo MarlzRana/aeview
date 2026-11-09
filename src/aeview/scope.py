@@ -460,9 +460,9 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     """If the checked-out branch's PR was just pushed, wait (bounded) for GitHub's headRefOid to
     catch up with the pushed tip; otherwise the head bracket below reads the old head, then the new
     one, and the review drops to summary-only — or both reads agree on the old head and pin a stale
-    diff. `git push` updates the remote-tracking ref for the PR's head branch synchronously, so that
-    ref is the tip GitHub is converging on. Returns a notice when what's reviewed (the PR as it
-    stands on GitHub) isn't the local branch; None (no wait) for another PR or an untracked head.
+    diff. `git push` updates the remote-tracking ref for the PR's head branch synchronously, so when
+    our push last moved that ref, it's the tip GitHub is converging on. Returns a notice when what's
+    reviewed (the PR as it stands on GitHub) isn't the local branch; None (no wait) otherwise.
     """
     pr = _pr_view_fields(cwd, value, ["number", "headRefName", "headRefOid"])
     if pr is None:
@@ -473,8 +473,15 @@ def _settle_pushed_head(cwd: Path, value: str | None) -> str | None:
     if not isinstance(head, str) or not isinstance(branch, str):
         return None
     tracking = _pushed_tip_ref(cwd, branch)
-    pushed = _git_out(["rev-parse", tracking], cwd) if tracking else None
-    if tracking is None or pushed is None:
+    if tracking is None:
+        return None
+    # Only a ref our own `git push` last moved is a tip GitHub is converging on. After a fetch
+    # (e.g. `gh pr checkout` of a fork PR whose head branch shares a name with ours) or someone
+    # else's force-push, it says nothing about this PR's head. (No reflog → no wait, as before.)
+    if _git_out(["reflog", "show", tracking, "-1", "--format=%gs"], cwd) != "update by push":
+        return None
+    pushed = _git_out(["rev-parse", tracking], cwd)
+    if pushed is None:
         return None
     notices: list[str] = []
     if head != pushed:
