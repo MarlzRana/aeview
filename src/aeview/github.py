@@ -39,6 +39,9 @@ from .process import ProcResult, run_sync
 from .report import report_verdict_label
 from .schema import Location, MergedFinding, PrTarget, Report, ReviewResult, RosterEntry
 
+# Each roster entry with its review result (None = not started), for the reviewers table.
+type RosterStatus = Sequence[tuple[RosterEntry, ReviewResult | None]]
+
 # Visible badge so a human reading the PR can tell aeview spoke (the comment is authored by the
 # gh-authenticated user, not a distinct bot account); the hidden marker is the machine signal.
 _BADGE = "🤖 **aeview** (automated review panel)"
@@ -292,8 +295,7 @@ def _review_body(
     report: Report,
     run_id: str,
     listed: list[MergedFinding],
-    roster: Sequence[RosterEntry],
-    reviews: Mapping[str, ReviewResult] | None,
+    roster: RosterStatus,
     *,
     note: str | None = None,
 ) -> str:
@@ -309,7 +311,7 @@ def _review_body(
     if cov.failed:
         parts.append(f"Coverage: {cov.contributed} review(s) contributed, {cov.failed} failed.")
     if roster:
-        parts.append("#### Reviewers\n\n" + _roster_table(roster, reviews or {}, live=False))
+        parts.append("#### Reviewers\n\n" + _roster_table(roster, live=False))
     if note:
         parts.append(note)
     if listed:
@@ -325,8 +327,7 @@ def build_review(
     diff: str,
     head_sha: str | None,
     *,
-    roster: Sequence[RosterEntry] = (),
-    reviews: Mapping[str, ReviewResult] | None = None,
+    roster: RosterStatus = (),
 ) -> BuiltReview:
     """Compose the create-review payload: a summary body + one inline comment per anchor group.
     Findings whose line isn't in the diff are listed in the body instead (never dropped).
@@ -365,7 +366,7 @@ def build_review(
     ]
     payload: dict[str, object] = {
         "event": "COMMENT",
-        "body": _review_body(report, run_id, unanchored, roster, reviews, note=note),
+        "body": _review_body(report, run_id, unanchored, roster, note=note),
     }
     # Same `is None` test as the anchoring branch above, so the two decisions can't drift: a known
     # head means we both anchored inline and pin commit_id; None means neither.
@@ -416,13 +417,12 @@ def post_review(
     head_sha: str | None,
     cwd: Path,
     *,
-    roster: Sequence[RosterEntry] = (),
-    reviews: Mapping[str, ReviewResult] | None = None,
+    roster: RosterStatus = (),
 ) -> PostResult:
     """Post the merged report as one PR review. `head_sha` is the commit the reviewed diff was taken
     against — comments anchor to it. On API rejection, fall back to a single top-level comment with
     every finding so nothing is lost. Raises GitHubError only if both posts fail."""
-    built = build_review(report, run_id, diff, head_sha, roster=roster, reviews=reviews)
+    built = build_review(report, run_id, diff, head_sha, roster=roster)
     res = _gh_api(
         "POST",
         f"repos/{target.owner}/{target.repo}/pulls/{target.number}/reviews",
@@ -451,7 +451,7 @@ def post_review(
         "_aeview could not attach inline comments to the diff "
         f"({reason}); all findings are listed below._"
     )
-    body = _review_body(report, run_id, report.findings, roster, reviews, note=note)
+    body = _review_body(report, run_id, report.findings, roster, note=note)
     cres = _gh_api(
         "POST",
         f"repos/{target.owner}/{target.repo}/issues/{target.number}/comments",
@@ -518,15 +518,20 @@ def _status_cell(r: ReviewResult | None, *, live: bool) -> str:
     return f"✅ done · {n} finding{'' if n == 1 else 's'}"
 
 
-def _roster_table(
-    roster: Sequence[RosterEntry], reviews: Mapping[str, ReviewResult], *, live: bool
-) -> str:
+def roster_status(
+    roster: Sequence[RosterEntry], reviews: Mapping[str, ReviewResult]
+) -> RosterStatus:
+    """Pair each roster entry with its review result (None = not started yet)."""
+    return [(e, reviews.get(e.id)) for e in roster]
+
+
+def _roster_table(roster: RosterStatus, *, live: bool) -> str:
     rows = ["| Reviewer | Harness | Model | Status |", "|---|---|---|---|"]
-    for e in roster:
+    for e, result in roster:
         model = f"{e.model} ({e.thinking})" if e.thinking else e.model
         rows.append(
             f"| {_cell(e.reviewer)} | {_cell(e.harness)} | {_cell(model)} "
-            f"| {_status_cell(reviews.get(e.id), live=live)} |"
+            f"| {_status_cell(result, live=live)} |"
         )
     return "\n".join(rows)
 
@@ -545,7 +550,7 @@ def render_progress(
     )
     filled = round(_BAR_WIDTH * finished / total) if total else _BAR_WIDTH
     bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
-    table = _roster_table(roster, reviews, live=phase in ("reviewing", "merging"))
+    table = _roster_table(roster_status(roster, reviews), live=phase in ("reviewing", "merging"))
     if phase == "interrupted" and note is None:
         note = f"Resume with `aeview resume {run_id}`."
     meta = [f"run `{run_id}`"]

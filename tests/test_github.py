@@ -20,6 +20,7 @@ from aeview.github import (
     post_review,
     render_progress,
     resolve_pr_target,
+    roster_status,
 )
 from aeview.schema import (
     Coverage,
@@ -642,7 +643,11 @@ def test_review_summary_shows_the_reviewers_table_with_final_statuses():
         _ROSTER[1].id: _review(_ROSTER[1], "failed"),
     }
     built = build_review(
-        _report([_finding(line=2)], failed=1), "run1", _DIFF, "sha", roster=_ROSTER, reviews=reviews
+        _report([_finding(line=2)], failed=1),
+        "run1",
+        _DIFF,
+        "sha",
+        roster=roster_status(_ROSTER, reviews),
     )
     body = _payload(built)["body"]
     assert "#### Reviewers" in body
@@ -655,7 +660,7 @@ def test_review_summary_shows_the_reviewers_table_with_final_statuses():
 def test_review_summary_marks_a_still_running_review_interrupted():
     reviews = {_ROSTER[0].id: _review(_ROSTER[0], "running")}
     body = _payload(
-        build_review(_report([]), "run1", _DIFF, "sha", roster=_ROSTER, reviews=reviews)
+        build_review(_report([]), "run1", _DIFF, "sha", roster=roster_status(_ROSTER, reviews))
     )["body"]
     assert "| a | claude-code | opus | ⚠️ interrupted |" in body
     assert "| b | codex | gpt (high) | ⏸️ pending |" in body  # never started
@@ -678,8 +683,7 @@ def test_fallback_comment_also_shows_the_reviewers_table(tmp_path, stub_gh, monk
         _DIFF,
         "sha9",
         tmp_path,
-        roster=_ROSTER,
-        reviews=reviews,
+        roster=roster_status(_ROSTER, reviews),
     )
     body = json.loads(cap.read_text())["body"]
     assert "could not attach inline comments" in body

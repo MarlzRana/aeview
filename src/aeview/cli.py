@@ -36,6 +36,7 @@ from .github import (
     open_progress,
     post_review,
     resolve_pr_target,
+    roster_status,
 )
 from .ignore import filter_resolved
 from .merge import merge_reviews
@@ -420,8 +421,7 @@ def _finish_pr_post(
                 diff,
                 pr.head_sha,
                 cwd,
-                roster=manifest.roster,
-                reviews={r.id: r for r in store.read_reviews()},
+                roster=roster_status(manifest.roster, {r.id: r for r in store.read_reviews()}),
             )
         except GitHubError as exc:
             typer.echo(f"aeview: review completed but posting to the PR failed: {exc}", err=True)

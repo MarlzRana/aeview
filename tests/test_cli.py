@@ -627,6 +627,38 @@ def test_post_comments_skips_post_when_no_reviews_contributed(
     assert not cap.exists()  # nothing was posted to GitHub
 
 
+def test_posted_review_table_shows_each_reviews_final_status(
+    aeview_home, git_repo, stub_claude, stub_gh, monkeypatch, tmp_path
+):
+    # A mixed run: one instance contributes, the other fails — the posted table says which.
+    from aeview.harness import claude_code
+
+    real_query = claude_code.query
+
+    async def query(*, prompt, options, transport=None):
+        if options.model == "broken":
+            raise RuntimeError("model unavailable")
+        async for message in real_query(prompt=prompt, options=options, transport=transport):
+            yield message
+
+    monkeypatch.setattr(claude_code, "query", query)
+    make_reviewer(
+        git_repo,
+        "mix",
+        harnesses=[
+            {"harness": "claude-code", "model": "opus"},
+            {"harness": "claude-code", "model": "broken"},
+        ],
+    )
+    cap = tmp_path / "review.json"
+    monkeypatch.setenv("AEVIEW_GH_CAPTURE", str(cap))
+    monkeypatch.chdir(git_repo)
+    CliRunner().invoke(app, ["run", "--scope", "pr", "--reviewers", "mix", "--post-comments"])
+    body = json.loads(cap.read_text())["body"]
+    assert "| mix | claude-code | opus | ✅ done · 1 finding |" in body
+    assert "| mix | claude-code | broken | ❌ failed |" in body
+
+
 def _gh_calls(log: Path) -> list[tuple[str, str]]:
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     return [(c["method"], c["endpoint"]) for c in calls]
