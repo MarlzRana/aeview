@@ -90,9 +90,9 @@ class Retention(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
     # Validated once at the settings.json boundary so prune never clamps. keepLast and ttlDays
-    # are independent prune triggers, not guaranteed minimums: a run is pruned if it's outside
-    # the newest keepLast OR older than ttlDays (see prune_runs). ttlDays >= 1 (0 would expire
-    # every terminal run); keepLast 0 disables the count trigger.
+    # must both be exceeded: a run is pruned only if it's outside the newest keepLast AND older
+    # than ttlDays (see prune_runs), so keepLast is a guaranteed floor. ttlDays >= 1 (0 would
+    # expire every run beyond the floor); keepLast 0 removes the floor, leaving ttlDays alone.
     keep_last: int = Field(default=20, ge=0)
     ttl_days: int = Field(default=14, ge=1)
 
