@@ -113,7 +113,7 @@ class CopilotAdapter:
         # the first turn with a clear "not supported for model" error. "default" leaves it unset.
         effort = None if thinking in (None, "", "default") else thinking
         base_prompt = embed_schema(prompt, schema)
-        if self._configured_binary() is None:
+        if self._copilot_bin is None:
             # Outside the review timeout: the SDK downloads its runtime with blocking I/O inside
             # CopilotClient(), which asyncio.timeout can't interrupt, and once per caller.
             await _ensure_runtime()
@@ -218,7 +218,13 @@ class CopilotAdapter:
             async with asyncio.timeout(timeout):
                 # Construct inside the try so a "Copilot CLI not found" RuntimeError (raised in
                 # CopilotClient.__init__) is normalized to AdapterError like any other failure.
-                client = CopilotClient(working_directory=cwd, connection=connection)
+                # A parent Copilot session can export its own incompatible CLI. Filter the child
+                # environment without changing os.environ while other reviews run concurrently.
+                client = CopilotClient(
+                    working_directory=cwd,
+                    connection=connection,
+                    env={k: v for k, v in os.environ.items() if k != "COPILOT_CLI_PATH"},
+                )
                 await client.start()
                 # Minimal session by design: read-only is enforced SOLELY by on_permission_request
                 # (deny-by-default, approve only kind="read"). Every mutating/exec/network action
@@ -287,10 +293,9 @@ class CopilotAdapter:
             writer.close()
 
     def preflight(self) -> Preflight:
-        # Predict the SDK's resolution ORDER: aeview override (our connection.path) →
-        # COPILOT_CLI_PATH → its pinned downloaded runtime. Copilot has no no-cost auth probe, so
-        # the best outcome is warn. Doctor never triggers the (large) runtime download itself.
-        configured = self._configured_binary()
+        # Only aeview's explicit override bypasses the pinned runtime. Doctor never triggers the
+        # (large) runtime download itself, and Copilot has no no-cost auth probe.
+        configured = self._copilot_bin
         if configured:
             binary = _resolve_via_sdk_rule(configured)
             if binary is None:
@@ -300,11 +305,6 @@ class CopilotAdapter:
             return _runtime_preflight()
         except Exception as exc:  # noqa: BLE001 - SDK drift / unreadable cache: degrade, don't crash
             return Preflight("warn", f"copilot runtime check failed ({exc}); can't verify")
-
-    def _configured_binary(self) -> str | None:
-        # The SDK's resolution order before its own downloaded runtime: our override (passed as
-        # connection.path), then COPILOT_CLI_PATH. None → the SDK uses (may download) its runtime.
-        return self._copilot_bin or os.environ.get("COPILOT_CLI_PATH") or None
 
     def _build_connection(self) -> RuntimeConnection | None:
         # No override → SDK resolves its pinned runtime. With an override, resolve it the
@@ -384,7 +384,9 @@ def _runtime_preflight() -> Preflight:
     from copilot._cli_version import CLI_VERSION, get_runtime_platform
 
     if not CLI_VERSION:
-        return Preflight("fail", "copilot SDK pins no runtime version; set COPILOT_CLI_PATH")
+        return Preflight(
+            "fail", "copilot SDK pins no runtime version; set overrideHarnessBinaries.copilot"
+        )
     try:
         pair_dir = get_cache_dir(CLI_VERSION) / "prebuilds" / get_runtime_platform()
     except RuntimeError as exc:  # unsupported platform: the run path raises the same
