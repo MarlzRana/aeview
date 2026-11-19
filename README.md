@@ -320,6 +320,9 @@ Claude / Codex / Copilot run a **pinned binary**, so aeview is insulated from yo
 upgrades (Copilot's SDK downloads its pinned runtime into a local cache on first use). `pi` uses
 whatever `pi` (and `srt`) are on PATH. To point a harness at a different
 binary, set [`overrideHarnessBinaries`](#configuration).
+A parent Copilot session can export `COPILOT_CLI_PATH` for its own CLI, which may use a different SDK
+protocol version. aeview ignores this variable so reviews use the SDK-matched runtime instead.
+Use `overrideHarnessBinaries.copilot` for an explicit binary override.
 
 ## Deduplication
 

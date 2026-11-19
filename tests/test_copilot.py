@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import json
 import logging
+import os
 import ssl
 import sys
 import threading
@@ -379,6 +380,7 @@ async def test_binary_override_threads_to_stdio_connection(copilot_sdk, tmp_path
     # settings.overrideHarnessBinaries["copilot"] reaches RuntimeConnection.for_stdio(path=...).
     # An absolute path which can't resolve is passed verbatim (so the SDK fails loud).
     monkeypatch.setattr(copilot, "which", lambda b: None)
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/parent/copilot")
     recorded: dict = {}
 
     def fake_for_stdio(*, path=None, args=()):
@@ -389,6 +391,7 @@ async def test_binary_override_threads_to_stdio_connection(copilot_sdk, tmp_path
     await copilot.CopilotAdapter("/custom/copilot").run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert recorded["path"] == "/custom/copilot"
     assert copilot_sdk.captured["client_kwargs"]["connection"] == "CONN-SENTINEL"
+    assert "COPILOT_CLI_PATH" not in copilot_sdk.captured["client_kwargs"]["env"]
 
 
 async def test_bare_name_override_resolves_via_which(copilot_sdk, tmp_path, monkeypatch):
@@ -408,6 +411,34 @@ async def test_bare_name_override_resolves_via_which(copilot_sdk, tmp_path, monk
 async def test_no_override_uses_pinned_runtime(copilot_sdk, tmp_path):
     await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # None → pinned runtime
+
+
+@pytest.mark.parametrize("binary_override", [None, "/custom/copilot"])
+async def test_inherited_copilot_cli_path_does_not_change_runtime(
+    copilot_sdk, tmp_path, monkeypatch, binary_override
+):
+    from copilot import CopilotClient
+
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/parent/copilot")
+    monkeypatch.setenv("AEVIEW_TEST_KEEP", "keep")
+
+    out = await copilot.CopilotAdapter(binary_override).run(
+        "p", "gpt-5.4", tmp_path, tmp_path / "log"
+    )
+
+    assert out.review.verdict == "approve"
+    assert copilot_sdk.captured["provisions"] == (1 if binary_override is None else 0)
+    kwargs = copilot_sdk.captured["client_kwargs"]
+    if binary_override is None:
+        assert kwargs["connection"] is None
+    assert "COPILOT_CLI_PATH" not in kwargs["env"]
+    assert kwargs["env"]["AEVIEW_TEST_KEEP"] == "keep"
+    assert os.environ["COPILOT_CLI_PATH"] == "/parent/copilot"
+
+    client = CopilotClient(**kwargs)
+    assert getattr(client._connection, "path", None) == (
+        binary_override or "/cache/copilot-runtime"
+    )
 
 
 def test_empty_override_is_treated_as_unset():
@@ -530,9 +561,8 @@ async def test_thread_start_failure_is_transient_adapter_error(copilot_sdk, tmp_
             raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(copilot.threading, "Thread", _BoomThread)
-    monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")  # skip provisioning: reach _run_isolated
     with pytest.raises(AdapterError, match="^copilot worker thread failed to start") as ei:
-        await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+        await copilot.CopilotAdapter("/opt/copilot").run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert ei.value.transient is True
 
 
@@ -999,7 +1029,7 @@ def test_sdk_call_kwargs_match_the_real_sdk():
     from copilot import CopilotClient, CopilotSession, RuntimeConnection
 
     init = inspect.signature(CopilotClient.__init__).parameters
-    for kw in ("working_directory", "connection"):
+    for kw in ("working_directory", "connection", "env"):
         assert kw in init, f"CopilotClient.__init__ no longer accepts {kw}"
     create = inspect.signature(CopilotClient.create_session).parameters
     for kw in ("model", "reasoning_effort", "on_permission_request", "working_directory"):
@@ -1107,7 +1137,10 @@ def test_preflight_unpinned_runtime_version_fails(monkeypatch, tmp_path):
     # An SDK without a pinned runtime (dev/editable install) can't download one → fail.
     _runtime_cache(monkeypatch, tmp_path)
     monkeypatch.setattr(_cli_version, "CLI_VERSION", None)
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "fail"
+    assert "overrideHarnessBinaries.copilot" in pf.detail
+    assert "COPILOT_CLI_PATH" not in pf.detail
 
 
 def test_preflight_unsupported_platform_fails_instead_of_crashing(monkeypatch, tmp_path):
@@ -1219,21 +1252,17 @@ async def test_none_input_tokens_counted_as_zero(copilot_sdk, tmp_path):
     assert out.usage.output_tokens == 9
 
 
-def test_preflight_honors_copilot_cli_path(monkeypatch, tmp_path):
-    # No aeview override: the SDK resolves COPILOT_CLI_PATH before its runtime, so preflight must
-    # too (else doctor would FAIL a run that would succeed). A valid env path → warn (resolved).
-    binp = tmp_path / "copilot"
-    binp.write_text("#!/bin/sh\n")
-    binp.chmod(0o755)  # an executable file resolves; preflight predicts the spawn outcome
-    monkeypatch.setenv("COPILOT_CLI_PATH", str(binp))
+@pytest.mark.parametrize("cached", [False, True])
+def test_preflight_ignores_inherited_copilot_cli_path(monkeypatch, tmp_path, cached):
+    wrapper = _runtime_cache(monkeypatch, tmp_path, files=complete_bundle() if cached else ())
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/parent/copilot")
+    monkeypatch.setattr(copilot, "which", lambda b: "/parent/copilot")
     pf = copilot.CopilotAdapter().preflight()
     assert pf.status == "warn"
-    assert str(binp) in pf.detail
-
-
-def test_preflight_copilot_cli_path_missing_file_fails(monkeypatch):
-    monkeypatch.setenv("COPILOT_CLI_PATH", "/nonexistent/copilot")
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+    if cached:
+        assert str(wrapper) in pf.detail
+    else:
+        assert "not cached yet" in pf.detail
 
 
 def test_preflight_no_override_does_not_fall_back_to_path(monkeypatch, tmp_path):
@@ -1266,7 +1295,7 @@ def test_sdk_logger_is_silenced():
     assert any(isinstance(h, logging.NullHandler) for h in logging.getLogger("copilot").handlers)
 
 
-# --- dogfood r2: real permission-kind pin, COPILOT_CLI_PATH which-resolution, teardown hang ---
+# --- dogfood r2: real permission-kind pin, override which-resolution, teardown hang ---
 
 
 def test_permission_request_kinds_match_the_real_sdk():
@@ -1300,15 +1329,11 @@ def _call_permission(kind: str):
     return copilot._deny_by_default_permission(request, {"session_id": "s1"})
 
 
-def test_preflight_copilot_cli_path_bare_command_on_path_resolves(monkeypatch):
-    # COPILOT_CLI_PATH may be a bare command name; the SDK does `os.path.exists(p) or which(p)` at
-    # spawn, so a command on PATH resolves. preflight must mirror that (else doctor would FAIL a run
-    # that would start) — an existence-only check would wrongly reject the bare command.
-    monkeypatch.setenv("COPILOT_CLI_PATH", "copilotcmd")  # a bare name, not an existing path
+def test_preflight_bare_command_override_on_path_resolves(monkeypatch):
     monkeypatch.setattr(
         copilot, "which", lambda b: "/usr/bin/copilotcmd" if b == "copilotcmd" else None
     )
-    pf = copilot.CopilotAdapter().preflight()
+    pf = copilot.CopilotAdapter("copilotcmd").preflight()
     assert pf.status == "warn"
     assert "/usr/bin/copilotcmd" in pf.detail
 
@@ -1330,14 +1355,13 @@ async def test_unsubscribe_runs_after_the_turn(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["unsubscribed"] == 1
 
 
-def test_preflight_existing_non_executable_path_fails(monkeypatch, tmp_path):
-    # An existing-but-non-executable COPILOT_CLI_PATH (e.g. a 0644 file) resolves for the SDK but
+def test_preflight_existing_non_executable_override_fails(monkeypatch, tmp_path):
+    # An existing-but-non-executable override (e.g. a 0644 file) resolves for the SDK but
     # fails at Popen, so preflight must predict the spawn failure (NOT report warn/ready).
     nonexec = tmp_path / "copilot"
     nonexec.write_text("not executable\n")  # exists, but no +x bit
-    monkeypatch.setenv("COPILOT_CLI_PATH", str(nonexec))
     monkeypatch.setattr(copilot, "which", lambda b: None)  # and not resolvable on PATH either
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+    assert copilot.CopilotAdapter(str(nonexec)).preflight().status == "fail"
 
 
 # --- dogfood r4: setup-failure normalization, force_stop robustness, same-session, cost ----
@@ -1374,14 +1398,13 @@ async def test_raising_force_stop_does_not_break_the_result(copilot_sdk, tmp_pat
     assert copilot_sdk.captured["force_stopped"] == 1
 
 
-def test_preflight_executable_directory_path_fails(monkeypatch, tmp_path):
+def test_preflight_executable_directory_override_fails(monkeypatch, tmp_path):
     # _resolve_via_sdk_rule requires an executable FILE; an executable DIRECTORY (isfile False)
     # resolves for the SDK but fails at Popen, so doctor must reject it (not report ready).
     d = tmp_path / "copilotdir"
     d.mkdir()  # a directory (the executable bit is set, but it is not a file)
-    monkeypatch.setenv("COPILOT_CLI_PATH", str(d))
     monkeypatch.setattr(copilot, "which", lambda b: None)
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+    assert copilot.CopilotAdapter(str(d)).preflight().status == "fail"
 
 
 async def test_retry_reuses_the_same_session(copilot_sdk, tmp_path):
@@ -1453,11 +1476,12 @@ async def test_provisioned_runtime_is_reused_by_later_calls(copilot_sdk, tmp_pat
     assert copilot_sdk.captured["provisions"] == 1
 
 
-async def test_override_or_copilot_cli_path_skips_provisioning(copilot_sdk, tmp_path, monkeypatch):
+async def test_override_skips_provisioning_with_inherited_cli_path(
+    copilot_sdk, tmp_path, monkeypatch
+):
     monkeypatch.setattr(copilot, "which", lambda b: b)
-    await copilot.CopilotAdapter("/opt/copilot").run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     monkeypatch.setenv("COPILOT_CLI_PATH", "/env/copilot")
-    await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    await copilot.CopilotAdapter("/opt/copilot").run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert copilot_sdk.captured["provisions"] == 0
 
 
