@@ -391,6 +391,7 @@ async def test_binary_override_threads_to_stdio_connection(copilot_sdk, tmp_path
     await copilot.CopilotAdapter("/custom/copilot").run("p", "gpt-5.4", tmp_path, tmp_path / "log")
     assert recorded["path"] == "/custom/copilot"
     assert copilot_sdk.captured["client_kwargs"]["connection"] == "CONN-SENTINEL"
+    assert "COPILOT_CLI_PATH" not in copilot_sdk.captured["client_kwargs"]["env"]
 
 
 async def test_bare_name_override_resolves_via_which(copilot_sdk, tmp_path, monkeypatch):
@@ -1123,7 +1124,10 @@ def test_preflight_unpinned_runtime_version_fails(monkeypatch, tmp_path):
     # An SDK without a pinned runtime (dev/editable install) can't download one → fail.
     _runtime_cache(monkeypatch, tmp_path)
     monkeypatch.setattr(_cli_version, "CLI_VERSION", None)
-    assert copilot.CopilotAdapter().preflight().status == "fail"
+    pf = copilot.CopilotAdapter().preflight()
+    assert pf.status == "fail"
+    assert "overrideHarnessBinaries.copilot" in pf.detail
+    assert "COPILOT_CLI_PATH" not in pf.detail
 
 
 def test_preflight_unsupported_platform_fails_instead_of_crashing(monkeypatch, tmp_path):
