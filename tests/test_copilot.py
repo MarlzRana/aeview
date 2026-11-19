@@ -413,24 +413,32 @@ async def test_no_override_uses_pinned_runtime(copilot_sdk, tmp_path):
     assert copilot_sdk.captured["client_kwargs"]["connection"] is None  # None → pinned runtime
 
 
-async def test_inherited_copilot_cli_path_uses_pinned_runtime(copilot_sdk, tmp_path, monkeypatch):
+@pytest.mark.parametrize("binary_override", [None, "/custom/copilot"])
+async def test_inherited_copilot_cli_path_does_not_change_runtime(
+    copilot_sdk, tmp_path, monkeypatch, binary_override
+):
     from copilot import CopilotClient
 
     monkeypatch.setenv("COPILOT_CLI_PATH", "/parent/copilot")
     monkeypatch.setenv("AEVIEW_TEST_KEEP", "keep")
 
-    out = await copilot.CopilotAdapter().run("p", "gpt-5.4", tmp_path, tmp_path / "log")
+    out = await copilot.CopilotAdapter(binary_override).run(
+        "p", "gpt-5.4", tmp_path, tmp_path / "log"
+    )
 
     assert out.review.verdict == "approve"
-    assert copilot_sdk.captured["provisions"] == 1
+    assert copilot_sdk.captured["provisions"] == (1 if binary_override is None else 0)
     kwargs = copilot_sdk.captured["client_kwargs"]
-    assert kwargs["connection"] is None
+    if binary_override is None:
+        assert kwargs["connection"] is None
     assert "COPILOT_CLI_PATH" not in kwargs["env"]
     assert kwargs["env"]["AEVIEW_TEST_KEEP"] == "keep"
     assert os.environ["COPILOT_CLI_PATH"] == "/parent/copilot"
 
     client = CopilotClient(**kwargs)
-    assert getattr(client._connection, "path", None) == "/cache/copilot-runtime"
+    assert getattr(client._connection, "path", None) == (
+        binary_override or "/cache/copilot-runtime"
+    )
 
 
 def test_empty_override_is_treated_as_unset():
