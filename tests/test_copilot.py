@@ -414,6 +414,8 @@ async def test_no_override_uses_pinned_runtime(copilot_sdk, tmp_path):
 
 
 async def test_inherited_copilot_cli_path_uses_pinned_runtime(copilot_sdk, tmp_path, monkeypatch):
+    from copilot import CopilotClient
+
     monkeypatch.setenv("COPILOT_CLI_PATH", "/parent/copilot")
     monkeypatch.setenv("AEVIEW_TEST_KEEP", "keep")
 
@@ -426,6 +428,9 @@ async def test_inherited_copilot_cli_path_uses_pinned_runtime(copilot_sdk, tmp_p
     assert "COPILOT_CLI_PATH" not in kwargs["env"]
     assert kwargs["env"]["AEVIEW_TEST_KEEP"] == "keep"
     assert os.environ["COPILOT_CLI_PATH"] == "/parent/copilot"
+
+    client = CopilotClient(**kwargs)
+    assert getattr(client._connection, "path", None) == "/cache/copilot-runtime"
 
 
 def test_empty_override_is_treated_as_unset():
